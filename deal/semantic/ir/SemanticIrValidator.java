@@ -114,7 +114,8 @@ public final class SemanticIrValidator {
     /** The R-POLICY-KIND rule: a failure policy not allowed for its selector/kind. */
     public static final String R_POLICY_KIND = "R-POLICY-KIND";
 
-    /** The R-BOUNDARY-TRIPLE rule: a boundary triple outside the closed boundary-assignment table. */
+    /** The R-BOUNDARY-TRIPLE rule: a boundary triple outside the closed boundary-assignment table
+     *  (including a body-local creation-op return cell that violates its closed conditions). */
     public static final String R_BOUNDARY_TRIPLE = "R-BOUNDARY-TRIPLE";
 
     /** The R-ELIDED-PLACEMENT rule: ELIDED_BY_ADAPTER outside an adapter-over-async task. */
@@ -1478,12 +1479,209 @@ public final class SemanticIrValidator {
             case STDLIB_CALL -> stdlibCell(boundary);
             case EXTERNAL_ENTRY -> entryCell(unit, invocation, boundary);
             case CLASS_NEW -> classNewCell(unit, invocation, boundary);
+            case CLOSURE_NEW, RECURSIVE_GROUP_INIT ->
+                bodyLocalReturnCell(unit, invocation, boundary, closure);
             case CLASS_FACTORY, INTRINSIC_CALL ->
                 Optional.of("a boundary parented to " + invocationKind.name()
                     + " is outside the closed table (zero boundary children)");
             default -> Optional.of("a boundary parented to " + invocationKind.name()
                 + " is outside the closed table");
         };
+    }
+
+    /**
+     * The body-local return cell of the closed boundary-assignment table
+     * (ISSUE-0635; design sources
+     * {@code project-lowering-entry-and-registration-seeds} D9 and the
+     * body-invocation identity contract, and
+     * {@code semantic-ir-construct-coverage-cutover} K12's lowering side):
+     * a body with no statically materialized invocation names its
+     * function-value creation op ({@code CLOSURE_NEW} or
+     * {@code RECURSIVE_GROUP_INIT}) as its {@code RETURN}'s enclosing
+     * invocation, because the creation op took over the body's reserved
+     * invocation identity. The cell admits exactly one
+     * {@code FUNCTION_RETURN} boundary per body:
+     *
+     * <ol>
+     *   <li>the boundary is parented to the body's {@code RETURN} and
+     *       equals that {@code RETURN}'s {@code returnBoundaryOpId};</li>
+     *   <li>the creation-op match holds: a {@code CLOSURE_NEW} identity
+     *       allocates the returning function; a
+     *       {@code RECURSIVE_GROUP_INIT} identity publishes it as a
+     *       member;</li>
+     *   <li>the body has no assigned invocation shape: no statically
+     *       materialized invocation op of the closure names the boundary
+     *       as its return boundary (a dynamic call's recorded cells are
+     *       not a statically materialized invocation, so a body reached
+     *       only through its value keeps the cell);</li>
+     *   <li>it is the body's single return boundary: every {@code RETURN}
+     *       of the same function names it;</li>
+     *   <li>the boundary is {@code FUNCTION_RETURN} under the
+     *       descriptor-kind rule on the allocated function's declared
+     *       return descriptor ({@code CLOSURE_NEW} carries the signature;
+     *       the group publication carries no per-member signature, so the
+     *       group arm pins the descriptor-kind rule and the member
+     *       identity).</li>
+     * </ol>
+     *
+     * @param unit      the boundary's unit; non-null
+     * @param creation  the creation op the {@code RETURN} names; non-null
+     * @param boundary  the boundary op under check; non-null
+     * @param closure   the project closure units by module path; non-null
+     * @return empty on a matching cell, otherwise a failure description
+     */
+    private static Optional<String> bodyLocalReturnCell(RawUnit unit, RawOp creation,
+                                                        RawOp boundary,
+                                                        Map<String, RawUnit> closure) {
+        RawOp parent = resolveParent(boundary, unit, closure);
+        if (parent == null
+                || enumByName(SemanticOpKind.class, parent.kind()) != SemanticOpKind.RETURN) {
+            return Optional.of("the body-local return boundary must be parented to the "
+                + "body's RETURN");
+        }
+        OpId returnBoundary = parseOptionalOpId(parent.payload(), "returnBoundaryOpId");
+        if (returnBoundary == null || !boundary.opId().equals(returnBoundary)) {
+            return Optional.of("the body-local boundary must be the RETURN's "
+                + "returnBoundaryOpId");
+        }
+        FunctionId function = parseFunctionId(parent.payload(), "function");
+        if (function == null) {
+            return Optional.empty(); // R-ENUM owns a malformed function position.
+        }
+        SemanticOpKind creationKind = enumByName(SemanticOpKind.class, creation.kind());
+        if (creationKind == SemanticOpKind.CLOSURE_NEW) {
+            FunctionId allocated = parseFunctionId(creation.payload(), "function");
+            if (allocated == null) {
+                return Optional.empty();
+            }
+            if (!allocated.equals(function)) {
+                return Optional.of("the body-local identity must be the CLOSURE_NEW of the "
+                    + "returning function (the creation op allocates another body)");
+            }
+        } else if (!groupFunctionIds(creation).contains(function)) {
+            return Optional.of("the body-local identity must be the RECURSIVE_GROUP_INIT "
+                + "publishing the returning function (the group names another member "
+                + "set)");
+        }
+        for (RawUnit owner : unitsOf(unit, closure)) {
+            for (RawOp candidate : owner.ops()) {
+                if (staticallyMaterializes(candidate, boundary.opId())) {
+                    return Optional.of("a body-local identity on a body with an assigned "
+                        + "invocation shape (the statically materialized invocation op "
+                        + "must carry the reserved identity)");
+                }
+            }
+        }
+        for (RawOp candidate : unit.ops()) {
+            if (enumByName(SemanticOpKind.class, candidate.kind()) != SemanticOpKind.RETURN) {
+                continue;
+            }
+            FunctionId returned = parseFunctionId(candidate.payload(), "function");
+            if (returned == null || !returned.equals(function)) {
+                continue;
+            }
+            OpId candidateBoundary = parseOptionalOpId(candidate.payload(),
+                "returnBoundaryOpId");
+            if (!boundary.opId().equals(candidateBoundary)) {
+                return Optional.of("the body's single return boundary (two return "
+                    + "boundaries for one body)");
+            }
+        }
+        FailurePolicyId policy = enumByName(FailurePolicyId.class, boundary.failurePolicy());
+        RuntimeDescriptor descriptor = parseDescriptorQuiet(
+            optionalString(boundary.payload(), "descriptor"));
+        if (policy == null || descriptor == null) {
+            return Optional.empty(); // R-ENUM/R-POLICY-KIND own those positions.
+        }
+        if (!isKind(boundary, BoundaryKind.FUNCTION_RETURN)) {
+            return Optional.of("the body-local return boundary must be FUNCTION_RETURN");
+        }
+        if (!matchesDescriptorKind(descriptor, policy)) {
+            return Optional.of("the body-local FUNCTION_RETURN boundary must check the "
+                + "allocated function's declared return descriptor under the "
+                + "descriptor-kind rule");
+        }
+        RuntimeDescriptor.Func signature = parseFuncQuiet(optionalString(creation.payload(),
+            "signature"));
+        if (signature != null && !signature.returnType().equals(descriptor)) {
+            return Optional.of("the body-local FUNCTION_RETURN boundary must check the "
+                + "allocated function's declared return descriptor");
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Whether one op is a statically materialized invocation of a body
+     * whose return boundary is the given boundary op id — the witness of
+     * an assigned invocation shape (a {@code CALL}/{@code ASYNC_START} of
+     * a non-dynamic callee, a {@code CALLBACK_INVOKE}, or an
+     * {@code EXTERNAL_ENTRY}). A dynamic callee's recorded return cells
+     * are not a statically materialized invocation.
+     */
+    private static boolean staticallyMaterializes(RawOp op, OpId boundaryOpId) {
+        SemanticOpKind kind = enumByName(SemanticOpKind.class, op.kind());
+        if (kind == null) {
+            return false;
+        }
+        return switch (kind) {
+            case CALL, ASYNC_START -> !isDynamicCallee(op)
+                && boundaryOpId.equals(parseOptionalOpId(op.payload(),
+                    "returnBoundaryOpId"));
+            case CALLBACK_INVOKE, EXTERNAL_ENTRY -> boundaryOpId.equals(
+                parseOptionalOpId(op.payload(), "returnBoundaryOpId"));
+            default -> false;
+        };
+    }
+
+    /** The unit and its closure units (one iterable set of op owners). */
+    private static List<RawUnit> unitsOf(RawUnit unit, Map<String, RawUnit> closure) {
+        List<RawUnit> units = new ArrayList<>();
+        units.add(unit);
+        if (closure != null) {
+            for (Map.Entry<String, RawUnit> entry : closure.entrySet()) {
+                if (entry.getValue() != null
+                        && !entry.getKey().equals(unit.modulePath())) {
+                    units.add(entry.getValue());
+                }
+            }
+        }
+        return units;
+    }
+
+    /** Parses a payload's function-id position ({@code null} when absent/malformed). */
+    private static FunctionId parseFunctionId(CanonicalJson.Obj payload, String key) {
+        CanonicalJson.Value value = payloadValue(payload, key);
+        if (!(value instanceof CanonicalJson.Obj idObj)) {
+            return null;
+        }
+        return parseFunctionIdObject(idObj);
+    }
+
+    /** Parses one function semantic-id object ({@code null} when malformed). */
+    private static FunctionId parseFunctionIdObject(CanonicalJson.Obj idObj) {
+        CanonicalJson.Value id = payloadValue(idObj, "id");
+        if (!(id instanceof CanonicalJson.Int number)) {
+            return null;
+        }
+        return new FunctionId(number.value());
+    }
+
+    /** The member function ids of a {@code RECURSIVE_GROUP_INIT} payload. */
+    private static List<FunctionId> groupFunctionIds(RawOp group) {
+        CanonicalJson.Value value = payloadValue(group.payload(), "functions");
+        if (!(value instanceof CanonicalJson.Arr functions)) {
+            return List.of();
+        }
+        List<FunctionId> ids = new ArrayList<>();
+        for (CanonicalJson.Value item : functions.items()) {
+            if (item instanceof CanonicalJson.Obj obj) {
+                FunctionId id = parseFunctionIdObject(obj);
+                if (id != null) {
+                    ids.add(id);
+                }
+            }
+        }
+        return ids;
     }
 
     private static Optional<String> callCell(RawUnit unit, RawOp call, RawOp boundary,

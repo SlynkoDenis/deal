@@ -1806,6 +1806,11 @@ public final class SemanticLowerer {
             lowerer.hoistModuleLevelAllocs(module.ast().statements());
             lowerer.statementWalk.walk(module.ast().statements(), true);
             lowerer.emitEntryMainCall();
+            // The walk's invocation-identity finalization materializes a
+            // never-called body's reserved identity with its creation op
+            // (ISSUE-0635), so the entry delegates main and every other
+            // body's RETURN identity resolves in the unit.
+            lowerer.finalizeInvocationIdentities();
             lowerer.finalizeCellKinds();
         } catch (ConstructUnlowered unlowered) {
             return new LoweringResult(null, null,
@@ -1899,6 +1904,11 @@ public final class SemanticLowerer {
             lowerer.hoistModuleLevelAllocs(module.ast().statements());
             lowerer.statementWalk.walk(module.ast().statements(), true);
             lowerer.emitE7Terminals();
+            // The walk's invocation-identity finalization materializes a
+            // never-called body's reserved identity with its creation op
+            // (ISSUE-0635), after the terminals have materialized every
+            // exported body's identity.
+            lowerer.finalizeInvocationIdentities();
             lowerer.finalizeCellKinds();
         } catch (ConstructUnlowered unlowered) {
             return new FullProgramE7Result(new LoweringResult(null, null,
@@ -7215,13 +7225,38 @@ public final class SemanticLowerer {
                             parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
                     }
                     checkerScopeNodes.push(member.body());
-                    lowerBindingStatements(member.body().statements(), false);
-                    checkerScopeNodes.pop();
-                    blockStack.pop();
-                    popBindingFrame();
-                    checkerScopeNodes.pop();
-                    if (reservedContext != null) {
-                        functionStack.pop();
+                    boolean bodyComplete = false;
+                    try {
+                        // The session's statement walk owns the member-body
+                        // arms: the binding walk outside the project session,
+                        // the unified full-program walk inside it (the
+                        // project walk lowers every body the same way, so a
+                        // member body carries its RETURN and its single
+                        // return boundary like any other body; ISSUE-0635).
+                        statementWalk.walk(member.body().statements(), false);
+                        bodyComplete = true;
+                    } finally {
+                        if (reservedContext != null) {
+                            if (bodyComplete
+                                    && !Boolean.TRUE.equals(
+                                        blockTerminated.get(bodyBlock))) {
+                                // The implicit trailing return of an
+                                // unterminated null-returning member body.
+                                if (!(reservedContext.signature.returnType()
+                                        instanceof RuntimeDescriptor.Null)) {
+                                    throw new ConstructUnlowered("group member '"
+                                        + member.name() + "' body is not terminated"
+                                        + " and its return type is not null");
+                                }
+                                lowerImplicitReturn(reservedContext,
+                                    member.body().span());
+                            }
+                            functionStack.pop();
+                        }
+                        checkerScopeNodes.pop();
+                        blockStack.pop();
+                        popBindingFrame();
+                        checkerScopeNodes.pop();
                     }
                 } finally {
                     captureCollectors.pop();
@@ -11099,9 +11134,11 @@ public final class SemanticLowerer {
          * The E7 unit terminal: one {@code EXTERNAL_ENTRY} or
          * {@code CALLBACK_INVOKE} op per exported function (from the
          * checked export facts) plus the {@code ENTRY_INVOKE}
-         * delegation of {@code main}: null. Non-exported declared
-         * functions must be called from source (their RETURN ops name an
-         * existing invocation).
+         * delegation of {@code main}: null. A non-exported declared
+         * function keeps its reserved invocation identity until the
+         * walk's finalization materializes it with the body's
+         * function-value creation op when no source call site took it
+         * over (ISSUE-0635; the never-called guard is deleted).
          */
         private void emitE7Terminals() {
             for (Map.Entry<String, FunctionContext> entry
@@ -11138,82 +11175,168 @@ public final class SemanticLowerer {
          *
          * <ul>
          *   <li>every lowered body's reserved invocation identity is
-         *       materialized by at least one emitted op of the unit — an
+         *       materialized by exactly one emitted op of the unit — an
          *       exported function's hoisted shape op, an
          *       entry/callback op, or the first source call site that took
          *       over the reserved call-site identity (the landed
          *       discipline);</li>
-         *   <li>the identity is materialized exactly once: two emitted ops
-         *       carrying one body's identity is a producer defect (a body's
-         *       identity names exactly one invocation op);</li>
-         *   <li>a recursive-group member's reserved identity is materialized
-         *       by its group's single {@code RECURSIVE_GROUP_INIT}
-         *       publication (the group arm's member bodies carry no
-         *       {@code RETURN} — the group walk's member-body shape is the
-         *       value-reference body).</li>
+         *   <li>when no statically materialized invocation took over, the
+         *       body's function-value creation op materializes the
+         *       identity: the body's {@code CLOSURE_NEW} is re-keyed to
+         *       the reserved identity (the same op under the reserved op
+         *       id, so the body's {@code RETURN} — which already names the
+         *       reserved id — names it), or the body's group's single
+         *       {@code RECURSIVE_GROUP_INIT} publication is the member's
+         *       creation op, so the member's {@code RETURN} ops name its
+         *       op id (the group arm issues exactly one op per SCC).</li>
          * </ul>
          *
-         * <p>A body with neither a statically materialized invocation nor a
-         * group publication is a producer defect of this walk: the body's
-         * {@code RETURN} names the reserved identity, and an identity that
-         * resolves to no op would leave the produced unit rejected by the
-         * closed gate. It is reported here as {@code CONSTRUCT_UNLOWERED} so
-         * the failure names the body, never a dangling identity. The
-         * creation-op takeover of a body with no static invocation (the
-         * body-invocation identity child's D9/K12 arm) replaces this arm
-         * when it lands; no second walk and no synthetic op exist.</p>
+         * <p>A body with neither a statically materialized invocation nor
+         * a function-value creation op is a producer defect of this walk:
+         * the body's {@code RETURN} would name an identity that resolves
+         * to no op and the closed gate would reject the produced unit. It
+         * is reported here as {@code CONSTRUCT_UNLOWERED} so the failure
+         * names the body, never a dangling identity. No second walk, no
+         * synthetic invocation op, and no payload change exist.</p>
+         *
+         * <p>The body set is the session's complete function-context index
+         * ({@link #contextsByFunctionId}): every module-level declaration
+         * and every function expression carries exactly one reserved
+         * identity, and both the walk and the terminals have already run,
+         * so the set of a body's statically materialized invocations is
+         * final.</p>
          */
         private void finalizeInvocationIdentities() {
             Map<OpId, Integer> occurrences = new LinkedHashMap<>();
             for (SemanticOp op : ops) {
                 occurrences.merge(op.opId(), 1, Integer::sum);
             }
-            for (Map.Entry<String, FunctionContext> entry
-                    : moduleFunctionContexts.entrySet()) {
-                String name = entry.getKey();
-                FunctionContext context = entry.getValue();
+            for (FunctionContext context : contextsByFunctionId.values()) {
                 OpId identity = context.invocationOpId();
                 int count = occurrences.getOrDefault(identity, 0);
                 if (count == 1) {
                     continue;
                 }
-                // A recursive-group member's pre-assigned allocation identity
-                // is published by its group's single RECURSIVE_GROUP_INIT op
-                // (the group arm's member bodies carry no RETURN: the group
-                // walk's member-body shape is the value-reference body, so
-                // the member's reserved identity is referenced by no op and
-                // its materialization is the group publication). The group
-                // arm issues exactly one op per SCC, so the member's identity
-                // is materialized exactly once; the creation-op takeover for
-                // a member body that carries a RETURN is the body-invocation
-                // identity child's extension of this step.
-                if (groupsNaming(context.functionId) == 1) {
-                    continue;
+                if (count > 1) {
+                    throw new ConstructUnlowered("function id "
+                        + context.functionId.id() + " carries " + count
+                        + " emitted ops under its reserved invocation identity "
+                        + identity + " (a body's identity names exactly one"
+                        + " invocation op)");
                 }
-                throw new ConstructUnlowered("declared function '" + name
-                    + "' is never called (every non-exported declared function's"
-                    + " single return boundary names an existing invocation: the"
-                    + " reserved invocation identity " + identity + " is"
-                    + " materialized by " + count + " emitted op(s))");
+                OpId materialized = materializeCreationIdentity(context, occurrences);
+                if (occurrences.getOrDefault(materialized, 0) != 1) {
+                    throw new ConstructUnlowered("function id "
+                        + context.functionId.id() + " carries no emitted op under"
+                        + " its materialized invocation identity " + materialized
+                        + " (producer defect)");
+                }
             }
         }
 
         /**
-         * The number of emitted {@code RECURSIVE_GROUP_INIT} ops naming the
-         * given function as a member (exactly one for a group member, zero
-         * for every other body).
+         * The creation-op takeover of one body whose reserved invocation
+         * identity no statically materialized invocation took over
+         * (ISSUE-0635; design source
+         * {@code project-lowering-entry-and-registration-seeds} D9 and the
+         * body-invocation identity contract, and
+         * {@code semantic-ir-construct-coverage-cutover} K12's lowering
+         * side):
+         *
+         * <ul>
+         *   <li>a {@code CLOSURE_NEW} whose {@code function} equals the
+         *       body's function id is re-keyed to the reserved identity
+         *       (the block-membership table follows the emitted op set), so
+         *       the creation op materializes the identity the body's
+         *       {@code RETURN} already names;</li>
+         *   <li>a {@code RECURSIVE_GROUP_INIT} whose publication includes
+         *       the body's function id is the member's creation op: the
+         *       member's {@code RETURN} ops are re-keyed from the reserved
+         *       id to the group op id (one group op publishes every member,
+         *       so the publication — not a per-member reserved id — is the
+         *       member's materialized identity).</li>
+         * </ul>
+         *
+         * @param context     the body's function context; non-null
+         * @param occurrences the emitted op-id occurrences, updated by the
+         *                    CLOSURE_NEW re-key; non-null
+         * @return the op id materializing the body's invocation identity
+         * @throws ConstructUnlowered when the body carries no function-value
+         *         creation op (a producer defect)
          */
-        private int groupsNaming(FunctionId functionId) {
-            int count = 0;
-            for (SemanticOp op : ops) {
+        private OpId materializeCreationIdentity(FunctionContext context,
+                                                 Map<OpId, Integer> occurrences) {
+            for (int i = 0; i < ops.size(); i++) {
+                SemanticOp op = ops.get(i);
+                if (op.kind() == SemanticOpKind.CLOSURE_NEW
+                        && op.payload() instanceof KindPayload.ClosureNewPayload closure
+                        && closure.function().equals(context.functionId)) {
+                    OpId reserved = context.callSiteOpId;
+                    if (!reserved.equals(op.opId())) {
+                        ops.set(i, buildOp(reserved, op.kind(), op.payload(), op.result(),
+                            op.resultType(), op.operands(), op.operandTypes(),
+                            op.failurePolicy(), op.origin()));
+                        renameBlockMembership(op.opId(), reserved);
+                        occurrences.remove(op.opId());
+                        occurrences.merge(reserved, 1, Integer::sum);
+                    }
+                    return reserved;
+                }
                 if (op.kind() == SemanticOpKind.RECURSIVE_GROUP_INIT
                         && op.payload()
                             instanceof KindPayload.RecursiveGroupInitPayload group
-                        && group.functions().contains(functionId)) {
-                    count++;
+                        && group.functions().contains(context.functionId)) {
+                    for (int j = 0; j < ops.size(); j++) {
+                        SemanticOp candidate = ops.get(j);
+                        if (candidate.kind() != SemanticOpKind.RETURN
+                                || !(candidate.payload()
+                                    instanceof KindPayload.ReturnPayload returned)
+                                || !returned.function().equals(context.functionId)
+                                || !returned.enclosingInvocationOpId()
+                                    .equals(context.callSiteOpId)) {
+                            continue;
+                        }
+                        KindPayload.ReturnPayload rewritten =
+                            new KindPayload.ReturnPayload(returned.value(),
+                                returned.function(), op.opId(),
+                                returned.returnBoundaryOpId());
+                        ops.set(j, buildOp(candidate.opId(), candidate.kind(), rewritten,
+                            candidate.result(), candidate.resultType(),
+                            candidate.operands(), candidate.operandTypes(),
+                            candidate.failurePolicy(), candidate.origin()));
+                    }
+                    return op.opId();
                 }
             }
-            return count;
+            throw new ConstructUnlowered("function id " + context.functionId.id()
+                + " is never called and carries no function-value creation op of its"
+                + " own (the CLOSURE_NEW of its function id or the"
+                + " RECURSIVE_GROUP_INIT publishing it); a lowered body always"
+                + " carries exactly one (producer defect)");
+        }
+
+        /**
+         * Re-keys one emitted op's block membership from its old op id to
+         * the new one (the creation-op takeover): the block's ordered op
+         * list and the inverse membership map stay exactly the table of the
+         * emitted op set ({@code ControlFlowValidator}'s table contract).
+         *
+         * @param from the emitted op's original op id; non-null
+         * @param to   the op id the same op carries afterwards; non-null
+         */
+        private void renameBlockMembership(OpId from, OpId to) {
+            for (Map.Entry<BlockId, List<OpId>> entry : blockOps.entrySet()) {
+                List<OpId> ids = entry.getValue();
+                for (int i = 0; i < ids.size(); i++) {
+                    if (ids.get(i).equals(from)) {
+                        ids.set(i, to);
+                    }
+                }
+            }
+            BlockId block = opBlocks.remove(from);
+            if (block != null) {
+                opBlocks.put(to, block);
+            }
         }
 
         /**
@@ -11385,17 +11508,6 @@ public final class SemanticLowerer {
                     + "CALL site per callee — the entry delegation is main's call site)");
             }
             main.callSiteUsed = true;
-            for (Map.Entry<String, FunctionContext> entry
-                    : moduleFunctionContexts.entrySet()) {
-                if (!entry.getValue().callSiteUsed) {
-                    throw new ConstructUnlowered("declared function '" + entry.getKey()
-                        + "' is never called (the decomposition-tail carrier slice "
-                        + "admits exactly the called functions of a seed program — "
-                        + "every declared function's single return boundary names an "
-                        + "existing CALL; uncalled declarations are outside the "
-                        + "slice)");
-                }
-            }
             ValueId result = ids.nextValueId(module, nextOrdinal++, 0);
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(programSpan),
@@ -12029,12 +12141,15 @@ public final class SemanticLowerer {
                     // The E7 closure reservation: RETURNs inside the
                     // closure body lower against a per-closure-site
                     // context whose reserved return boundary/call-site
-                    // identities the CALL(INDIRECT) resolves.
+                    // identities the CALL(INDIRECT) resolves. The body's
+                    // invocation shape is assigned by its first statically
+                    // materialized invocation; a closure never invoked from
+                    // source keeps the reserved identity for the
+                    // creation-op takeover of the walk's finalization
+                    // (ISSUE-0635).
                     reservedClosureContext = new FunctionContext(functionId, bodyBlock,
                         signature, ids.nextOpId(module, nextOrdinal++, 0),
                         ids.nextOpId(module, nextOrdinal++, 0));
-                    reservedClosureContext.assignShape(InvocationShape.SOURCE_CALL,
-                        reservedClosureContext.callSiteOpId);
                     contextsByFunctionId.put(functionId, reservedClosureContext);
                     functionStack.push(reservedClosureContext);
                 }

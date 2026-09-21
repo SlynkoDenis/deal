@@ -273,4 +273,18 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # in-project imported-class contract; semantic-ir-construct-coverage-
   # cutover K3).
   'fg|=== Running Project Lowering Entry Tests (ISSUE-0634) ===|java -ea -cp build deal.test.ProjectLoweringTest'
+  # ISSUE-0635 registration: the body-invocation identity takeover and
+  # the never-called guard removal
+  # (project-lowering-entry-and-registration-seeds D9 and the
+  # body-invocation identity contract;
+  # luajit-jvm-single-lowering-production-cutover C10;
+  # semantic-ir-construct-coverage-cutover K12's lowering side): the three
+  # statically-uninvoked body shapes lower through the project entry with
+  # zero CONSTRUCT_UNLOWERED, each body's RETURN identity resolves to
+  # exactly one emitted op, each body carries exactly one body-local
+  # FUNCTION_RETURN cell, the carrier-slice entry (whose
+  # uncalled-declaration guard is deleted) lowers a never-called
+  # declaration to a validating unit through its own frontend chain, and
+  # the two producer-defect negatives fail R-BOUNDARY-TRIPLE.
+  'fg|=== Running Body-Invocation Identity Tests (ISSUE-0635) ===|java -ea -cp build deal.test.BodyInvocationIdentityTest'
 )
