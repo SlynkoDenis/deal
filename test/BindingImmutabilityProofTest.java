@@ -689,19 +689,29 @@ public class BindingImmutabilityProofTest {
 
         // The registry half: complete and key-unique functionBindings —
         // one registration per producing allocation (2 group members + 1
-        // closure h = 3).
-        check(unit.functionBindings().size() == 3,
+        // closure h = 3) plus the two producer-less intrinsic seed
+        // registrations (ISSUE-0632).
+        check(unit.functionBindings().size() == 5,
             "the functionBindings map is complete: 2 group members + h's closure = 3 "
-                + "registrations; got " + unit.functionBindings().size());
+                + "registrations plus the two intrinsic seeds; got "
+                + unit.functionBindings().size());
         List<FunctionAllocationIdentity> keys =
             new ArrayList<>(unit.functionBindings().keySet());
         check(new LinkedHashSet<>(keys).size() == keys.size(),
             "the functionBindings keys are unique; got " + keys);
+        int intrinsicSeeds = 0;
         for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
                 : unit.functionBindings().entrySet()) {
+            if (entry.getValue() instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                intrinsicSeeds++;
+                continue;
+            }
             check(entry.getValue() instanceof FunctionExecutionBinding.LoweredBody,
-                "every registration is a LoweredBody binding (key " + entry.getKey() + ")");
+                "every non-seed registration is a LoweredBody binding (key "
+                    + entry.getKey() + ")");
         }
+        check(intrinsicSeeds == 2, "the two producer-less intrinsic seeds are the only "
+            + "non-LoweredBody registrations (ISSUE-0632); got " + intrinsicSeeds);
         // Every group member's pre-assigned identity is a key (the
         // registry child's one LoweredBody per member).
         if (result.groups().size() == 1) {

@@ -1634,12 +1634,14 @@ public class BindingsIntegrationVerificationTest {
         check(ofKind(ops, SemanticOpKind.CLOSURE_NEW).size() == 4,
             "the corpus produces four CLOSURE_NEW ops (inner, wide, main, the "
                 + "function expression)");
-        check(unit.functionBindings().size() == 9,
-            "the unit's registry holds exactly nine bindings (4 LoweredBody + 5 "
-                + "AdapterBinding); got " + unit.functionBindings().size());
+        check(unit.functionBindings().size() == 11,
+            "the unit's registry holds exactly eleven bindings (4 LoweredBody + 5 "
+                + "AdapterBinding + the two producer-less intrinsic seeds, "
+                + "ISSUE-0632); got " + unit.functionBindings().size());
         Set<Long> keys = new java.util.HashSet<>();
         int loweredBodies = 0;
         int adapterBindings = 0;
+        int intrinsicSeeds = 0;
         for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
                 : unit.functionBindings().entrySet()) {
             check(keys.add(entry.getKey().id()),
@@ -1650,10 +1652,14 @@ public class BindingsIntegrationVerificationTest {
             if (entry.getValue() instanceof FunctionExecutionBinding.AdapterBinding) {
                 adapterBindings++;
             }
+            if (entry.getValue() instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                intrinsicSeeds++;
+            }
         }
-        check(loweredBodies == 4 && adapterBindings == 5,
-            "the registry holds 4 LoweredBody and 5 AdapterBinding registrations; got "
-                + loweredBodies + "/" + adapterBindings);
+        check(loweredBodies == 4 && adapterBindings == 5 && intrinsicSeeds == 2,
+            "the registry holds 4 LoweredBody, 5 AdapterBinding, and 2 IntrinsicFunction "
+                + "registrations; got " + loweredBodies + "/" + adapterBindings + "/"
+                + intrinsicSeeds);
 
         // Every CLOSURE_NEW result resolves to exactly one LoweredBody;
         // every FUNCTION_ADAPT result resolves to exactly one
@@ -1679,8 +1685,25 @@ public class BindingsIntegrationVerificationTest {
                 "FUNCTION_ADAPT " + adapter.opId() + " registers exactly one "
                     + "AdapterBinding keyed by its allocation identity");
         }
-        // No orphan entries: every key is a producing op's result identity.
+        // No orphan entries: every non-seed key is a producing op's result
+        // identity, and every seed key is a producer-less intrinsic
+        // registration whose producing position is its seed BINDING_INIT
+        // (ISSUE-0632).
         for (FunctionAllocationIdentity key : unit.functionBindings().keySet()) {
+            if (unit.functionBindings().get(key)
+                    instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                int seedInits = 0;
+                for (SemanticOp op : ops) {
+                    if (op.kind() == SemanticOpKind.BINDING_INIT
+                            && op.payload() instanceof KindPayload.BindingInitPayload init
+                            && init.value().id() == key.id()) {
+                        seedInits++;
+                    }
+                }
+                check(seedInits == 1, "the intrinsic seed key " + key + " is produced by "
+                    + "exactly one seed BINDING_INIT; got " + seedInits);
+                continue;
+            }
             boolean produced = false;
             for (SemanticOp op : ops) {
                 if (op.result() instanceof ValueId value && value.id() == key.id()

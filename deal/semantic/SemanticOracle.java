@@ -3096,6 +3096,8 @@ public final class SemanticOracle {
                             hostValue.descriptor(), checkedArgs);
                     case FunctionExecutionBinding.ExternalFunction external ->
                         invokeExternalCall(op, payload, external, checkedArgs);
+                    case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                        throw intrinsicExecutionDefect(intrinsic);
                 };
             return publish(op, returned);
         }
@@ -3190,6 +3192,8 @@ public final class SemanticOracle {
                 case FunctionExecutionBinding.AdapterBinding nested ->
                     throw new IllegalStateException("adapter-of-adapter invocation is "
                         + "outside the statically-resolved slice (ISSUE-0531)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicExecutionDefect(intrinsic);
             };
         }
 
@@ -3305,6 +3309,8 @@ public final class SemanticOracle {
                 case FunctionExecutionBinding.AdapterBinding ignored ->
                     throw new IllegalStateException("an adapter binding resolves its "
                         + "source before classification (producer defect)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicExecutionDefect(intrinsic);
             };
         }
 
@@ -3517,6 +3523,21 @@ public final class SemanticOracle {
         }
 
         /**
+         * The fail-closed producer defect of an intrinsic carrier's
+         * execution: this slice registers the closed
+         * {@code IntrinsicFunction} binding only — the carrier's
+         * materialization and its call execution are the function-typed
+         * -value child's, so no produced unit may resolve one at a call
+         * site.
+         */
+        private static IllegalStateException intrinsicExecutionDefect(
+                FunctionExecutionBinding.IntrinsicFunction intrinsic) {
+            return new IllegalStateException("the '" + intrinsic.kind() + "' intrinsic "
+                + "function value has no execution in this slice (the intrinsic carrier "
+                + "is the function-typed-value child's — producer defect)");
+        }
+
+        /**
          * Runs a callee body block, skipping the leading parameter ALLOCs
          * (already bound); a RETURN transfers the checked value out.
          */
@@ -3661,6 +3682,8 @@ public final class SemanticOracle {
                     SemanticOp entry = opOf(new OpId(external.moduleId(), calleeTokenId));
                     executeAsyncEntry(entry, op.opId(), checkedArgs, calleeTokenId);
                 }
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicExecutionDefect(intrinsic);
             }
             return tokenAtom(token);
         }
@@ -4091,6 +4114,8 @@ public final class SemanticOracle {
                             resolveBindingOfValue(sourceValue);
                         List<Value> leading = List.copyOf(checked.subList(0, m));
                         yield switch (sourceBinding) {
+                            case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                                throw intrinsicExecutionDefect(intrinsic);
                             case FunctionExecutionBinding.LoweredBody body -> {
                                 UnitState state = stateOf(callback.opId());
                                 bindParamCells(state, body.blockId(), m, leading);
@@ -4149,6 +4174,8 @@ public final class SemanticOracle {
                         yield runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
                             BoundaryContext.none());
                     }
+                    case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                        throw intrinsicExecutionDefect(intrinsic);
                 };
                 emitSuccess(callback, atomOf(returned));
                 return returned;

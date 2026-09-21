@@ -3950,6 +3950,12 @@ public final class JvmSemanticEmitter {
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitAsyncExternalStart(op, indent, token, payload.externalAsyncLink(),
                         args);
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw new IllegalStateException("ASYNC_START " + op.opId()
+                        + " resolves the intrinsic function carrier " + intrinsic.kind()
+                        + " (the intrinsic carrier's async execution is the "
+                        + "function-value child's; the conversion intrinsics are "
+                        + "synchronous values — producer defect)");
             }
             emitTokenSuccess(op, javaString(tokenAtom(token)), indent);
         }

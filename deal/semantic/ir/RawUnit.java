@@ -108,6 +108,10 @@ public record RawUnit(
                 new RawBinding(allocationId, "externalFunction", external.moduleId().path(),
                     external.exportName(), external.executionOwner().name(), null,
                     external.descriptor().canonicalSpecText(), null);
+            case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                new RawBinding(allocationId, "intrinsicFunction", null, null, null, null,
+                    intrinsic.descriptor().canonicalSpecText(), null, null,
+                    intrinsic.kind().name());
         };
     }
 

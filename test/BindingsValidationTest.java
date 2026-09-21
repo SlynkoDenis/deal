@@ -474,13 +474,18 @@ public class BindingsValidationTest {
         ValueId conditionFirst = nextValue();
         ValueId conditionRepro = nextValue();
         SemanticOp alloc0 = allocOp(counter, loopInit, 0);
-        SemanticOp init0 = initOp(counter, 0, nextValue());
+        // The generation-0 INIT's operand is produced inside the unit (the
+        // initializer's value; REGISTRY_ONE_TO_ONE admits a producer-less
+        // init operand only under the intrinsic seed registrations).
+        SemanticOp init0Value = constInt();
+        SemanticOp init0 = initOp(counter, 0, (ValueId) init0Value.result());
         SemanticOp condition1 = opWith(nextOpId(), SemanticOpKind.BINDING_LOAD,
             new KindPayload.BindingLoadPayload(counter, 0),
             conditionFirst, INT, List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE, null);
         SemanticOp loop = loopOp(loopInit, conditionFirst, loopBody, loopUpdate);
         SemanticOp alloc1 = allocOp(counter, loopBody, 1);
-        SemanticOp init1 = initOp(counter, 1, nextValue());
+        SemanticOp init1Value = constInt();
+        SemanticOp init1 = initOp(counter, 1, (ValueId) init1Value.result());
         SemanticOp closure = closureNewOp(closureFn, SIG0, List.of(counter), closureBody,
             closureIdentity);
         SemanticOp condition2 = opWith(nextOpId(), SemanticOpKind.BINDING_LOAD,
@@ -493,12 +498,12 @@ public class BindingsValidationTest {
             Map.of(closureFn, function(closureFn, SIG0, List.of(counter), closureBody)),
             Map.of(new FunctionAllocationIdentity(closureIdentity.id()),
                 new FunctionExecutionBinding.LoweredBody(closureFn, closureBody)),
-            List.of(loop, alloc0, init0, condition1, alloc1, init1, closure, condition2,
-                loadInBody));
+            List.of(loop, alloc0, init0Value, init0, condition1, alloc1, init1Value, init1,
+                closure, condition2, loadInBody));
         StructuredBodyTable table = tableOf(Map.ofEntries(
             Map.entry(INIT_BLOCK, List.of(loop)),
-            Map.entry(loopInit, List.of(alloc0, init0, condition1)),
-            Map.entry(loopBody, List.of(alloc1, init1)),
+            Map.entry(loopInit, List.of(alloc0, init0Value, init0, condition1)),
+            Map.entry(loopBody, List.of(alloc1, init1Value, init1)),
             Map.entry(loopUpdate, List.of(closure, condition2)),
             Map.entry(closureBody, List.of(loadInBody))));
         return new ForLetHeaderFixture(unit, table, counter, loopInit);
@@ -1352,7 +1357,8 @@ public class BindingsValidationTest {
         BindingId x = nextBindingId();
         ValueId adapterResult = nextValue();
         SemanticOp alloc = allocOp(x, INIT_BLOCK, 0);
-        SemanticOp init = initOp(x, 0, nextValue());
+        SemanticOp initValue = constInt();
+        SemanticOp init = initOp(x, 0, (ValueId) initValue.result());
         SemanticOp adapt = adaptOp(CaptureMode.SHARED_CELL,
             new AdaptSourceRef.SharedCell(x, 0), SIG1, SIG2, null, List.of(), List.of(),
             adapterResult);
@@ -1363,9 +1369,9 @@ public class BindingsValidationTest {
                 new FunctionExecutionBinding.AdapterBinding(adapt.opId(),
                     CaptureMode.SHARED_CELL, new AdaptSourceRef.SharedCell(x, 0), SIG1,
                     SIG2)),
-            List.of(alloc, init, adapt, returnBoundary));
+            List.of(alloc, initValue, init, adapt, returnBoundary));
         StructuredBodyTable table = tableOf(Map.of(INIT_BLOCK,
-            List.of(alloc, init, adapt, returnBoundary)));
+            List.of(alloc, initValue, init, adapt, returnBoundary)));
         assertE6005(BindingsProductionValidator.validate(unit, table), "NO_ADAPTER_AT_BOUNDARY",
             "an adapter result wired into a FUNCTION_RETURN boundary op",
             "FUNCTION_RETURN");

@@ -1356,9 +1356,10 @@ public class AdapterShapeMapPayloadTest {
                 "each adapter identity registers exactly one AdapterBinding naming its "
                     + "producing op");
         }
-        check(unit.functionBindings().size() == 11,
-            "the registry holds exactly eleven bindings: five bodies (inner, even, "
-                + "odd, main, the function expression) + six adapters; got "
+        check(unit.functionBindings().size() == 13,
+            "the registry holds exactly thirteen bindings: five bodies (inner, even, "
+                + "odd, main, the function expression) + six adapters + the two "
+                + "producer-less intrinsic seeds (ISSUE-0632); got "
                 + unit.functionBindings().size());
 
         // Loads preserve the adapter identity: `let p: (a,b) => null = g;`

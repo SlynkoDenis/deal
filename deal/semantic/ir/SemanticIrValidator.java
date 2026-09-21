@@ -538,7 +538,7 @@ public final class SemanticIrValidator {
     private static Optional<CompilerDiagnostic> checkBindingEnum(RawUnit unit, ComparisonFacts facts,
                                                                  RawBinding binding) {
         Set<String> shapes = Set.of("loweredBody", "adapter", "hostFunction",
-            "hostFunctionValue", "externalFunction");
+            "hostFunctionValue", "externalFunction", "intrinsicFunction");
         if (!shapes.contains(binding.shape())) {
             return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
                 origin(R_ENUM, "open value \"" + binding.shape()
@@ -549,6 +549,19 @@ public final class SemanticIrValidator {
             return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
                 origin(R_ENUM, "open value \"" + binding.captureMode()
                     + "\" in a closed CaptureMode position"));
+        }
+        if (binding.intrinsicKind() != null
+                && enumByName(IntrinsicKind.class, binding.intrinsicKind()) == null) {
+            return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
+                origin(R_ENUM, "open value \"" + binding.intrinsicKind()
+                    + "\" in a closed IntrinsicKind position"));
+        }
+        if ("intrinsicFunction".equals(binding.shape())
+                && (binding.intrinsicKind() == null || binding.descriptor() == null)) {
+            return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
+                origin(R_ENUM, "the intrinsicFunction binding " + binding.allocationId()
+                    + " carries no intrinsic kind and descriptor text (the closed shape "
+                    + "position is its kind plus its declared signature)"));
         }
         if (binding.executionOwner() != null
                 && enumByName(ExternalExecutionOwner.class, binding.executionOwner()) == null) {

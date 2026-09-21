@@ -12,23 +12,52 @@ import java.util.Objects;
  * @param allocationId             the allocation identity key; non-negative
  * @param shape                    the closed binding shape tag ({@code loweredBody},
  *                                 {@code adapter}, {@code hostFunction},
- *                                 {@code hostFunctionValue}, {@code externalFunction})
+ *                                 {@code hostFunctionValue}, {@code externalFunction},
+ *                                 {@code intrinsicFunction})
  * @param modulePath               the owning module path (host/external); {@code null} otherwise
  * @param exportName               the export name (host/external); {@code null} otherwise
  * @param executionOwner           the raw execution owner (external); {@code null} otherwise
  * @param captureMode              the raw capture mode (adapter); {@code null} otherwise
- * @param descriptor               the raw declared descriptor text (host/external); {@code null} otherwise
+ * @param descriptor               the raw declared descriptor text (host/external,
+ *                                 intrinsic); {@code null} otherwise
  * @param targetSignature          the raw adapter target signature text (adapter); {@code null} otherwise
  * @param materializingBoundaryOpId the materializing {@code HOST_TO_DEAL} boundary op id
  *                                 ({@code hostFunctionValue} — the producing host crossing);
  *                                 {@code null} otherwise
+ * @param intrinsicKind            the raw intrinsic kind ({@code intrinsicFunction} —
+ *                                 the closed {@code IntrinsicKind} member); {@code null}
+ *                                 otherwise
  */
 public record RawBinding(long allocationId, String shape, String modulePath, String exportName,
                          String executionOwner, String captureMode, String descriptor,
-                         String targetSignature, OpId materializingBoundaryOpId) {
+                         String targetSignature, OpId materializingBoundaryOpId,
+                         String intrinsicKind) {
 
     public RawBinding {
         Objects.requireNonNull(shape, "shape must not be null");
+    }
+
+    /**
+     * The nine-position constructor (the pre-intrinsic canonical shape):
+     * a binding without an intrinsic kind — every binding shape of the
+     * closed set except {@code intrinsicFunction}.
+     *
+     * @param allocationId             the allocation identity key; non-negative
+     * @param shape                    the closed binding shape tag
+     * @param modulePath               the owning module path (host/external); {@code null} otherwise
+     * @param exportName               the export name (host/external); {@code null} otherwise
+     * @param executionOwner           the raw execution owner (external); {@code null} otherwise
+     * @param captureMode              the raw capture mode (adapter); {@code null} otherwise
+     * @param descriptor               the raw declared descriptor text (host/external); {@code null} otherwise
+     * @param targetSignature          the raw adapter target signature text (adapter); {@code null} otherwise
+     * @param materializingBoundaryOpId the materializing {@code HOST_TO_DEAL} boundary op id
+     *                                 ({@code hostFunctionValue}); {@code null} otherwise
+     */
+    public RawBinding(long allocationId, String shape, String modulePath, String exportName,
+                      String executionOwner, String captureMode, String descriptor,
+                      String targetSignature, OpId materializingBoundaryOpId) {
+        this(allocationId, shape, modulePath, exportName, executionOwner, captureMode,
+            descriptor, targetSignature, materializingBoundaryOpId, null);
     }
 
     /**
@@ -49,6 +78,6 @@ public record RawBinding(long allocationId, String shape, String modulePath, Str
                       String executionOwner, String captureMode, String descriptor,
                       String targetSignature) {
         this(allocationId, shape, modulePath, exportName, executionOwner, captureMode,
-            descriptor, targetSignature, null);
+            descriptor, targetSignature, null, null);
     }
 }
