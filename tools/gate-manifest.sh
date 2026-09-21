@@ -233,4 +233,9 @@ WARNING: luajit not found, skipping async nesting stress tests'
   'fg|=== Running Semantic Production Gate Tests (ISSUE-0239) ===|java -ea -cp build deal.test.SemanticProductionGateTest'
   'fg|=== Running Class Construction Integration Tail Tests (ISSUE-0517) ===|java -ea -cp build deal.test.ClassConstructionIntegrationTailTest'
   'fg|=== Running the Module Init Differential Matrix and the Shared-Emitter Totality Gate (ISSUE-0590) ===|java -ea -cp build deal.test.ModuleInitDifferentialTest'
+  # ISSUE-0633 registration: the import alias-cell list on MODULE_IMPORT
+  # and the per-imported-module namespace registrations (the recording
+  # half of project-lowering-entry-and-registration-seeds D8 and of
+  # semantic-ir-construct-coverage-cutover K9 item 8/K15 items 1-2).
+  'fg|=== Running Import Alias Cells / Namespace Registration Tests (ISSUE-0633) ===|java -ea -cp build deal.test.ModuleImportNamespaceRegistrationTest'
 )

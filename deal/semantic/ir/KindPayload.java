@@ -1037,17 +1037,51 @@ public sealed interface KindPayload
     }
 
     /**
-     * {@code MODULE_IMPORT} — raw specifier, resolved module, and the
-     * closed {@code COMPILED|STDLIB|HOST} kind; initialize/load once
-     * (cycle is frontend E2005; host load failures use E8011).
+     * {@code MODULE_IMPORT} — raw specifier, resolved module, the closed
+     * {@code COMPILED|STDLIB|HOST} kind, and the import's ordered alias
+     * cells; initialize/load once (cycle is frontend E2005; host load
+     * failures use E8011).
+     *
+     * <p><b>Alias cells (the one recorded payload addition of the
+     * project-lowering cutover).</b> {@code aliasCells} is the ordered
+     * {@link BindingId} list of the import declaration's alias
+     * allocation(s) — the alias&#8596;import join the checker pins. The
+     * op's completion is the pinned initializing write of every cell it
+     * names; an alias cell never carries a {@code BINDING_INIT}. An
+     * absent/empty list is the no-alias-cell case (operation-free
+     * synthetic units and the pre-addition text surface); the canonical
+     * dump of the op changes by exactly this list, the closed payload
+     * record set and the closed {@code SemanticOpKind} set are unchanged,
+     * and the {@code deal.semantic-ir/1} version text is unchanged.
+     *
+     * @param rawSpecifier   the raw specifier as written; non-null
+     * @param resolvedModule the resolved module identity; non-null
+     * @param kind           the closed module-import kind; non-null
+     * @param aliasCells     the ordered alias cells the completion
+     *                       writes; non-null (empty for none)
      */
-    record ModuleImportPayload(String rawSpecifier, ModuleId resolvedModule, ModuleImportKind kind)
+    record ModuleImportPayload(String rawSpecifier, ModuleId resolvedModule, ModuleImportKind kind,
+                               List<BindingId> aliasCells)
         implements KindPayload {
 
         public ModuleImportPayload {
             Objects.requireNonNull(rawSpecifier, "rawSpecifier must not be null");
             Objects.requireNonNull(resolvedModule, "resolvedModule must not be null");
             Objects.requireNonNull(kind, "kind must not be null");
+            aliasCells = List.copyOf(Objects.requireNonNull(aliasCells,
+                "aliasCells must not be null"));
+            for (BindingId cell : aliasCells) {
+                Objects.requireNonNull(cell, "aliasCells entries must not be null");
+            }
+        }
+
+        /**
+         * The no-alias-cell form: an operation-free synthetic unit's
+         * import record (absence/empty is the no-alias-cell case).
+         */
+        public ModuleImportPayload(String rawSpecifier, ModuleId resolvedModule,
+                                   ModuleImportKind kind) {
+            this(rawSpecifier, resolvedModule, kind, List.of());
         }
     }
 

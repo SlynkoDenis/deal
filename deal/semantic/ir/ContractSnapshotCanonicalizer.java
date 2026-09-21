@@ -900,6 +900,9 @@ public final class ContractSnapshotCanonicalizer {
                 CanonicalJson.e("initBlock", semanticIdJson(p.initBlock())),
                 CanonicalJson.e("module", semanticIdJson(p.module())));
             case KindPayload.ModuleImportPayload p -> CanonicalJson.obj(
+                CanonicalJson.e("aliasCells", CanonicalJson.arr(
+                    p.aliasCells().stream()
+                        .map(ContractSnapshotCanonicalizer::semanticIdJson).toList())),
                 CanonicalJson.e("kind", CanonicalJson.str(p.kind().name())),
                 CanonicalJson.e("rawSpecifier", CanonicalJson.str(p.rawSpecifier())),
                 CanonicalJson.e("resolvedModule", semanticIdJson(p.resolvedModule())));

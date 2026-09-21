@@ -513,10 +513,10 @@ public class BindingsValidationTest {
                 ? FailurePolicyId.FUNCTION_SIGNATURE : FailurePolicyId.TYPE_DESCRIPTOR, null);
     }
 
-    private static SemanticOp moduleImportOp() {
+    private static SemanticOp moduleImportOp(BindingId... aliasCells) {
         return op(SemanticOpKind.MODULE_IMPORT,
             new KindPayload.ModuleImportPayload("lib.math", new ModuleId("lib.math"),
-                deal.semantic.ir.ModuleImportKind.COMPILED),
+                deal.semantic.ir.ModuleImportKind.COMPILED, List.of(aliasCells)),
             null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
     }
 
@@ -1481,11 +1481,12 @@ public class BindingsValidationTest {
         assertPass(BindingsProductionValidator.validate(unit, table),
             "the default-block module-level reference (R4's module-level arm)");
 
-        // The import-alias synthetic write: the paired MODULE_IMPORT
-        // completion dominates alias loads in the module block.
+        // The import-alias synthetic write: the MODULE_IMPORT
+        // completion names the alias cell in its payload and dominates
+        // alias loads in the module block.
         BindingId alias = nextBindingId();
         SemanticOp aliasAlloc = allocOp(alias, INIT_BLOCK, 0);
-        SemanticOp moduleImport = moduleImportOp();
+        SemanticOp moduleImport = moduleImportOp(alias);
         SemanticOp aliasLoad = opWith(nextOpId(), SemanticOpKind.BINDING_LOAD,
             new KindPayload.BindingLoadPayload(alias, 0),
             nextValue(), RuntimeDescriptor.Table.INSTANCE, List.of(), List.of(),

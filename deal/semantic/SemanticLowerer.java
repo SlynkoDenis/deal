@@ -3268,6 +3268,15 @@ public final class SemanticLowerer {
          */
         private final LinkedHashSet<BindingId> importAliasBindings = new LinkedHashSet<>();
         /**
+         * The hoisted import-alias cell per alias name (declaration
+         * order): the alias&#8596;cell join the {@code MODULE_IMPORT}
+         * arm records in the op's payload ({@code aliasCells}) — the
+         * explicit list the import completion writes and the bindings
+         * production validator resolves the alias's pinned initializing
+         * write through.
+         */
+        private final Map<String, BindingId> importAliasCells = new LinkedHashMap<>();
+        /**
          * The full-program mode flag (ISSUE-0410 decomposition-tail
          * carrier slice): {@code true} exactly when the session was
          * created by {@link SemanticLowerer#lowerModuleFullProgram} —
@@ -4626,6 +4635,7 @@ public final class SemanticLowerer {
                         false, BindingProducer.BINDING_ALLOC, false);
                     registerBinding(importDecl.alias(), binding, incarnation);
                     importAliasBindings.add(binding);
+                    importAliasCells.put(importDecl.alias(), binding);
                     emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
                         new KindPayload.BindingAllocPayload(binding, moduleInitBlock, false,
                             cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
@@ -9950,16 +9960,27 @@ public final class SemanticLowerer {
                     // the carrier slice produces the pinned MODULE_IMPORT
                     // op (the load-once initialization record) for the
                     // resolved import target — the stdlib console module
-                    // needs no further initialization for the tail.
+                    // needs no further initialization for the tail. The
+                    // payload names the import's ordered alias cells:
+                    // the completion is the pinned initializing write of
+                    // every named cell (an import alias never carries a
+                    // BINDING_INIT).
                     ResolvedImport importFact = importByAlias(importDeclaration.alias());
                     if (importFact == null) {
                         throw new ConstructUnlowered("import '" + importDeclaration.alias()
                             + "' without a resolved import fact (a missing checker fact "
                             + "is a producer defect)");
                     }
+                    BindingId aliasCell = importAliasCells.get(importDeclaration.alias());
+                    if (aliasCell == null) {
+                        throw new ConstructUnlowered("import '" + importDeclaration.alias()
+                            + "' without a hoisted alias cell (a missing hoist fact "
+                            + "is a producer defect)");
+                    }
                     emitNullOp(SemanticOpKind.MODULE_IMPORT,
                         new KindPayload.ModuleImportPayload(importFact.modulePath(),
-                            importFact.resolvedModuleId(), moduleImportKindOf(importFact)),
+                            importFact.resolvedModuleId(), moduleImportKindOf(importFact),
+                            List.of(aliasCell)),
                         importDeclaration.span(), FailurePolicyId.NO_DEAL_FAILURE,
                         SourceOriginKind.USER, currentParent());
                     continue;
