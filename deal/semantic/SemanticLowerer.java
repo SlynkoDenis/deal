@@ -43,10 +43,13 @@ import deal.ast.UnaryExpr;
 import deal.ast.UnaryOp;
 import deal.ast.VariableDeclaration;
 import deal.ast.WhileStatement;
+import deal.checker.BuiltinErrorDeclaration;
 import deal.checker.CheckResult;
 import deal.checker.Symbol;
 import deal.checker.SymbolTable;
 import deal.diagnostics.CompilerDiagnostic;
+import deal.ffi.FfiGeneratedModule;
+import deal.identity.CanonicalModuleIdentity;
 import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncLinkKind;
 import deal.semantic.ir.AsyncStartSource;
@@ -56,7 +59,10 @@ import deal.semantic.ir.ExternalAsyncLink;
 import deal.semantic.ir.ExportInterface;
 import deal.semantic.ir.ExternalExecutionOwner;
 import deal.semantic.ir.ExternalModuleKind;
+import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.InternalResultType;
+import deal.semantic.ir.ModuleImportKind;
+import deal.semantic.ir.NamespaceRegistrations;
 import deal.semantic.ir.ParameterBoundaryMode;
 import deal.semantic.ir.AddressChainProtocol;
 import deal.semantic.ir.AnchorId;
@@ -1941,6 +1947,583 @@ public final class SemanticLowerer {
     }
 
     /**
+     * A declaration import of the closure has no entry in the supplied
+     * declaration surface: the seeds (and therefore the layouts the
+     * class-literal arm resolves) would be silently incomplete, so the
+     * project entry refuses the input (ISSUE-0634).
+     */
+    public static final String DECLARATION_SURFACE_INCOMPLETE =
+        "DECLARATION_SURFACE_INCOMPLETE";
+
+    /**
+     * The declaration surface's per-module declaration kind disagrees with
+     * the extern-C generated metadata: the class registration seeds would
+     * take the wrong owner member, so the project entry refuses the input
+     * (ISSUE-0634).
+     */
+    public static final String DECLARATION_KIND_MISMATCH =
+        "DECLARATION_KIND_MISMATCH";
+
+    /**
+     * A closure module of the checked project carries no requirement
+     * manifest or no interface-index entry: the unit's coverage rows and the
+     * module's own interface facts would be silently absent, so the project
+     * entry refuses the input (ISSUE-0634).
+     */
+    public static final String PROJECT_INPUT_INCOMPLETE =
+        "PROJECT_INPUT_INCOMPLETE";
+
+    /**
+     * The one project lowering entry of a compilation (ISSUE-0634; design
+     * sources {@code project-lowering-entry-and-registration-seeds}
+     * D1/D2/D4/D8/D11/D12 and the project lowering, registration-seed,
+     * namespace registration, and project validation gate contracts;
+     * {@code luajit-jvm-single-lowering-production-cutover} C1/C4/C7/C10;
+     * {@code semantic-ir-construct-coverage-cutover} K3/K12's lowering
+     * context): it lowers the complete checked implementation closure in
+     * dependency order, through exactly one
+     * {@link SemanticIdAllocator} and exactly one session per module with
+     * every arm active, and produces exactly one validated
+     * {@link deal.semantic.ir.ExecutableLoweredProject} plus the
+     * per-module production records, the class registration seeds, and the
+     * namespace registrations — or the first E6005 and no project, no
+     * tables, no registries, no seeds, and no namespace registrations.
+     *
+     * <p><b>Order of operations.</b> (1) the profile guard before any id
+     * is allocated; (2) the declaration-fact agreement and the class
+     * registration seeds (plus the intrinsic seeds the sessions carry)
+     * before the first unit walk; (3) the namespace registrations created
+     * before the first unit walk in dependency order and completed by each
+     * unit's import arm; (4) per module in dependency order, one session
+     * with the binding, closure, group, full-program call, and class arms
+     * active and the pinned walk order of
+     * {@link ModuleLowerer#lowerProjectModule}, followed by the composed
+     * per-unit closed chain; (5) after the complete closure is lowered,
+     * the project-form gate over the whole closure.</p>
+     *
+     * <p><b>One allocator, no partial result.</b> The allocator orders the
+     * dependency-ordered closure once, so ids are issued once per
+     * compilation in the pinned order (dependency order, then source
+     * order, then role, then synthetic ordinal) and are globally unique
+     * including the cross-unit {@code OpId} module tags. Every failure
+     * returns the first E6005 with its module, capability, validator rule,
+     * profile, IR version, and origin, and a result with no project, no
+     * tables, no registries, no seeds, and no namespace registrations — no
+     * retry and no per-module partial result escape the entry. Repeated
+     * lowerings of the same input yield byte-identical project dumps.</p>
+     *
+     * <p><b>The cross-module facts of the one lowering.</b> The closure
+     * modules' recorded {@code EXTERNAL_ENTRY} op ids accumulate in
+     * dependency order inside the walk (the caller-side
+     * {@code externalEntryRef} resolution), and every cross-module callee
+     * of the closure is a {@code SHARED_BODY} external: no route plan, no
+     * per-module route map, and no retained-ABI execution owner enter the
+     * project lowering. The in-project shared-factory facts of this stage
+     * are empty (the in-project imported-class resolution child realizes
+     * them).</p>
+     *
+     * <p><b>Session seeds.</b> Each session receives the class
+     * registration seeds as its layout-resolution context (after the
+     * unit's own declared layouts; the seeds are never merged into
+     * {@code unit.classLayouts}) and the compilation's declared conversion
+     * intrinsics, and each unit's import arm completes the namespace
+     * registrations created before the first walk.</p>
+     *
+     * @param invocation                 the release-owned compiler
+     *                                   invocation (profile guard and
+     *                                   capability-registry hash); non-null
+     * @param checkedProject             the complete checked implementation
+     *                                   closure in dependency order; non-null
+     * @param interfaceIndex             the project interface index; non-null
+     * @param requirementManifests       the per-module requirement manifests
+     *                                   (the construct-coverage rows the
+     *                                   units record); non-null
+     * @param declarationSurface         the declaration surface covering
+     *                                   every declaration import of the
+     *                                   closure; non-null
+     * @param declarationModuleIdentities the compilation's module-path
+     *                                   classification keyed by module
+     *                                   identity (the identity the seeds'
+     *                                   {@code ClassId}s are projected
+     *                                   through); non-null
+     * @param externCModules             the validated generated metadata of
+     *                                   every extern-C declaration module,
+     *                                   keyed by module identity; non-null
+     * @param builtinError               the compiler-owned builtin
+     *                                   {@code Error} declaration; non-null
+     * @param conversionIntrinsics       the compilation's declared
+     *                                   conversion intrinsics (the closed
+     *                                   {@link IntrinsicKind} set the seeds
+     *                                   register); non-null
+     * @param callbackExports            the exported function names the
+     *                                   scenario invokes as callbacks (empty
+     *                                   for production); non-null
+     * @return the one project lowering outcome
+     */
+    public static ProjectLoweringResult lowerProject(
+            CompilerInvocation invocation,
+            CheckedProjectInput checkedProject,
+            deal.semantic.ir.ProjectInterfaceIndex interfaceIndex,
+            List<SemanticRequirementManifest> requirementManifests,
+            HostDeclarationSurface declarationSurface,
+            Map<ModuleId, CanonicalModuleIdentity> declarationModuleIdentities,
+            Map<ModuleId, FfiGeneratedModule> externCModules,
+            BuiltinErrorDeclaration builtinError,
+            List<IntrinsicKind> conversionIntrinsics,
+            Set<String> callbackExports) {
+        Objects.requireNonNull(invocation, "invocation must not be null");
+        Objects.requireNonNull(checkedProject, "checkedProject must not be null");
+        Objects.requireNonNull(interfaceIndex, "interfaceIndex must not be null");
+        Objects.requireNonNull(requirementManifests,
+            "requirementManifests must not be null");
+        Objects.requireNonNull(declarationSurface, "declarationSurface must not be null");
+        Objects.requireNonNull(declarationModuleIdentities,
+            "declarationModuleIdentities must not be null");
+        Objects.requireNonNull(externCModules, "externCModules must not be null");
+        Objects.requireNonNull(builtinError, "builtinError must not be null");
+        Objects.requireNonNull(conversionIntrinsics,
+            "conversionIntrinsics must not be null");
+        Objects.requireNonNull(callbackExports, "callbackExports must not be null");
+
+        // (1) The profile guard: before any id is allocated and before any
+        // op is built. A non-DEAL_V1_2_INT32 invocation fails closed here.
+        if (invocation.semanticProfile() != SemanticProfile.DEAL_V1_2_INT32) {
+            return projectFailure(checkedProject.entryModule(),
+                SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
+                invocation.semanticProfile(), "SemanticLowerer.lowerProject");
+        }
+        String interfaceHash = interfaceIndex.interfaceIndexDigest();
+        String capabilityRegistryHash = invocation.capabilityRegistryHash();
+        SemanticIrValidator.ComparisonFacts comparisonFacts =
+            new SemanticIrValidator.ComparisonFacts(interfaceHash,
+                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash);
+
+        // (2) The declaration-fact agreement: every declaration import of
+        // the closure is covered by the surface (a declaration module's
+        // class literal would otherwise defer silently) and the surface's
+        // declaration kind agrees with the extern-C generated metadata (the
+        // seeds' owner member derives from exactly that pair).
+        for (CheckedModuleInput module : checkedProject.modules()) {
+            for (ResolvedImport importFact : module.imports()) {
+                deal.semantic.ir.ExternalModuleInterface target =
+                    interfaceIndex.modules().get(importFact.resolvedModuleId());
+                if (target != null
+                        && target.kind() == ExternalModuleKind.HOST
+                        && !declarationSurface.modules()
+                            .containsKey(importFact.resolvedModuleId())) {
+                    return projectFailure(importFact.resolvedModuleId(),
+                        SemanticCapability.FOUNDATION_VALUES,
+                        DECLARATION_SURFACE_INCOMPLETE,
+                        invocation.semanticProfile(),
+                        "declaration import '" + importFact.modulePath()
+                            + "' of module '" + module.moduleId().path()
+                            + "' has no declaration-surface entry (the surface"
+                            + " covers every declaration import of the closure)");
+                }
+            }
+        }
+        for (ModuleId declarationModule : declarationSurface.moduleIds()) {
+            HostDeclarationSurface.DeclarationFacts facts =
+                declarationSurface.require(declarationModule);
+            boolean externC = externCModules.containsKey(declarationModule);
+            if (externC
+                    != (facts.kind()
+                        == HostDeclarationSurface.DeclarationKind.EXTERN_C)) {
+                return projectFailure(declarationModule,
+                    SemanticCapability.CLASSES, DECLARATION_KIND_MISMATCH,
+                    invocation.semanticProfile(),
+                    "the declaration surface classifies '" + declarationModule.path()
+                        + "' as " + facts.kind() + " but the extern-C generated"
+                        + " metadata " + (externC ? "is present" : "is absent")
+                        + " for it (the seeds' owner member derives from exactly"
+                        + " this pair)");
+            }
+        }
+
+        // (2) The class registration seeds, produced before the first unit
+        // walk: one layout per declared class of every declaration module
+        // plus the compiler-owned builtin Error entry.
+        ClassRegistrationSeeds.Production seeds = ClassRegistrationSeeds.produce(
+            declarationSurface, declarationModuleIdentities, externCModules,
+            builtinError);
+        if (seeds.hasErrors()) {
+            return projectFailureResult(seeds.diagnostics());
+        }
+
+        // (3) The namespace registrations: created before the first unit
+        // walk in dependency order (then first-import declaration order) and
+        // completed by each unit's import arm.
+        Map<ModuleId, ModuleImportKind> preRegistered = new LinkedHashMap<>();
+        for (CheckedModuleInput module : checkedProject.modules()) {
+            for (ResolvedImport importFact : module.imports()) {
+                preRegistered.putIfAbsent(importFact.resolvedModuleId(),
+                    ModuleLowerer.moduleImportKindOf(importFact));
+            }
+        }
+        NamespaceRegistrations.Recorder namespaceRecorder =
+            new NamespaceRegistrations.Recorder(preRegistered);
+
+        // (4) The one closure walk in dependency order: one allocator, one
+        // session per module with every arm active, and the composed
+        // per-unit closed chain.
+        List<ModuleId> closureOrder = new ArrayList<>();
+        for (CheckedModuleInput module : checkedProject.modules()) {
+            closureOrder.add(module.moduleId());
+        }
+        if (closureOrder.isEmpty()) {
+            return projectFailure(checkedProject.entryModule(),
+                SemanticCapability.FOUNDATION_VALUES, PROJECT_INPUT_INCOMPLETE,
+                invocation.semanticProfile(),
+                "the checked project carries no implementation module (the closure"
+                    + " is the complete implementation closure of the compile)");
+        }
+        if (!closureOrder.contains(checkedProject.entryModule())) {
+            return projectFailure(checkedProject.entryModule(),
+                SemanticCapability.FOUNDATION_VALUES, PROJECT_INPUT_INCOMPLETE,
+                invocation.semanticProfile(),
+                "the entry module '" + checkedProject.entryModule().path()
+                    + "' is not part of the dependency-ordered closure "
+                    + closureOrder + " (the project admits only the complete"
+                    + " closure with its entry module)");
+        }
+        SemanticIdAllocator allocator = SemanticIdAllocator.over(closureOrder);
+        Map<ModuleId, ModuleRoute> closureRoutes = new LinkedHashMap<>();
+        for (ModuleId module : closureOrder) {
+            closureRoutes.put(module, ModuleRoute.SHARED);
+        }
+
+        Map<ModuleId, LoweredModuleUnit> units = new LinkedHashMap<>();
+        Map<ModuleId, StructuredBodyTable> tables = new LinkedHashMap<>();
+        Map<ModuleId, deal.semantic.ir.ClassFactoryRegistry> registries =
+            new LinkedHashMap<>();
+        Map<ModuleId, Map<String, OpId>> calleeExternalEntries = new LinkedHashMap<>();
+
+        for (CheckedModuleInput module : checkedProject.modules()) {
+            SemanticRequirementManifest manifest =
+                manifestOf(requirementManifests, module.moduleId());
+            if (manifest == null) {
+                return projectFailure(module.moduleId(),
+                    SemanticCapability.FOUNDATION_VALUES, PROJECT_INPUT_INCOMPLETE,
+                    invocation.semanticProfile(),
+                    "module '" + module.moduleId().path() + "' has no requirement"
+                        + " manifest (every closure module carries exactly one"
+                        + " manifest's construct-coverage rows)");
+            }
+            deal.semantic.ir.ExternalModuleInterface ownInterface =
+                interfaceIndex.modules().get(module.moduleId());
+            if (ownInterface == null) {
+                return projectFailure(module.moduleId(),
+                    SemanticCapability.FOUNDATION_VALUES, PROJECT_INPUT_INCOMPLETE,
+                    invocation.semanticProfile(),
+                    "module '" + module.moduleId().path() + "' has no interface-index"
+                        + " entry (the index covers every module of the closure)");
+            }
+            LoweredProjectModule lowered = lowerProjectModule(module, manifest,
+                interfaceHash, capabilityRegistryHash, allocator, closureRoutes,
+                calleeExternalEntries, callbackExports, seeds.seeds(),
+                conversionIntrinsics, ownInterface, comparisonFacts);
+            if (lowered.hasErrors()) {
+                return projectFailureResult(lowered.diagnostics());
+            }
+            Optional<CompilerDiagnostic> namespaceFailure =
+                namespaceRecorder.record(lowered.unit());
+            if (namespaceFailure.isPresent()) {
+                return projectFailureResult(List.of(namespaceFailure.get()));
+            }
+            units.put(module.moduleId(), lowered.unit());
+            tables.put(module.moduleId(), lowered.table());
+            registries.put(module.moduleId(), lowered.registry());
+            if (!lowered.externalEntries().isEmpty()) {
+                calleeExternalEntries.put(module.moduleId(), lowered.externalEntries());
+            }
+        }
+
+        // (5) The project-form gate over the complete closure.
+        ExecutableLoweredProject project = new ExecutableLoweredProject(
+            SemanticProfile.DEAL_V1_2_INT32, interfaceIndex, units,
+            checkedProject.entryModule());
+        Optional<CompilerDiagnostic> projectGate = SemanticIrValidator.validate(
+            project, comparisonFacts);
+        if (projectGate.isPresent()) {
+            return projectFailureResult(List.of(projectGate.get()));
+        }
+        NamespaceRegistrations.Assembly namespaceAssembly = namespaceRecorder.build();
+        return new ProjectLoweringResult(project, tables, registries, seeds.seeds(),
+            namespaceAssembly.registrations(), List.of());
+    }
+
+    /**
+     * One module's lowering inside the one project walk (ISSUE-0634): the
+     * session with every arm active under the assembled context, the
+     * composed per-unit closed chain over the produced unit, and the
+     * module's per-walk production records. Internal to
+     * {@link #lowerProject} — no per-module result escapes the entry.
+     */
+    private static LoweredProjectModule lowerProjectModule(
+            CheckedModuleInput module,
+            SemanticRequirementManifest manifest,
+            String interfaceHash,
+            String capabilityRegistryHash,
+            SemanticIdAllocator allocator,
+            Map<ModuleId, ModuleRoute> closureRoutes,
+            Map<ModuleId, Map<String, OpId>> calleeExternalEntries,
+            Set<String> callbackExports,
+            ClassRegistrationSeeds seeds,
+            List<IntrinsicKind> conversionIntrinsics,
+            deal.semantic.ir.ExternalModuleInterface ownInterface,
+            SemanticIrValidator.ComparisonFacts comparisonFacts) {
+        ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
+            module.checks(), allocator, true, true, true, false, false, false,
+            module.ast().span(), true, true, ownInterface, Map.of());
+        lowerer.setModuleImports(module.imports());
+        lowerer.setRegistrationSeeds(seeds);
+        lowerer.setDeclaredConversionIntrinsics(conversionIntrinsics);
+        lowerer.setE7Facts(module.exports(), closureRoutes, calleeExternalEntries,
+            callbackExports);
+        try {
+            lowerer.lowerProjectModule(module.ast().statements());
+        } catch (ConstructUnlowered unlowered) {
+            return LoweredProjectModule.failure(List.of(FailureContractRegistry.e6005(
+                loweringFailureDetail(module.moduleId(), unlowered))));
+        } catch (IntLiteralOutOfRange outOfRange) {
+            return LoweredProjectModule.failure(List.of(FailureContractRegistry.e6005(
+                loweringFailureDetail(module.moduleId(), outOfRange))));
+        } catch (ContainerPayloadDescriptors.Defect defect) {
+            return LoweredProjectModule.failure(List.of(FailureContractRegistry.e6005(
+                loweringFailureDetail(module.moduleId(), defect))));
+        } catch (ComparisonSelectorLowering.Defect defect) {
+            return LoweredProjectModule.failure(List.of(
+                ComparisonSelectorLowering.e6005(module.moduleId(), defect)));
+        } catch (ClassDefaultCapture capture) {
+            return LoweredProjectModule.failure(List.of(FailureContractRegistry.e6005(
+                loweringFailureDetail(module.moduleId(), capture))));
+        } catch (RetainedAbiDeferred deferred) {
+            return LoweredProjectModule.failure(List.of(FailureContractRegistry.e6005(
+                loweringFailureDetail(module.moduleId(), deferred))));
+        }
+        LoweredModuleUnit unit = lowerer.buildUnit(manifest.constructCoverage(),
+            module.imports().stream().map(ResolvedImport::resolvedModuleId).toList(),
+            interfaceHash, capabilityRegistryHash,
+            ContainerClaimingSeam.E9_GATE_ACTIVATION);
+        StructuredBodyTable table = lowerer.bodyTable();
+        Optional<CompilerDiagnostic> unitChain = validateProjectUnit(unit, table,
+            comparisonFacts, lowerer.pinnedWriteFacts(), lowerer.factoryRegistry(),
+            lowerer.jsonDefaultChildren(), ownInterface, Map.of());
+        if (unitChain.isPresent()) {
+            return LoweredProjectModule.failure(List.of(unitChain.get()));
+        }
+        return new LoweredProjectModule(unit, table, lowerer.factoryRegistry(),
+            lowerer.jsonDefaultChildren(), lowerer.recordedEntries(),
+            lowerer.pinnedWriteFacts(), List.of());
+    }
+
+    /**
+     * The composed per-unit closed chain of the project gate (ISSUE-0634;
+     * design source {@code project-lowering-entry-and-registration-seeds}
+     * D11 and the project validation gate contract): in order, the closed
+     * 14 rules ({@link SemanticIrValidator#validate(LoweredModuleUnit,
+     * SemanticIrValidator.ComparisonFacts)}), the address-chain protocol,
+     * the control-flow validator, the bindings production validator over
+     * the unified unit with the walk's pinned-write facts (including the
+     * intrinsic-seed admission clauses), and the class-construction
+     * validator with the module's interface entry and the in-project
+     * factory facts. Returns empty on pass and exactly the first E6005 on
+     * failure — the chain stops at the first failing rule, so a defective
+     * unit never reaches a later validator.
+     *
+     * @param unit           the produced unit; non-null
+     * @param table          the unit's block-membership table; non-null
+     * @param facts          the comparison facts (interface digest, profile,
+     *                       capability-registry hash); non-null
+     * @param pinnedWrites   the walk's pinned-write binding facts; non-null
+     * @param factories      the module's class-factory registry; non-null
+     * @param jsonDefaults   the module's JSON default-child record; non-null
+     * @param ownInterface   the module's own interface entry; non-null
+     * @param sharedFactories the in-project factory facts by class
+     *                       identity; non-null
+     * @return empty on pass, otherwise the first E6005
+     */
+    public static Optional<CompilerDiagnostic> validateProjectUnit(
+            LoweredModuleUnit unit,
+            StructuredBodyTable table,
+            SemanticIrValidator.ComparisonFacts facts,
+            BindingsProductionValidator.PinnedWriteFacts pinnedWrites,
+            deal.semantic.ir.ClassFactoryRegistry factories,
+            deal.semantic.ir.JsonDefaultChildTable jsonDefaults,
+            deal.semantic.ir.ExternalModuleInterface ownInterface,
+            Map<ClassId, SharedFactoryFacts> sharedFactories) {
+        Objects.requireNonNull(unit, "unit must not be null");
+        Objects.requireNonNull(table, "table must not be null");
+        Objects.requireNonNull(facts, "facts must not be null");
+        Objects.requireNonNull(pinnedWrites, "pinnedWrites must not be null");
+        Objects.requireNonNull(factories, "factories must not be null");
+        Objects.requireNonNull(jsonDefaults, "jsonDefaults must not be null");
+        Objects.requireNonNull(ownInterface, "ownInterface must not be null");
+        Objects.requireNonNull(sharedFactories, "sharedFactories must not be null");
+        Optional<CompilerDiagnostic> validation =
+            SemanticIrValidator.validate(unit, facts);
+        if (validation.isPresent()) {
+            return validation;
+        }
+        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
+        if (chainShape.isPresent()) {
+            return chainShape;
+        }
+        Optional<CompilerDiagnostic> controlFlow =
+            ControlFlowValidator.validate(unit, table);
+        if (controlFlow.isPresent()) {
+            return controlFlow;
+        }
+        Optional<CompilerDiagnostic> bindings = BindingsProductionValidator.validate(
+            unit, table, pinnedWrites);
+        if (bindings.isPresent()) {
+            return bindings;
+        }
+        return ClassConstructionValidator.validate(unit, table, factories,
+            jsonDefaults, ownInterface, sharedFactories);
+    }
+
+    /** The requirement manifest of one module, or {@code null} when absent. */
+    private static SemanticRequirementManifest manifestOf(
+            List<SemanticRequirementManifest> manifests, ModuleId moduleId) {
+        for (SemanticRequirementManifest manifest : manifests) {
+            if (manifest.moduleId().equals(moduleId)) {
+                return manifest;
+            }
+        }
+        return null;
+    }
+
+    /** The first E6005 of the project entry, with no project and no records. */
+    private static ProjectLoweringResult projectFailure(ModuleId module,
+            SemanticCapability capability, String rule, SemanticProfile profile,
+            String origin) {
+        return projectFailureResult(List.of(FailureContractRegistry.e6005(
+            new LoweringFailureDetail(module.path(), capability, rule, profile,
+                LoweredModuleUnit.FORMAT_VERSION,
+                "SemanticLowerer.lowerProject " + rule + " (" + origin + ")"))));
+    }
+
+    /** The failure result carrying exactly the first E6005 and no records. */
+    private static ProjectLoweringResult projectFailureResult(
+            List<CompilerDiagnostic> diagnostics) {
+        return new ProjectLoweringResult(null, Map.of(), Map.of(), null, null,
+            List.copyOf(diagnostics));
+    }
+
+    /**
+     * The one project lowering result (ISSUE-0634; design source
+     * {@code project-lowering-entry-and-registration-seeds} D1 and the
+     * project lowering contract): exactly one validated
+     * {@link ExecutableLoweredProject} with its per-module block-membership
+     * tables and class-factory registries, the project-level class
+     * registration seeds, and the project-level namespace registrations;
+     * or, on the first E6005 anywhere in the closure walk or the project
+     * gate, no project, no tables, no registries, no seeds, and no
+     * namespace registrations.
+     *
+     * @param project     the one executable lowered project; null exactly
+     *                    on failure
+     * @param tables      the per-module block-membership tables (empty on
+     *                    failure); non-null
+     * @param registries  the per-module class-factory registries (empty on
+     *                    failure); non-null
+     * @param seeds       the project-level class registration seeds; null
+     *                    exactly on failure
+     * @param namespaces  the project-level namespace registrations; null
+     *                    exactly on failure
+     * @param diagnostics the E6005 diagnostics (empty on success); non-null
+     */
+    public record ProjectLoweringResult(
+            ExecutableLoweredProject project,
+            Map<ModuleId, StructuredBodyTable> tables,
+            Map<ModuleId, deal.semantic.ir.ClassFactoryRegistry> registries,
+            ClassRegistrationSeeds seeds,
+            NamespaceRegistrations namespaces,
+            List<CompilerDiagnostic> diagnostics) {
+
+        public ProjectLoweringResult {
+            Objects.requireNonNull(tables, "tables must not be null");
+            Objects.requireNonNull(registries, "registries must not be null");
+            Objects.requireNonNull(diagnostics, "diagnostics must not be null");
+            diagnostics = List.copyOf(diagnostics);
+            if (project != null && !diagnostics.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "a successful project lowering carries no diagnostics");
+            }
+            if (project == null
+                    && (diagnostics.isEmpty() || !tables.isEmpty()
+                        || !registries.isEmpty() || seeds != null
+                        || namespaces != null)) {
+                throw new IllegalArgumentException(
+                    "a failed project lowering carries exactly the first E6005 and"
+                        + " no project, no tables, no registries, no seeds, and no"
+                        + " namespace registrations");
+            }
+            tables = Map.copyOf(tables);
+            registries = Map.copyOf(registries);
+        }
+
+        /** Whether the lowering failed (no project was produced). */
+        public boolean hasErrors() {
+            return !diagnostics.isEmpty();
+        }
+
+        /** The block-membership table of one module, or {@code null}. */
+        public StructuredBodyTable tableOf(ModuleId moduleId) {
+            return tables.get(Objects.requireNonNull(moduleId,
+                "moduleId must not be null"));
+        }
+
+        /** The class-factory registry of one module, or {@code null}. */
+        public deal.semantic.ir.ClassFactoryRegistry registryOf(ModuleId moduleId) {
+            return registries.get(Objects.requireNonNull(moduleId,
+                "moduleId must not be null"));
+        }
+    }
+
+    /**
+     * One module's per-walk production records inside the one project
+     * lowering (ISSUE-0634). Internal to the closure walk: the records are
+     * collected into the project result and no per-module result escapes
+     * the entry.
+     *
+     * @param unit            the produced unit; null exactly on failure
+     * @param table           the unit's block-membership table; null on
+     *                        failure
+     * @param registry        the module's class-factory registry; null on
+     *                        failure
+     * @param jsonDefaults    the module's JSON default-child record; null
+     *                        on failure
+     * @param externalEntries the module's recorded {@code EXTERNAL_ENTRY}
+     *                        op ids by export name (empty on failure)
+     * @param pinnedWrites    the walk's pinned-write binding facts
+     * @param diagnostics     the E6005 diagnostics (empty on success)
+     */
+    private record LoweredProjectModule(
+            LoweredModuleUnit unit,
+            StructuredBodyTable table,
+            deal.semantic.ir.ClassFactoryRegistry registry,
+            deal.semantic.ir.JsonDefaultChildTable jsonDefaults,
+            Map<String, OpId> externalEntries,
+            BindingsProductionValidator.PinnedWriteFacts pinnedWrites,
+            List<CompilerDiagnostic> diagnostics) {
+
+        LoweredProjectModule {
+            diagnostics = List.copyOf(diagnostics);
+        }
+
+        boolean hasErrors() {
+            return !diagnostics.isEmpty();
+        }
+
+        static LoweredProjectModule failure(List<CompilerDiagnostic> diagnostics) {
+            return new LoweredProjectModule(null, null, null, null, Map.of(),
+                BindingsProductionValidator.PinnedWriteFacts.empty(), diagnostics);
+        }
+    }
+
+    /**
      * The closure child's public lowering entry point (ISSUE-0445
      * sequencing item 2): lowers one checked implementation module
      * through the binding walk plus the closure arms — {@code
@@ -3319,6 +3902,32 @@ public final class SemanticLowerer {
          */
         private final Map<ClassId, SharedFactoryFacts> sharedFactories;
         /**
+         * The project-level class registration seeds of the session
+         * (ISSUE-0634; design source
+         * {@code project-lowering-entry-and-registration-seeds} D4-D6 and
+         * the registration-seed contract): the layout resolution context
+         * every unit's session receives before its walk, consulted by the
+         * class-literal arm after the unit's own declared layouts and the
+         * in-project factory facts. The seeds are never merged into
+         * {@link #classLayouts}: the unit keeps carrying its own declared
+         * layouts only (the class-construction validator discriminates a
+         * same-module class by exactly that membership). Empty outside the
+         * project entry.
+         */
+        private ClassRegistrationSeeds registrationSeeds =
+            new ClassRegistrationSeeds(Map.of());
+        /**
+         * The declared conversion intrinsics of the compilation
+         * (ISSUE-0634): the closed {@link IntrinsicKind} set the project
+         * entry hands the session — the seed registers exactly these
+         * kinds and fails closed for a module intrinsic outside the
+         * declared set (a compiler-constant disagreement is a producer
+         * defect, never a silently registered third intrinsic). Empty
+         * outside the project entry (the per-module entries keep their
+         * closed two-member seed).
+         */
+        private List<IntrinsicKind> declaredConversionIntrinsics = List.of();
+        /**
          * The produced class layouts keyed by {@link ClassId} in
          * declaration order (K-D2; the unit's {@code classLayouts} map,
          * built by the class-declaration arm).
@@ -4346,6 +4955,77 @@ public final class SemanticLowerer {
         }
 
         /**
+         * The project walk's module entry point (ISSUE-0634; design source
+         * {@code project-lowering-entry-and-registration-seeds} D2 and the
+         * project lowering contract): one session per module with every
+         * arm active — the binding, closure, group, full-program call, and
+         * class arms together — in the pinned walk order.
+         *
+         * <p><b>The pinned walk order.</b> (1) the intrinsic seeds (the
+         * module-init-top {@code BINDING_ALLOC}/{@code BINDING_INIT} pair
+         * per declared conversion intrinsic, with its closed
+         * {@code IntrinsicFunction} registration); (2) the hoisted
+         * module-level allocations (function-name and import-alias ALLOCs
+         * in declaration order; module-level group members register
+         * without an ALLOC — the group op's publication phase is their
+         * producing allocation); (3) the module-level recursive groups at
+         * module-init top in declaration order (B4); (4) the statement
+         * walk with the class-declaration and call arms (nested-scope
+         * groups lower at their first member's declaration position);
+         * (5) the E7 terminals (export publications, entries/callbacks,
+         * and the entry delegation); (6) the invocation-identity
+         * finalization (the decision point after the walk and the
+         * terminals, where the set of a body's static invocations is
+         * final); (7) the cell-kind finalization.</p>
+         *
+         * <p>No two walks per module and no double allocation: the
+         * session's single statement walk is the full-program walk (which
+         * owns the class arms and the nested-scope group arms when the
+         * class and group flags are active), so every op is emitted by
+         * exactly one arm and every id is allocated once.</p>
+         *
+         * @param statements the module's top-level statements; non-null
+         * @throws IllegalStateException outside the project session mode
+         * @throws ConstructUnlowered    on a construct outside the closed
+         *         coverage table of the unified walk
+         */
+        public void lowerProjectModule(List<StatementNode> statements) {
+            Objects.requireNonNull(statements, "statements must not be null");
+            if (!bindingCore || !closureCore || !groupCore || !fullProgram || !classCore) {
+                throw new IllegalStateException("lowerProjectModule outside the project "
+                    + "session mode (the unified walk requires the binding, closure, "
+                    + "group, full-program, and class arms together; producer defect)");
+            }
+            List<FunctionDeclaration> moduleDeclarations = new ArrayList<>();
+            for (StatementNode statement : statements) {
+                if (statement instanceof FunctionDeclaration function) {
+                    moduleDeclarations.add(function);
+                }
+            }
+            List<List<FunctionDeclaration>> sccs =
+                partitionFunctionDeclarations(moduleDeclarations);
+            Set<FunctionDeclaration> moduleGroupMembers =
+                java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+            List<List<FunctionDeclaration>> moduleGroups = new ArrayList<>();
+            for (List<FunctionDeclaration> scc : sccs) {
+                if (scc.size() >= 2) {
+                    moduleGroups.add(scc);
+                    moduleGroupMembers.addAll(scc);
+                }
+            }
+            seedIntrinsicBindings();
+            hoistModuleLevelAllocs(statements, moduleGroupMembers);
+            // Module-init-top groups in declaration order (B4).
+            for (List<FunctionDeclaration> group : moduleGroups) {
+                lowerGroup(group, true);
+            }
+            statementWalk.walk(statements, true);
+            emitE7Terminals();
+            finalizeInvocationIdentities();
+            finalizeCellKinds();
+        }
+
+        /**
          * The binding walk's complete fact surface: one
          * {@link BindingCoreBinding} per declared name in registration
          * order (partial when the walk failed mid-way).
@@ -4488,10 +5168,32 @@ public final class SemanticLowerer {
          * binding nor an intrinsic carrier.</p>
          */
         private void seedIntrinsicBindings() {
+            // The declared conversion intrinsics of the compilation
+            // (ISSUE-0634): the project entry hands the session the closed
+            // set the seed registers; the per-module entries keep the
+            // closed two-member compiler constant. A module intrinsic
+            // outside the declared set is a compiler-constant disagreement
+            // — a producer defect, never a silently registered third
+            // intrinsic.
+            List<IntrinsicKind> declared = declaredConversionIntrinsics.isEmpty()
+                ? List.of(IntrinsicKind.values()) : declaredConversionIntrinsics;
             for (String name : List.of("int", "number")) {
                 if (!(checks.symbolTable().resolve(name)
                         instanceof Symbol.IntrinsicSymbol intrinsic)) {
                     continue;
+                }
+                IntrinsicKind kind = conversionIntrinsicKind(intrinsic.name());
+                if (kind == null) {
+                    throw new IllegalStateException("the intrinsic seed resolved '"
+                        + name + "' to the non-conversion intrinsic '"
+                        + intrinsic.name() + "' (producer defect)");
+                }
+                if (!declared.contains(kind)) {
+                    throw new ConstructUnlowered("the module's conversion intrinsic '"
+                        + name + "' is not part of the compilation's declared"
+                        + " conversion intrinsics " + declared + " (a mismatch between"
+                        + " the module's checker facts and the compiler constants is a"
+                        + " producer defect)");
                 }
                 BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
                 BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
@@ -4519,12 +5221,6 @@ public final class SemanticLowerer {
                 // identity, with the intrinsic's declared signature as
                 // the checker's own symbol declares it (the closed gate
                 // pins it against the kind's declared signature).
-                IntrinsicKind kind = conversionIntrinsicKind(intrinsic.name());
-                if (kind == null) {
-                    throw new IllegalStateException("the intrinsic seed resolved '"
-                        + name + "' to the non-conversion intrinsic '"
-                        + intrinsic.name() + "' (producer defect)");
-                }
                 registry.registerIntrinsic(
                     new FunctionAllocationIdentity(intrinsicValue.id()), kind,
                     (RuntimeDescriptor.Func) DescriptorService.describe(intrinsic.type()));
@@ -4703,42 +5399,79 @@ public final class SemanticLowerer {
             }
             // Group-core mode: the per-scope SCC partition over function
             // declarations (name references in bodies, B4).
+            Map<FunctionDeclaration, List<FunctionDeclaration>> memberGroups =
+                groupMembership(statements);
+            for (StatementNode statement : statements) {
+                if (statement instanceof FunctionDeclaration function) {
+                    if (skipGroupedFunctionDecl(function, memberGroups, moduleLevel)) {
+                        continue;
+                    }
+                    lowerBindingFunctionDecl(function, moduleLevel);
+                    continue;
+                }
+                lowerBindingStatement(statement);
+            }
+        }
+
+        /**
+         * The per-scope recursive-group membership of one statement list
+         * (ISSUE-0634, the group walk's B4 partition): every size&gt;=2 SCC's
+         * members mapped to their declaration-ordered SCC. Size-1 SCCs
+         * carry no entry (the closure-arm lowers them at their declaration
+         * position) and an empty map is returned outside group-core mode.
+         *
+         * @param statements the scope's statements; non-null
+         * @return the member-to-group map in first-member declaration order
+         */
+        private Map<FunctionDeclaration, List<FunctionDeclaration>> groupMembership(
+                List<StatementNode> statements) {
+            if (!groupCore) {
+                return Map.of();
+            }
             List<FunctionDeclaration> declarations = new ArrayList<>();
             for (StatementNode statement : statements) {
                 if (statement instanceof FunctionDeclaration function) {
                     declarations.add(function);
                 }
             }
-            List<List<FunctionDeclaration>> sccs =
-                partitionFunctionDeclarations(declarations);
             Map<FunctionDeclaration, List<FunctionDeclaration>> memberGroups =
                 new IdentityHashMap<>();
-            for (List<FunctionDeclaration> scc : sccs) {
+            for (List<FunctionDeclaration> scc
+                    : partitionFunctionDeclarations(declarations)) {
                 if (scc.size() >= 2) {
                     for (FunctionDeclaration member : scc) {
                         memberGroups.put(member, scc);
                     }
                 }
             }
-            for (StatementNode statement : statements) {
-                if (statement instanceof FunctionDeclaration function) {
-                    List<FunctionDeclaration> group = memberGroups.get(function);
-                    if (group == null) {
-                        // Size-1 SCC: CLOSURE_NEW + BINDING_INIT at the
-                        // declaration position (B4).
-                        lowerBindingFunctionDecl(function, moduleLevel);
-                    } else if (!moduleLevel && group.get(0) == function) {
-                        // Nested-scope group: the op executes at the
-                        // first member's declaration position (B4).
-                        lowerGroup(group, false);
-                    }
-                    // Module-level groups were emitted at module-init top
-                    // (lowerGroupModule); non-first nested members were
-                    // lowered at the first member's position.
-                    continue;
-                }
-                lowerBindingStatement(statement);
+            return memberGroups;
+        }
+
+        /**
+         * Handles one function declaration that belongs to a size&gt;=2 SCC:
+         * a nested-scope group emits its single {@code RECURSIVE_GROUP_INIT}
+         * op at the first member's declaration position (B4) and every
+         * other member is skipped (the op publishes all member bindings at
+         * once); a module-level group was emitted at module-init top by the
+         * walk entry, so its members are skipped here.
+         *
+         * @param function       the declared function; non-null
+         * @param memberGroups   the scope's member-to-group map; non-null
+         * @param moduleLevel    whether the declaration sits at module top
+         * @return {@code true} when the declaration was handled by the group
+         *         arm (the caller must not lower it as a closure)
+         */
+        private boolean skipGroupedFunctionDecl(FunctionDeclaration function,
+                Map<FunctionDeclaration, List<FunctionDeclaration>> memberGroups,
+                boolean moduleLevel) {
+            List<FunctionDeclaration> group = memberGroups.get(function);
+            if (group == null) {
+                return false;
             }
+            if (!moduleLevel && group.get(0) == function) {
+                lowerGroup(group, false);
+            }
+            return true;
         }
 
         /**
@@ -5258,12 +5991,16 @@ public final class SemanticLowerer {
             }
             ClassId classId = new ClassId(
                 DescriptorService.semanticModulePath(classType.identity()), classType.name());
-            // The construction mode: a locally declared class stays LOCAL
-            // (T2's arm); an imported class with the owner's shared-factory
-            // facts lowers SHARED_FACTORY (K-D4/K-D5); an imported class
-            // without facts — an owner not on the shared route — defers to
-            // E10 (never silently emitted as SHARED_FACTORY and never
-            // executed here).
+            // The closed owner lookup order (ISSUE-0634; design sources
+            // {@code project-lowering-entry-and-registration-seeds} D4 and
+            // the project lowering contract): the unit's own declared layout
+            // -> LOCAL (a locally declared class stays LOCAL, T2's arm); the
+            // in-project factory facts -> SHARED_FACTORY (K-D4/K-D5); a
+            // project registration seed -> the seed's owner member; none ->
+            // the fail-closed E10 deferral (never silently emitted and never
+            // executed here). The seeds are the project-level layout
+            // resolution context, consulted after the unit's own declared
+            // layouts and never merged into them.
             deal.semantic.ir.ClassLayout layout = classLayouts.get(classId);
             DefaultOwner defaultOwner = DefaultOwner.LOCAL;
             deal.semantic.ir.ClassFactoryId classFactoryRef = null;
@@ -5271,13 +6008,29 @@ public final class SemanticLowerer {
             SharedFactoryFacts sharedFacts = null;
             if (layout == null) {
                 sharedFacts = sharedFactories.get(classId);
-                if (sharedFacts == null) {
-                    throw new RetainedAbiDeferred(classId.text());
+                if (sharedFacts != null) {
+                    layout = sharedFacts.layout();
+                    defaultOwner = DefaultOwner.SHARED_FACTORY;
+                    classFactoryRef = sharedFacts.interfaceEntry().constructionEntry();
+                    sharedFactoryResult = sharedFacts.factoryResult();
+                } else {
+                    ClassRegistrationSeeds.ClassRegistration seed =
+                        registrationSeeds.registrationFor(classId);
+                    if (seed == null) {
+                        throw new RetainedAbiDeferred(classId.text());
+                    }
+                    // A registration seed: the class's layout and its closed
+                    // owner member (HOST_DEFAULTS for a host declaration
+                    // class, FFI_PLAN for an extern-C declaration class,
+                    // BUILTIN_DEFAULTS for the builtin Error). The emitted
+                    // CLASS_NEW carries the seed's owner fact; the
+                    // construction of a seeded owner is the construction
+                    // children's, so the composed gate rejects the op
+                    // fail-closed — a registration fact is never silently
+                    // executed as another owner.
+                    layout = seed.layout();
+                    defaultOwner = seed.owner();
                 }
-                layout = sharedFacts.layout();
-                defaultOwner = DefaultOwner.SHARED_FACTORY;
-                classFactoryRef = sharedFacts.interfaceEntry().constructionEntry();
-                sharedFactoryResult = sharedFacts.factoryResult();
             }
             // Provided values complete in literal order (K-D4 step 1).
             List<KindPayload.ProvidedField> providedFields = new ArrayList<>();
@@ -6294,8 +7047,21 @@ public final class SemanticLowerer {
             List<RuntimeDescriptor.Func> signatures = new ArrayList<>();
             List<List<CapturedCell>> capturedLists = new ArrayList<>();
             for (FunctionDeclaration member : members) {
-                BlockId bodyBlock = allocateBlock();
-                FunctionId functionId = ids.nextFunctionId(module, nextOrdinal++, 0);
+                // The full-program session's reserved facts win for a
+                // module-level member (ISSUE-0634): the hoist's per-function
+                // context is the member's single identity, so the group
+                // registration and any call of the member resolve the same
+                // function id and body block. Outside the full-program
+                // session the group arm allocates its own.
+                FrameEntry hoistedEntry = moduleLevel ? frameEntryOf(member.name()) : null;
+                FunctionContext reservedContext = fullProgram && moduleLevel
+                        && hoistedEntry != null
+                    ? functionContexts.get(hoistedEntry.incarnation()) : null;
+                BlockId bodyBlock = reservedContext != null
+                    ? reservedContext.bodyBlock : allocateBlock();
+                FunctionId functionId = reservedContext != null
+                    ? reservedContext.functionId
+                    : ids.nextFunctionId(module, nextOrdinal++, 0);
                 RuntimeDescriptor.Func signature = functionSignatureOf(member);
                 List<SemanticOp> bodyOps = new ArrayList<>();
                 List<CapturedCell> captured = new ArrayList<>();
@@ -6306,6 +7072,9 @@ public final class SemanticLowerer {
                     checkerScopeNodes.push(member);
                     pushBindingFrame();
                     blockStack.push(bodyBlock);
+                    if (reservedContext != null) {
+                        functionStack.push(reservedContext);
+                    }
                     for (deal.ast.Parameter parameter : member.params()) {
                         BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
                         BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
@@ -6324,6 +7093,9 @@ public final class SemanticLowerer {
                     blockStack.pop();
                     popBindingFrame();
                     checkerScopeNodes.pop();
+                    if (reservedContext != null) {
+                        functionStack.pop();
+                    }
                 } finally {
                     captureCollectors.pop();
                     captureBorders.pop();
@@ -8626,6 +9398,34 @@ public final class SemanticLowerer {
             this.moduleImports = List.copyOf(imports);
         }
 
+        /**
+         * Installs the project-level class registration seeds as the
+         * session's layout resolution context (ISSUE-0634; design source
+         * {@code project-lowering-entry-and-registration-seeds} D4 and the
+         * registration-seed contract): each unit's layout context is the
+         * unit's own declared layouts first, then the seeds — the seeds
+         * are never merged into the unit's {@code classLayouts} map.
+         *
+         * @param seeds the project's class registration seeds; non-null
+         */
+        public void setRegistrationSeeds(ClassRegistrationSeeds seeds) {
+            this.registrationSeeds = Objects.requireNonNull(seeds,
+                "seeds must not be null");
+        }
+
+        /**
+         * Installs the declared conversion intrinsics of the compilation
+         * (ISSUE-0634): the seed registers exactly these closed
+         * {@link IntrinsicKind}s and fails closed for a module intrinsic
+         * outside the declared set.
+         *
+         * @param kinds the declared conversion-intrinsic kinds; non-null
+         */
+        public void setDeclaredConversionIntrinsics(List<IntrinsicKind> kinds) {
+            Objects.requireNonNull(kinds, "kinds must not be null");
+            this.declaredConversionIntrinsics = List.copyOf(kinds);
+        }
+
         /** The closed MODULE_IMPORT kind of a resolved import fact. */
         private static deal.semantic.ir.ModuleImportKind moduleImportKindOf(
                 ResolvedImport importFact) {
@@ -9984,6 +10784,15 @@ public final class SemanticLowerer {
          */
         private void lowerFullStatements(List<StatementNode> statements,
                                          boolean moduleLevel) {
+            // The unified walk's per-scope recursive-group partition
+            // (ISSUE-0634): the group arms are active in the same session,
+            // so every scope partitions its function declarations exactly
+            // as the group walk does — a module-level group was emitted at
+            // module-init top (lowerProjectModule) and its members are
+            // skipped here; a nested-scope group emits at its first
+            // member's declaration position.
+            Map<FunctionDeclaration, List<FunctionDeclaration>> groupMembership =
+                groupCore ? groupMembership(statements) : Map.of();
             for (StatementNode statement : statements) {
                 ensureBlockOpen();
                 if (statement instanceof VariableDeclaration decl) {
@@ -9991,7 +10800,17 @@ public final class SemanticLowerer {
                     continue;
                 }
                 if (statement instanceof FunctionDeclaration function) {
+                    if (skipGroupedFunctionDecl(function, groupMembership, moduleLevel)) {
+                        continue;
+                    }
                     lowerBindingFunctionDecl(function, moduleLevel);
+                    continue;
+                }
+                if (statement instanceof ClassDeclaration classDeclaration) {
+                    if (!classCore) {
+                        throw new ConstructUnlowered(describeStatement(statement));
+                    }
+                    lowerClassDeclaration(classDeclaration, false);
                     continue;
                 }
                 if (statement instanceof ExportDeclaration exportDeclaration) {
@@ -10003,10 +10822,22 @@ public final class SemanticLowerer {
                     // function body); the entry/callback/publish records
                     // emit at the unit terminal from the checked export
                     // facts — no position op exists for the export
-                    // wrapper itself.
+                    // wrapper itself. An exported class declaration walks
+                    // through the class arm (class-core mode).
                     if (exportDeclaration.declaration()
                             instanceof FunctionDeclaration exportedFunction) {
+                        if (skipGroupedFunctionDecl(exportedFunction,
+                                groupMembership, moduleLevel)) {
+                            continue;
+                        }
                         lowerBindingFunctionDecl(exportedFunction, moduleLevel);
+                    } else if (exportDeclaration.declaration()
+                            instanceof ClassDeclaration exportedClass) {
+                        if (!classCore) {
+                            throw new ConstructUnlowered(
+                                describeStatement(statement));
+                        }
+                        lowerClassDeclaration(exportedClass, true);
                     }
                     continue;
                 }
@@ -10167,17 +10998,95 @@ public final class SemanticLowerer {
                 }
             }
             emitEntryInvokeDelegation();
+        }
+
+        /**
+         * The invocation-identity finalization of the unified walk
+         * (ISSUE-0634; design sources
+         * {@code project-lowering-entry-and-registration-seeds} D2/D9 and
+         * {@code semantic-ir-construct-coverage-cutover} K12's lowering
+         * side). It is the decision point after the walk and the E7
+         * terminals, where the set of a body's statically materialized
+         * invocations is final:
+         *
+         * <ul>
+         *   <li>every lowered body's reserved invocation identity is
+         *       materialized by at least one emitted op of the unit — an
+         *       exported function's hoisted shape op, an
+         *       entry/callback op, or the first source call site that took
+         *       over the reserved call-site identity (the landed
+         *       discipline);</li>
+         *   <li>the identity is materialized exactly once: two emitted ops
+         *       carrying one body's identity is a producer defect (a body's
+         *       identity names exactly one invocation op);</li>
+         *   <li>a recursive-group member's reserved identity is materialized
+         *       by its group's single {@code RECURSIVE_GROUP_INIT}
+         *       publication (the group arm's member bodies carry no
+         *       {@code RETURN} — the group walk's member-body shape is the
+         *       value-reference body).</li>
+         * </ul>
+         *
+         * <p>A body with neither a statically materialized invocation nor a
+         * group publication is a producer defect of this walk: the body's
+         * {@code RETURN} names the reserved identity, and an identity that
+         * resolves to no op would leave the produced unit rejected by the
+         * closed gate. It is reported here as {@code CONSTRUCT_UNLOWERED} so
+         * the failure names the body, never a dangling identity. The
+         * creation-op takeover of a body with no static invocation (the
+         * body-invocation identity child's D9/K12 arm) replaces this arm
+         * when it lands; no second walk and no synthetic op exist.</p>
+         */
+        private void finalizeInvocationIdentities() {
+            Map<OpId, Integer> occurrences = new LinkedHashMap<>();
+            for (SemanticOp op : ops) {
+                occurrences.merge(op.opId(), 1, Integer::sum);
+            }
             for (Map.Entry<String, FunctionContext> entry
                     : moduleFunctionContexts.entrySet()) {
-                if (isExported(entry.getKey())) {
+                String name = entry.getKey();
+                FunctionContext context = entry.getValue();
+                OpId identity = context.invocationOpId();
+                int count = occurrences.getOrDefault(identity, 0);
+                if (count == 1) {
                     continue;
                 }
-                if (!entry.getValue().callSiteUsed) {
-                    throw new ConstructUnlowered("declared function '" + entry.getKey()
-                        + "' is never called (every non-exported declared function's "
-                        + "single return boundary names an existing invocation)");
+                // A recursive-group member's pre-assigned allocation identity
+                // is published by its group's single RECURSIVE_GROUP_INIT op
+                // (the group arm's member bodies carry no RETURN: the group
+                // walk's member-body shape is the value-reference body, so
+                // the member's reserved identity is referenced by no op and
+                // its materialization is the group publication). The group
+                // arm issues exactly one op per SCC, so the member's identity
+                // is materialized exactly once; the creation-op takeover for
+                // a member body that carries a RETURN is the body-invocation
+                // identity child's extension of this step.
+                if (groupsNaming(context.functionId) == 1) {
+                    continue;
+                }
+                throw new ConstructUnlowered("declared function '" + name
+                    + "' is never called (every non-exported declared function's"
+                    + " single return boundary names an existing invocation: the"
+                    + " reserved invocation identity " + identity + " is"
+                    + " materialized by " + count + " emitted op(s))");
+            }
+        }
+
+        /**
+         * The number of emitted {@code RECURSIVE_GROUP_INIT} ops naming the
+         * given function as a member (exactly one for a group member, zero
+         * for every other body).
+         */
+        private int groupsNaming(FunctionId functionId) {
+            int count = 0;
+            for (SemanticOp op : ops) {
+                if (op.kind() == SemanticOpKind.RECURSIVE_GROUP_INIT
+                        && op.payload()
+                            instanceof KindPayload.RecursiveGroupInitPayload group
+                        && group.functions().contains(functionId)) {
+                    count++;
                 }
             }
+            return count;
         }
 
         /**

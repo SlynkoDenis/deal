@@ -9,6 +9,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -122,12 +123,78 @@ public record NamespaceRegistrations(Map<ModuleId, NamespaceRegistration> regist
      */
     public static Assembly assemble(List<LoweredModuleUnit> closure) {
         Objects.requireNonNull(closure, "closure must not be null");
-        Map<ModuleId, NamespaceRegistration> registrations = new LinkedHashMap<>();
-        Map<ModuleId, List<BindingId>> cellsByModule = new LinkedHashMap<>();
-        Map<ModuleId, ModuleImportKind> kindsByModule = new LinkedHashMap<>();
-        Map<BindingId, ModuleId> ownerOfCell = new LinkedHashMap<>();
+        Recorder recorder = new Recorder(Map.of());
         for (LoweredModuleUnit unit : closure) {
-            Objects.requireNonNull(unit, "closure entries must not be null");
+            Optional<CompilerDiagnostic> failure = recorder.record(unit);
+            if (failure.isPresent()) {
+                return new Assembly(null, List.of(failure.get()));
+            }
+        }
+        return recorder.build();
+    }
+
+    /**
+     * The recording-half builder of the project walk (ISSUE-0634;
+     * {@code project-lowering-entry-and-registration-seeds} D8 and the
+     * namespace registration contract): the registrations are created
+     * <em>before</em> the first unit walk — the map key is the module
+     * identity, so one entry exists per pre-registered distinct resolved
+     * imported module in the given order (closure order, then first-import
+     * declaration order) — and each lowered unit's import arm completes
+     * them as its {@code MODULE_IMPORT} completions are recorded.
+     *
+     * <p>Every rule of {@link #assemble} is enforced here fail-closed and
+     * first-defect-wins: a completion naming a cell that is not an
+     * import-alias allocation of its unit, a cell named by two completions,
+     * a cell registered under two modules, an import-alias allocation named
+     * by no completion (of a unit that carries the modules arm), and a kind
+     * disagreement between a completion and its entry. A pre-registered
+     * module whose completions carry another kind is exactly that kind
+     * disagreement: the entry exists before the walk, so a mismatched
+     * completion is a producer defect, never a second entry.</p>
+     */
+    public static final class Recorder {
+
+        /** The entry kinds in creation order (the registration order). */
+        private final Map<ModuleId, ModuleImportKind> kinds = new LinkedHashMap<>();
+
+        /** The ordered alias cells per module entry. */
+        private final Map<ModuleId, List<BindingId>> cells = new LinkedHashMap<>();
+
+        /** The owning module of every named cell (the one-entry clause). */
+        private final Map<BindingId, ModuleId> ownerOfCell = new LinkedHashMap<>();
+
+        /**
+         * Creates one recorder over the pre-registered entries.
+         *
+         * @param preRegistered the distinct resolved imported modules of
+         *                      the complete closure with their closed
+         *                      import kinds, in closure order then
+         *                      first-import declaration order; non-null
+         */
+        public Recorder(Map<ModuleId, ModuleImportKind> preRegistered) {
+            Objects.requireNonNull(preRegistered, "preRegistered must not be null");
+            for (Map.Entry<ModuleId, ModuleImportKind> entry
+                    : preRegistered.entrySet()) {
+                Objects.requireNonNull(entry.getKey(),
+                    "pre-registered module must not be null");
+                Objects.requireNonNull(entry.getValue(),
+                    "pre-registered kind must not be null");
+                kinds.put(entry.getKey(), entry.getValue());
+                cells.put(entry.getKey(), new ArrayList<>());
+            }
+        }
+
+        /**
+         * Records one lowered unit's completions: the recording rule of
+         * {@link NamespaceRegistrations#assemble} over the given unit's
+         * produced {@code MODULE_IMPORT} payloads.
+         *
+         * @param unit the lowered unit in closure order; non-null
+         * @return empty on success, otherwise the first E6005
+         */
+        public Optional<CompilerDiagnostic> record(LoweredModuleUnit unit) {
+            Objects.requireNonNull(unit, "unit must not be null");
             Set<BindingId> aliases = aliasAllocations(unit);
             Set<BindingId> named = new LinkedHashSet<>();
             int completions = 0;
@@ -139,50 +206,80 @@ public record NamespaceRegistrations(Map<ModuleId, NamespaceRegistration> regist
                 }
                 completions++;
                 ModuleId module = payload.resolvedModule();
-                ModuleImportKind entryKind = kindsByModule.putIfAbsent(module,
-                    payload.kind());
-                if (entryKind != null && entryKind != payload.kind()) {
-                    return fail(unit, "the MODULE_IMPORT completion " + op.opId() + " of "
-                        + module + " carries the kind " + payload.kind()
-                        + " but the module's registration entry kind is " + entryKind
-                        + " (a completion's ModuleImportKind equals its entry's kind)");
+                if (!kinds.containsKey(module)) {
+                    kinds.put(module, payload.kind());
+                    cells.put(module, new ArrayList<>());
                 }
-                List<BindingId> cells = cellsByModule.computeIfAbsent(module,
-                    k -> new ArrayList<>());
+                ModuleImportKind entryKind = kinds.get(module);
+                if (entryKind != payload.kind()) {
+                    return Optional.of(fail(unit, "the MODULE_IMPORT completion "
+                        + op.opId() + " of " + module + " carries the kind "
+                        + payload.kind()
+                        + " but the module's registration entry kind is " + entryKind
+                        + " (a completion's ModuleImportKind equals its entry's kind)"));
+                }
+                List<BindingId> entryCells = cells.get(module);
                 for (BindingId cell : payload.aliasCells()) {
                     if (!aliases.contains(cell)) {
-                        return fail(unit, "the MODULE_IMPORT completion " + op.opId()
-                            + " of " + module + " names the cell " + cell
+                        return Optional.of(fail(unit, "the MODULE_IMPORT completion "
+                            + op.opId() + " of " + module + " names the cell " + cell
                             + " which is not an import-alias allocation of the unit "
-                            + "(a completion names import-alias cells only)");
+                            + "(a completion names import-alias cells only)"));
                     }
                     ModuleId previousOwner = ownerOfCell.putIfAbsent(cell, module);
                     if (previousOwner != null && !previousOwner.equals(module)) {
-                        return fail(unit, "the cell " + cell + " is registered under two "
-                            + "modules (" + previousOwner + " and " + module
-                            + "; every alias cell appears in exactly one entry)");
+                        return Optional.of(fail(unit, "the cell " + cell
+                            + " is registered under two modules (" + previousOwner
+                            + " and " + module
+                            + "; every alias cell appears in exactly one entry)"));
                     }
                     if (!named.add(cell)) {
-                        return fail(unit, "the cell " + cell + " is named by two "
-                            + "MODULE_IMPORT completions (exactly one pinned initializing "
-                            + "write per import-alias allocation)");
+                        return Optional.of(fail(unit, "the cell " + cell
+                            + " is named by two MODULE_IMPORT completions (exactly"
+                            + " one pinned initializing write per import-alias"
+                            + " allocation)"));
                     }
-                    cells.add(cell);
+                    entryCells.add(cell);
                 }
             }
             for (BindingId alias : aliases) {
                 if (completions > 0 && !named.contains(alias)) {
-                    return fail(unit, "the import-alias allocation " + alias
-                        + " is named by no MODULE_IMPORT completion (the completion "
-                        + "write is the import alias's pinned initializing write)");
+                    return Optional.of(fail(unit, "the import-alias allocation "
+                        + alias + " is named by no MODULE_IMPORT completion (the "
+                        + "completion write is the import alias's pinned initializing "
+                        + "write)"));
                 }
             }
+            return Optional.empty();
         }
-        for (Map.Entry<ModuleId, List<BindingId>> entry : cellsByModule.entrySet()) {
-            registrations.put(entry.getKey(), new NamespaceRegistration(entry.getKey(),
-                kindsByModule.get(entry.getKey()), entry.getValue()));
+
+        /**
+         * Builds the recorded registrations: one
+         * {@link NamespaceRegistration} per entry in creation order
+         * (closure order, then first-import declaration order).
+         *
+         * @return the assembled registrations with no diagnostics
+         */
+        public Assembly build() {
+            Map<ModuleId, NamespaceRegistration> registrations = new LinkedHashMap<>();
+            for (Map.Entry<ModuleId, ModuleImportKind> entry : kinds.entrySet()) {
+                registrations.put(entry.getKey(), new NamespaceRegistration(
+                    entry.getKey(), entry.getValue(), cells.get(entry.getKey())));
+            }
+            return new Assembly(new NamespaceRegistrations(registrations), List.of());
         }
-        return new Assembly(new NamespaceRegistrations(registrations), List.of());
+
+        /** The first-defect E6005 of one recording step, with no register set. */
+        private static CompilerDiagnostic fail(LoweredModuleUnit unit, String what) {
+            LoweringFailureDetail detail = new LoweringFailureDetail(
+                unit.moduleId().path(),
+                SemanticCapability.MODULES,
+                NAMESPACE_REGISTRATION,
+                unit.semanticProfile(),
+                LoweredModuleUnit.FORMAT_VERSION,
+                "NamespaceRegistrations record (" + what + ")");
+            return FailureContractRegistry.e6005(detail);
+        }
     }
 
     /**
@@ -207,18 +304,6 @@ public record NamespaceRegistrations(Map<ModuleId, NamespaceRegistration> regist
         }
         moduleScopeAllocs.removeAll(initialized);
         return moduleScopeAllocs;
-    }
-
-    /** The first-defect E6005 of the assembly, with no registration set. */
-    private static Assembly fail(LoweredModuleUnit unit, String what) {
-        LoweringFailureDetail detail = new LoweringFailureDetail(
-            unit.moduleId().path(),
-            SemanticCapability.MODULES,
-            NAMESPACE_REGISTRATION,
-            unit.semanticProfile(),
-            LoweredModuleUnit.FORMAT_VERSION,
-            "NamespaceRegistrations assemble (" + what + ")");
-        return new Assembly(null, List.of(FailureContractRegistry.e6005(detail)));
     }
 
     /**

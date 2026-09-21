@@ -252,4 +252,17 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # half of project-lowering-entry-and-registration-seeds D8 and of
   # semantic-ir-construct-coverage-cutover K9 item 8/K15 items 1-2).
   'fg|=== Running Import Alias Cells / Namespace Registration Tests (ISSUE-0633) ===|java -ea -cp build deal.test.ModuleImportNamespaceRegistrationTest'
+  # ISSUE-0634 registration: the one project lowering entry, the one
+  # allocator, and the composed validator chain
+  # (project-lowering-entry-and-registration-seeds D1/D2/D4/D8/D11/D12
+  # and the project lowering, registration-seed, namespace registration,
+  # and project validation gate contracts;
+  # luajit-jvm-single-lowering-production-cutover C1/C4/C7/C10;
+  # semantic-ir-construct-coverage-cutover K3/K12's lowering context):
+  # the real multi-module checked project closure, the one allocator, the
+  # byte-identical repeated project dumps, the seeds/intrinsic
+  # bindings/namespace registrations delivery, the composed per-unit
+  # chain over the E7-armed unified units, the four named negative seeds,
+  # and the declaration-class fail-closed acceptance.
+  'fg|=== Running Project Lowering Entry Tests (ISSUE-0634) ===|java -ea -cp build deal.test.ProjectLoweringTest'
 )
