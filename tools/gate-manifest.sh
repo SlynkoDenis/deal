@@ -287,4 +287,22 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # declaration to a validating unit through its own frontend chain, and
   # the two producer-defect negatives fail R-BOUNDARY-TRIPLE.
   'fg|=== Running Body-Invocation Identity Tests (ISSUE-0635) ===|java -ea -cp build deal.test.BodyInvocationIdentityTest'
+  # ISSUE-0637 registration: the project-gate fault battery and the
+  # unchanged-surface audit
+  # (project-lowering-entry-and-registration-seeds Sequencing item 6 and
+  # Verifications 7-8, D11/D12; semantic-ir-construct-coverage-cutover
+  # K9's frozen extension set; luajit-jvm-single-lowering-production-
+  # cutover C5/C6): one fault per newly composed gate clause driven
+  # through the real lowerProject entry (the declaration-fact faults and
+  # the inconsistent-fact deferral) and through the same composed
+  # per-unit chain over units the entry produced (the intrinsic
+  # admission clauses, the alias/namespace agreement, and the two
+  # body-local producer defects), each returning the first E6005 with its
+  # rule, module, capability, and origin and producing no project, no
+  # tables, no registries, no seeds, and no registrations; plus the
+  # frozen-surface assertions over the real loaded closed sets, the
+  # payload-record shapes, the version text and both dump key sets, the
+  # production source surface (no lowerProject call site), JavaScript,
+  # the retained classes, and the gate manifest itself.
+  'fg|=== Running Project-Gate Fault Battery / Unchanged-Surface Audit Tests (ISSUE-0637) ===|java -ea -cp build deal.test.ProjectGateFaultBatteryTest'
 )
