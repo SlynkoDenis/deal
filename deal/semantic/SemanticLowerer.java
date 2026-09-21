@@ -11182,13 +11182,13 @@ public final class SemanticLowerer {
          *       discipline);</li>
          *   <li>when no statically materialized invocation took over, the
          *       body's function-value creation op materializes the
-         *       identity: the body's {@code CLOSURE_NEW} is re-keyed to
-         *       the reserved identity (the same op under the reserved op
-         *       id, so the body's {@code RETURN} — which already names the
-         *       reserved id — names it), or the body's group's single
-         *       {@code RECURSIVE_GROUP_INIT} publication is the member's
-         *       creation op, so the member's {@code RETURN} ops name its
-         *       op id (the group arm issues exactly one op per SCC).</li>
+         *       identity and the body's {@code RETURN} ops are re-keyed to
+         *       that op's own op id: the body's {@code CLOSURE_NEW} is the
+         *       creation op, or the body's group's single
+         *       {@code RECURSIVE_GROUP_INIT} publication is (the group arm
+         *       issues exactly one op per SCC). The creation op is never
+         *       re-keyed: it is an ordinary value producer other ops
+         *       reference by op id.</li>
          * </ul>
          *
          * <p>A body with neither a statically materialized invocation nor
@@ -11224,7 +11224,7 @@ public final class SemanticLowerer {
                         + identity + " (a body's identity names exactly one"
                         + " invocation op)");
                 }
-                OpId materialized = materializeCreationIdentity(context, occurrences);
+                OpId materialized = materializeCreationIdentity(context);
                 if (occurrences.getOrDefault(materialized, 0) != 1) {
                     throw new ConstructUnlowered("function id "
                         + context.functionId.id() + " carries no emitted op under"
@@ -11245,10 +11245,13 @@ public final class SemanticLowerer {
          *
          * <ul>
          *   <li>a {@code CLOSURE_NEW} whose {@code function} equals the
-         *       body's function id is re-keyed to the reserved identity
-         *       (the block-membership table follows the emitted op set), so
-         *       the creation op materializes the identity the body's
-         *       {@code RETURN} already names;</li>
+         *       body's function id is the body's creation op: the body's
+         *       {@code RETURN} ops are re-keyed from the reserved identity
+         *       to the creation op's own op id, so the op that publishes
+         *       the body's function value materializes the body's
+         *       invocation identity and every reference to that op — the
+         *       value child of an address chain storing the body's
+         *       function value included — stays resolvable;</li>
          *   <li>a {@code RECURSIVE_GROUP_INIT} whose publication includes
          *       the body's function id is the member's creation op: the
          *       member's {@code RETURN} ops are re-keyed from the reserved
@@ -11257,54 +11260,33 @@ public final class SemanticLowerer {
          *       member's materialized identity).</li>
          * </ul>
          *
-         * @param context     the body's function context; non-null
-         * @param occurrences the emitted op-id occurrences, updated by the
-         *                    CLOSURE_NEW re-key; non-null
+         * <p>The identity is materialized under the creation op's own op
+         * id, never by re-keying the creation op: a creation op is an
+         * ordinary value producer that other ops reference by op id (the
+         * closed address chains list their value child by op id), so
+         * moving the op would invalidate those references. The reserved
+         * identity stays the body's identity for the statically invoked
+         * case only, where the invocation op carries it.</p>
+         *
+         * @param context the body's function context; non-null
          * @return the op id materializing the body's invocation identity
          * @throws ConstructUnlowered when the body carries no function-value
          *         creation op (a producer defect)
          */
-        private OpId materializeCreationIdentity(FunctionContext context,
-                                                 Map<OpId, Integer> occurrences) {
+        private OpId materializeCreationIdentity(FunctionContext context) {
             for (int i = 0; i < ops.size(); i++) {
                 SemanticOp op = ops.get(i);
                 if (op.kind() == SemanticOpKind.CLOSURE_NEW
                         && op.payload() instanceof KindPayload.ClosureNewPayload closure
                         && closure.function().equals(context.functionId)) {
-                    OpId reserved = context.callSiteOpId;
-                    if (!reserved.equals(op.opId())) {
-                        ops.set(i, buildOp(reserved, op.kind(), op.payload(), op.result(),
-                            op.resultType(), op.operands(), op.operandTypes(),
-                            op.failurePolicy(), op.origin()));
-                        renameBlockMembership(op.opId(), reserved);
-                        occurrences.remove(op.opId());
-                        occurrences.merge(reserved, 1, Integer::sum);
-                    }
-                    return reserved;
+                    rekeyReturnIdentity(context.functionId, op.opId());
+                    return op.opId();
                 }
                 if (op.kind() == SemanticOpKind.RECURSIVE_GROUP_INIT
                         && op.payload()
                             instanceof KindPayload.RecursiveGroupInitPayload group
                         && group.functions().contains(context.functionId)) {
-                    for (int j = 0; j < ops.size(); j++) {
-                        SemanticOp candidate = ops.get(j);
-                        if (candidate.kind() != SemanticOpKind.RETURN
-                                || !(candidate.payload()
-                                    instanceof KindPayload.ReturnPayload returned)
-                                || !returned.function().equals(context.functionId)
-                                || !returned.enclosingInvocationOpId()
-                                    .equals(context.callSiteOpId)) {
-                            continue;
-                        }
-                        KindPayload.ReturnPayload rewritten =
-                            new KindPayload.ReturnPayload(returned.value(),
-                                returned.function(), op.opId(),
-                                returned.returnBoundaryOpId());
-                        ops.set(j, buildOp(candidate.opId(), candidate.kind(), rewritten,
-                            candidate.result(), candidate.resultType(),
-                            candidate.operands(), candidate.operandTypes(),
-                            candidate.failurePolicy(), candidate.origin()));
-                    }
+                    rekeyReturnIdentity(context.functionId, op.opId());
                     return op.opId();
                 }
             }
@@ -11316,26 +11298,36 @@ public final class SemanticLowerer {
         }
 
         /**
-         * Re-keys one emitted op's block membership from its old op id to
-         * the new one (the creation-op takeover): the block's ordered op
-         * list and the inverse membership map stay exactly the table of the
-         * emitted op set ({@code ControlFlowValidator}'s table contract).
+         * Re-keys one body's {@code RETURN} ops from the body's reserved
+         * invocation identity to the op id materializing it (the
+         * creation-op takeover): every {@code RETURN} of the function that
+         * does not already name the identity names it afterwards, so the
+         * closed boundary-assignment table's body-local return cell
+         * resolves the body's creation op through the {@code RETURN}. The
+         * creation op itself is never re-keyed — it keeps its own op id,
+         * so every op-id reference to it stays resolvable.
          *
-         * @param from the emitted op's original op id; non-null
-         * @param to   the op id the same op carries afterwards; non-null
+         * @param function the body's function identity; non-null
+         * @param identity the op id materializing the body's identity (the
+         *                 body's creation op); non-null
          */
-        private void renameBlockMembership(OpId from, OpId to) {
-            for (Map.Entry<BlockId, List<OpId>> entry : blockOps.entrySet()) {
-                List<OpId> ids = entry.getValue();
-                for (int i = 0; i < ids.size(); i++) {
-                    if (ids.get(i).equals(from)) {
-                        ids.set(i, to);
-                    }
+        private void rekeyReturnIdentity(FunctionId function, OpId identity) {
+            for (int j = 0; j < ops.size(); j++) {
+                SemanticOp candidate = ops.get(j);
+                if (candidate.kind() != SemanticOpKind.RETURN
+                        || !(candidate.payload()
+                            instanceof KindPayload.ReturnPayload returned)
+                        || !returned.function().equals(function)
+                        || returned.enclosingInvocationOpId().equals(identity)) {
+                    continue;
                 }
-            }
-            BlockId block = opBlocks.remove(from);
-            if (block != null) {
-                opBlocks.put(to, block);
+                KindPayload.ReturnPayload rewritten =
+                    new KindPayload.ReturnPayload(returned.value(),
+                        returned.function(), identity, returned.returnBoundaryOpId());
+                ops.set(j, buildOp(candidate.opId(), candidate.kind(), rewritten,
+                    candidate.result(), candidate.resultType(),
+                    candidate.operands(), candidate.operandTypes(),
+                    candidate.failurePolicy(), candidate.origin()));
             }
         }
 

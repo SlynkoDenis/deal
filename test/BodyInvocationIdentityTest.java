@@ -29,6 +29,7 @@ import deal.semantic.ModuleFact;
 import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticRequirementManifest;
+import deal.semantic.ir.AssignTargetKind;
 import deal.semantic.ir.BoundaryKind;
 import deal.semantic.ir.ContractSnapshotCanonicalizer;
 import deal.semantic.ir.ExecutableLoweredProject;
@@ -72,13 +73,16 @@ import java.util.Set;
  * {@code semantic-ir-construct-coverage-cutover} K12's lowering side).
  *
  * <ol>
- *   <li>three purpose-built minimal checked projects lower through
+ *   <li>five purpose-built minimal checked projects lower through
  *       {@link SemanticLowerer#lowerProject} with zero
  *       {@code CONSTRUCT_UNLOWERED}: a non-exported declaration with zero
  *       call sites whose identity is its {@code CLOSURE_NEW} result, a
- *       never-invoked stored function expression, and a never-invoked
- *       recursive-group member whose identity is the
- *       {@code RECURSIVE_GROUP_INIT} publication;</li>
+ *       never-invoked stored function expression in its declaration form,
+ *       its assigned form (the address chain's value child is the
+ *       creation op), its slot-written forms (TABLE_SLOT, ARRAY_SLOT,
+ *       CLASS_FIELD chains), and a never-invoked recursive-group member
+ *       whose identity is the {@code RECURSIVE_GROUP_INIT}
+ *       publication;</li>
  *   <li>each body's {@code RETURN} identity resolves in the project
  *       closure to exactly one emitted op, and each body carries exactly
  *       one body-local {@code FUNCTION_RETURN} cell — parented to the
@@ -137,7 +141,7 @@ public class BodyInvocationIdentityTest {
 
     private static void testZeroCallSiteDeclaration() throws Exception {
         System.out.println("-- a non-exported declaration with zero call sites: the "
-            + "CLOSURE_NEW carries the reserved identity --");
+            + "CLOSURE_NEW materializes the identity --");
         RealProject project = compileProject(ZERO_CALL_SITE_SOURCE);
         try {
             SemanticLowerer.ProjectLoweringResult result = lower(project);
@@ -187,7 +191,7 @@ public class BodyInvocationIdentityTest {
 
     private static void testNeverInvokedStoredFunctionExpression() throws Exception {
         System.out.println("-- a never-invoked stored function expression: the "
-            + "CLOSURE_NEW carries the reserved identity --");
+            + "CLOSURE_NEW materializes the identity --");
         RealProject project = compileProject(STORED_EXPRESSION_SOURCE);
         try {
             SemanticLowerer.ProjectLoweringResult result = lower(project);
@@ -215,6 +219,136 @@ public class BodyInvocationIdentityTest {
                             instanceof KindPayload.ClosureNewPayload closure
                             && closure.function().equals(payload.function()),
                         "the CLOSURE_NEW allocates the returning function");
+                }
+            }
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    // =========================================================================
+    // Fixture 2b: a never-invoked stored function expression — the assigned
+    // storing form (the address chain's value child is the creation op)
+    // =========================================================================
+
+    private static final String ASSIGNED_EXPRESSION_SOURCE = """
+        export function main(): null {
+          let n: int = 1;
+          let g: () => null = function(): null {
+            return null;
+          };
+          n = n + 1;
+          g = function(): null {
+            return null;
+          };
+          return null;
+        }
+        """;
+
+    private static void testAssignedNeverInvokedFunctionExpression() throws Exception {
+        System.out.println("-- a never-invoked function expression stored by assignment: "
+            + "the closed chain value child is the creation op --");
+        RealProject project = compileProject(ASSIGNED_EXPRESSION_SOURCE);
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(project);
+            check(result.project() != null && result.diagnostics().isEmpty(),
+                "the assigned never-invoked function expression lowers with zero "
+                    + "diagnostics: " + result.diagnostics());
+            if (result.project() == null) {
+                return;
+            }
+            LoweredModuleUnit unit = onlyModule(result.project());
+            assertChainChildrenResolve(unit);
+            check(chainChildIsCreationOp(unit, AssignTargetKind.VARIABLE),
+                "the VARIABLE assignment chain names the function expression's "
+                    + "CLOSURE_NEW as its committed value child");
+            List<SemanticOp> bodyLocal = bodyLocalReturnCells(unit);
+            checkEq(2, bodyLocal.size(),
+                "both never-invoked function expressions carry the body-local identity "
+                    + "cell; got " + bodyLocal.size());
+            for (SemanticOp returned : bodyLocal) {
+                KindPayload.ReturnPayload payload =
+                    (KindPayload.ReturnPayload) returned.payload();
+                SemanticOp creation = resolveOp(unit, payload.enclosingInvocationOpId());
+                check(creation != null && creation.kind() == SemanticOpKind.CLOSURE_NEW,
+                    "the assigned expression's identity is its CLOSURE_NEW; got "
+                        + (creation == null ? "unresolved" : creation.kind().name()));
+                if (creation != null) {
+                    assertBodyLocalCell(result, unit, payload.function(), creation);
+                    check(creation.opId().equals(payload.enclosingInvocationOpId()),
+                        "the body's RETURN names the creation op's own op id (every "
+                            + "chain reference to it stays resolvable)");
+                }
+            }
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    // =========================================================================
+    // Fixture 2c: a never-invoked stored function expression — the slot-written
+    // storing forms (TABLE_SLOT, ARRAY_SLOT, CLASS_FIELD chains)
+    // =========================================================================
+
+    private static final String SLOT_WRITTEN_EXPRESSION_SOURCE = """
+        class Box {
+          run: () => null = function(): null {
+            return null;
+          };
+        }
+
+        export function main(): null {
+          let t: table = { run: function(): null { return null; } };
+          t.run = function(): null {
+            return null;
+          };
+          let fs: (() => null)[] = [];
+          fs[0] = function(): null {
+            return null;
+          };
+          let b: Box = { run: function(): null { return null; } };
+          b.run = function(): null {
+            return null;
+          };
+          return null;
+        }
+        """;
+
+    private static void testSlotWrittenNeverInvokedFunctionExpression() throws Exception {
+        System.out.println("-- a never-invoked function expression stored by a slot "
+            + "write: the closed chain value child is the creation op --");
+        RealProject project = compileProject(SLOT_WRITTEN_EXPRESSION_SOURCE);
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(project);
+            check(result.project() != null && result.diagnostics().isEmpty(),
+                "the slot-written never-invoked function expressions lower with zero "
+                    + "diagnostics: " + result.diagnostics());
+            if (result.project() == null) {
+                return;
+            }
+            LoweredModuleUnit unit = onlyModule(result.project());
+            assertChainChildrenResolve(unit);
+            check(chainChildIsCreationOp(unit, AssignTargetKind.TABLE_SLOT),
+                "the TABLE_SLOT assignment chain names the function expression's "
+                    + "CLOSURE_NEW as its committed value child");
+            check(chainChildIsCreationOp(unit, AssignTargetKind.ARRAY_SLOT),
+                "the ARRAY_SLOT assignment chain names the function expression's "
+                    + "CLOSURE_NEW as its committed value child");
+            check(chainChildIsCreationOp(unit, AssignTargetKind.CLASS_FIELD),
+                "the CLASS_FIELD assignment chain names the function expression's "
+                    + "CLOSURE_NEW as its committed value child");
+            List<SemanticOp> bodyLocal = bodyLocalReturnCells(unit);
+            check(bodyLocal.size() >= 3,
+                "the three slot-written never-invoked function expressions carry the "
+                    + "body-local identity cell; got " + bodyLocal.size());
+            for (SemanticOp returned : bodyLocal) {
+                KindPayload.ReturnPayload payload =
+                    (KindPayload.ReturnPayload) returned.payload();
+                SemanticOp creation = resolveOp(unit, payload.enclosingInvocationOpId());
+                check(creation != null && creation.kind() == SemanticOpKind.CLOSURE_NEW,
+                    "each slot-written expression's identity is its CLOSURE_NEW");
+                if (creation != null) {
+                    assertBodyLocalCell(result, unit, payload.function(), creation);
                 }
             }
         } finally {
@@ -520,6 +654,58 @@ public class BodyInvocationIdentityTest {
             }
         }
         return bodyLocal;
+    }
+
+    /**
+     * Asserts the closed address chains of the produced unit: every
+     * {@code ASSIGN}/{@code DELETE} chain child named by the payload
+     * resolves to an emitted op of the unit (the address-chain protocol's
+     * child-resolution requirement — the regression's direct measure: a
+     * chain referencing a body's creation op keeps resolving after the
+     * identity takeover).
+     */
+    private static void assertChainChildrenResolve(LoweredModuleUnit unit) {
+        int chains = 0;
+        for (SemanticOp op : unit.ops()) {
+            List<OpId> children = null;
+            if (op.payload() instanceof KindPayload.AssignPayload assign) {
+                children = assign.childOps();
+            } else if (op.payload() instanceof KindPayload.DeletePayload delete) {
+                children = delete.childOps();
+            }
+            if (children == null) {
+                continue;
+            }
+            chains++;
+            for (OpId child : children) {
+                check(resolveOp(unit, child) != null,
+                    "the " + op.kind() + " chain child " + child
+                        + " resolves to an emitted op of the unit");
+            }
+        }
+        check(chains > 0, "the unit carries closed address chains");
+    }
+
+    /**
+     * Whether one target kind's {@code ASSIGN} chain names a body's
+     * function-value creation op ({@code CLOSURE_NEW}) among its children.
+     */
+    private static boolean chainChildIsCreationOp(LoweredModuleUnit unit,
+            AssignTargetKind targetKind) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() != SemanticOpKind.ASSIGN
+                    || !(op.payload() instanceof KindPayload.AssignPayload assign)
+                    || assign.targetKind() != targetKind) {
+                continue;
+            }
+            for (OpId child : assign.childOps()) {
+                SemanticOp childOp = resolveOp(unit, child);
+                if (childOp != null && childOp.kind() == SemanticOpKind.CLOSURE_NEW) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // =========================================================================
@@ -859,6 +1045,8 @@ public class BodyInvocationIdentityTest {
         System.out.println("=== Body-Invocation Identity Tests (ISSUE-0635) ===\n");
         testZeroCallSiteDeclaration();
         testNeverInvokedStoredFunctionExpression();
+        testAssignedNeverInvokedFunctionExpression();
+        testSlotWrittenNeverInvokedFunctionExpression();
         testNeverInvokedRecursiveGroupMember();
         testCarrierSliceEntryAcceptsNeverCalledDeclaration();
         testBodyLocalIdentityWithAssignedShape();
