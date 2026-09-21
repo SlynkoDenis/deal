@@ -17,6 +17,8 @@ import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredFunction;
 import deal.semantic.ir.LoweredModuleUnit;
 import deal.semantic.ir.LoweringFailureDetail;
+import deal.semantic.ir.ModuleId;
+import deal.semantic.ir.ModuleImportKind;
 import deal.semantic.ir.OpId;
 import deal.semantic.ir.RuntimeDescriptor;
 import deal.semantic.ir.SemanticCapability;
@@ -127,7 +129,13 @@ public final class BindingsProductionValidator {
     /** The generation-resolution rule (B9): every {@code {binding, generation}} reference resolves. */
     public static final String BINDING_GENERATION_RESOLUTION = "BINDING_GENERATION_RESOLUTION";
 
-    /** The init-once rule (B9): one INIT per source-declaration incarnation; no INIT on a pinned-write cell. */
+    /**
+     * The init-once rule (B9): one INIT per source-declaration
+     * incarnation; no INIT on a pinned-write cell; and the
+     * {@code MODULE_IMPORT} completion agreement — the payload's explicit
+     * alias-cell list names exactly the unit's import-alias allocations,
+     * once each.
+     */
     public static final String BINDING_INIT_ONCE = "BINDING_INIT_ONCE";
 
     /** The init-dominates-load rule (B9): loads only; stores are exempt. */
@@ -436,8 +444,18 @@ public final class BindingsProductionValidator {
         /** The registry entry per LoweredBody function id. */
         final Map<FunctionId, Map.Entry<FunctionAllocationIdentity,
             FunctionExecutionBinding>> registryByFunction = new LinkedHashMap<>();
-        /** The MODULE_IMPORT ops in unit op order (the import-alias writes). */
+        /** The MODULE_IMPORT ops in unit op order (the import-alias completions). */
         final List<SemanticOp> moduleImports = new ArrayList<>();
+        /**
+         * The MODULE_IMPORT completions per named alias cell, in unit op
+         * order (the payload's explicit alias-cell list is the
+         * alias&#8596;import join; the declaration-order positional
+         * pairing is superseded). A cell with zero entries is named by no
+         * completion; a cell with two entries is doubly named — both are
+         * producer defects ({@code BINDING_INIT_ONCE}'s completion
+         * agreement arm).
+         */
+        final Map<BindingId, List<SemanticOp>> completionsByCell = new LinkedHashMap<>();
         /** The no-INIT module-region ALLOCs in unit op order (the import aliases). */
         final List<SemanticOp> aliasAllocs = new ArrayList<>();
         /** The walk's pinned parameter bindings (BINDING_INIT_ONCE's checker-fact arm). */
@@ -645,6 +663,13 @@ public final class BindingsProductionValidator {
                 }
                 if (op.kind() == SemanticOpKind.MODULE_IMPORT) {
                     model.moduleImports.add(op);
+                    if (op.payload()
+                            instanceof KindPayload.ModuleImportPayload importPayload) {
+                        for (BindingId cell : importPayload.aliasCells()) {
+                            model.completionsByCell
+                                .computeIfAbsent(cell, k -> new ArrayList<>()).add(op);
+                        }
+                    }
                 }
             }
             for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
@@ -1121,12 +1146,16 @@ public final class BindingsProductionValidator {
                 return new Write(allocation.op);
             }
             if (root != null && root.equals(regionRoot.get(moduleRoot))) {
-                // An import alias: the paired MODULE_IMPORT op's
-                // completion (declaration-order pairing). A missing
-                // pair fails closed.
-                int aliasIndex = aliasAllocs.indexOf(allocation.op);
-                if (aliasIndex >= 0 && aliasIndex < moduleImports.size()) {
-                    return new Write(moduleImports.get(aliasIndex));
+                // An import alias: the unique MODULE_IMPORT completion
+                // whose payload names this allocation in its explicit
+                // alias-cell list (the declared alias&#8596;import join
+                // supersedes the declaration-order positional pairing).
+                // A cell named by no completion or by two fails closed —
+                // BINDING_INIT_ONCE's completion agreement arm rejects
+                // the unit first; the null here stays defensive.
+                List<SemanticOp> completions = completionsByCell.get(alloc.binding());
+                if (completions != null && completions.size() == 1) {
+                    return new Write(completions.get(0));
                 }
                 return null;
             }
@@ -1662,6 +1691,88 @@ public final class BindingsProductionValidator {
                         + "} targets a catch binding's cell (the catch-entry write is "
                         + "TRY_CATCH's pinned initializing write)");
                 }
+            }
+        }
+        return checkAliasCompletionAgreement(model);
+    }
+
+    /**
+     * The import-alias completion agreement (the explicit-cell-list
+     * discipline of {@code ModuleImportPayload.aliasCells}). The payload's
+     * ordered cell list is the declared alias&#8596;import join: every
+     * named cell must be an import-alias allocation of the unit, every
+     * import-alias allocation must be named by exactly one
+     * {@code MODULE_IMPORT} completion, and one cell never carries two
+     * completions — including two resolved modules (a cell is registered
+     * under exactly one module) or two kinds (a completion's
+     * {@code ModuleImportKind} equals its registration entry's kind).
+     * This is the completion-write half of {@code BINDING_INIT_ONCE}: the
+     * completion is the pinned initializing write of the alias cell, so
+     * the write exists exactly once in each direction. The agreement is
+     * enforced for every unit a walk with the modules arm produced (at
+     * least one completion); a unit with zero completions comes from the
+     * intermediate class/binding windows, which lower module ASTs without
+     * resolved import facts and carry no alias-cell recording surface.
+     */
+    private static Optional<CompilerDiagnostic> checkAliasCompletionAgreement(Model model) {
+        if (model.moduleImports.isEmpty()) {
+            // The modules arm did not run for this unit: the intermediate
+            // class/binding windows lower module ASTs without resolved
+            // import facts and emit no completion, so the unit carries no
+            // alias-cell recording surface and its aliases stay inert
+            // exactly as before this slice. The agreement below is the
+            // property of every unit a walk with the modules arm produced
+            // (at least one completion).
+            return Optional.empty();
+        }
+        Set<BindingId> aliases = new LinkedHashSet<>();
+        for (SemanticOp op : model.aliasAllocs) {
+            aliases.add(((KindPayload.BindingAllocPayload) op.payload()).binding());
+        }
+        aliases.addAll(model.importAliases);
+        Map<BindingId, SemanticOp> completions = new LinkedHashMap<>();
+        Map<ModuleId, ModuleImportKind> entryKinds = new LinkedHashMap<>();
+        for (SemanticOp op : model.moduleImports) {
+            if (!(op.payload() instanceof KindPayload.ModuleImportPayload payload)) {
+                continue; // the closed kind mapping guarantees this; defensive
+            }
+            ModuleImportKind entryKind = entryKinds.putIfAbsent(payload.resolvedModule(),
+                payload.kind());
+            if (entryKind != null && entryKind != payload.kind()) {
+                return fail(model, BINDING_INIT_ONCE, "the MODULE_IMPORT completion of "
+                    + payload.resolvedModule() + " carries the kind " + payload.kind()
+                    + " but the module's registration entry kind is " + entryKind
+                    + " (a completion's kind equals its entry's kind)");
+            }
+            for (BindingId cell : payload.aliasCells()) {
+                if (!aliases.contains(cell)) {
+                    return fail(model, BINDING_INIT_ONCE, "the MODULE_IMPORT op "
+                        + op.opId() + " of " + payload.resolvedModule() + " names the cell "
+                        + cell + " which is not an import-alias allocation of the unit "
+                        + "(a completion names import-alias cells only)");
+                }
+                SemanticOp previous = completions.putIfAbsent(cell, op);
+                if (previous != null) {
+                    KindPayload.ModuleImportPayload previousPayload =
+                        (KindPayload.ModuleImportPayload) previous.payload();
+                    if (!previousPayload.resolvedModule().equals(payload.resolvedModule())) {
+                        return fail(model, BINDING_INIT_ONCE, "the cell " + cell
+                            + " is named by the MODULE_IMPORT completions of two modules ("
+                            + previousPayload.resolvedModule() + " and "
+                            + payload.resolvedModule()
+                            + "; a cell is registered under exactly one module)");
+                    }
+                    return fail(model, BINDING_INIT_ONCE, "the cell " + cell
+                        + " is named by two MODULE_IMPORT completions (exactly one pinned "
+                        + "initializing write per import-alias allocation)");
+                }
+            }
+        }
+        for (BindingId alias : aliases) {
+            if (!completions.containsKey(alias)) {
+                return fail(model, BINDING_INIT_ONCE, "the import-alias allocation " + alias
+                    + " is named by no MODULE_IMPORT completion (the completion write is "
+                    + "the import alias's pinned initializing write)");
             }
         }
         return Optional.empty();
