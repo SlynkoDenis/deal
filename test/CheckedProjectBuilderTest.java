@@ -902,12 +902,15 @@ public class CheckedProjectBuilderTest {
             check(b.classId().text().equals("@host.lib/B") && b.constructionEntry().equals(
                     new ClassFactoryId(1)),
                 "lib.B gets constructionEntry 1 with classId @host.lib/B");
-            check(c.classId().text().equals("@main/C") && c.constructionEntry().equals(
+            check(c.classId().text().equals("@src/C") && c.constructionEntry().equals(
                     new ClassFactoryId(2)),
-                "main.C gets constructionEntry 2 with classId @main/C");
-            check(d.classId().text().equals("@main/D") && d.constructionEntry().equals(
+                "main.C gets constructionEntry 2 with the checker-resolved class "
+                    + "identity @src/C (the root-relative source directory, never the "
+                    + "dotted module path)");
+            check(d.classId().text().equals("@src/D") && d.constructionEntry().equals(
                     new ClassFactoryId(3)),
-                "main.D gets constructionEntry 3 with classId @main/D");
+                "main.D gets constructionEntry 3 with the checker-resolved class "
+                    + "identity @src/D");
 
             // FieldInterface facts from the ClassField records (declaration
             // entry via the pinned TypeNode grammar; implementation entry via

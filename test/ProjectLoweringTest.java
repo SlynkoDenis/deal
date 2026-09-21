@@ -11,6 +11,7 @@ import deal.semantic.CapabilityRegistry;
 import deal.semantic.CheckedModuleInput;
 import deal.semantic.CheckedProjectBuildResult;
 import deal.semantic.CheckedProjectInput;
+import deal.semantic.ClassConstructionValidator;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.HostDeclarationSurface;
@@ -21,13 +22,17 @@ import deal.semantic.ir.AddressChainProtocol;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BindingCellKind;
 import deal.semantic.ir.BlockId;
-import deal.semantic.ir.ClassId;
+import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.ClassFactoryId;
 import deal.semantic.ir.ClassFactoryRegistry;
+import deal.semantic.ir.ClassId;
+import deal.semantic.ir.ClassInterface;
 import deal.semantic.ir.ClassLayout;
 import deal.semantic.ir.ContractSnapshotCanonicalizer;
 import deal.semantic.ir.DefaultOwner;
 import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.ExportPlan;
+import deal.semantic.ir.ExternalModuleInterface;
 import deal.semantic.ir.FunctionAllocationIdentity;
 import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.IntrinsicKind;
@@ -96,15 +101,21 @@ import java.util.Set;
  *       validator, and the class-construction validator) accepts the
  *       E7-armed unified units, so the unsupplied-facts chain members are
  *       re-asserted directly over the produced units and tables;</li>
+ *   <li>the unified walk's class arm: an implementation module declares an
+ *       exported and a local class and constructs both in the one session,
+ *       so the unit's own {@code classLayouts} entries, the
+ *       {@code CLASS_NEW(LOCAL)} constructions, and the exported class's
+ *       {@code CLASS_FACTORY} registration are asserted over the produced
+ *       unit and the composed chain re-runs over it;</li>
  *   <li>the four negative seeds (a corrupted unit, a missing module, a
  *       non-v1.2 invocation, an alias without a resolved import fact)
  *       return the first E6005 and no project, no tables, no registries, no
  *       seeds, and no registrations;</li>
  *   <li>the declaration-class fail-closed acceptance: a checker-valid
- *       literal of a host declaration class and of the builtin
- *       {@code Error} resolves to the seed's owner member and fails closed
- *       at the class-construction validator — never a silent construction
- *       and never an artifact.</li>
+ *       literal of a host declaration class, of an extern-C declaration
+ *       class, and of the builtin {@code Error} resolves to the seed's
+ *       owner member and fails closed at the class-construction validator
+ *       — never a silent construction and never an artifact.</li>
  * </ol>
  */
 public class ProjectLoweringTest {
@@ -218,6 +229,80 @@ public class ProjectLoweringTest {
         }
         """;
 
+    /**
+     * The in-project class arm: an implementation module declares an
+     * exported class and a local class and constructs both, so the unified
+     * walk's class-declaration arm, its class-literal arm, and the exported
+     * variant's {@code CLASS_FACTORY} run in one session with the call and
+     * closure arms.
+     */
+    private static final String CLASS_UTIL_SOURCE = """
+        export class Point {
+          x: int = 0;
+          y: int = 1;
+        }
+
+        class Hidden {
+          label: string = "hidden";
+        }
+
+        export function makePoint(x: int): Point {
+          let p: Point = {x: x};
+          let h: Hidden = {label: "local"};
+          return p;
+        }
+        """;
+
+    private static final String CLASS_APP_SOURCE = """
+        import * as u from "util"
+
+        export function main(): null {
+          let p: u.Point = u.makePoint(4);
+          return null;
+        }
+        """;
+
+    // The compiler's canonical module path of a root-contained module is
+    // the configured root text plus the source's relative directory
+    // components (the file name is omitted), so both classes of the
+    // fixture — declared in the flat `src` root — carry `@src/<Name>`:
+    // the identity the checker, the declaration surface, the checked
+    // project's interface index, and the legacy emission all produce.
+    private static final ClassId POINT = new ClassId("src", "Point");
+    private static final ClassId HIDDEN = new ClassId("src", "Hidden");
+
+    /**
+     * The extern-C declaration module of the fail-closed acceptance (the
+     * {@code FFI_PLAN} seed owner): a C-struct class with its phase-3.9
+     * generated plan and a declared C function.
+     */
+    private static final String NATIVE_DECLARATION = """
+        // @extern-c
+
+        // @c-struct
+        export class Vec2 {
+          x: number = 0.0;
+          y: number = 0.0;
+        }
+
+        export function ffi_pair_sum(value: Vec2): number;
+        """;
+
+    private static final ModuleId NATIVE = new ModuleId("native.math");
+    private static final String NATIVE_SPECIFIER = "native/math";
+    private static final ClassId NATIVE_VEC2 =
+        new ClassId("$external/native/math", "Vec2");
+
+    /** The extern-C declaration-class construction (the fail-closed acceptance). */
+    private static final String EXTERN_C_CLASS_APP_SOURCE = """
+        import * as native from "native/math"
+
+        export function main(): null {
+          let v: native.Vec2 = {x: 1.0, y: 2.0};
+          return null;
+        }
+        """;
+
     // =========================================================================
     // The real-project harness (the production frontend + the project entry)
     // =========================================================================
@@ -234,16 +319,36 @@ public class ProjectLoweringTest {
     }
 
     private static RealProject compileProject(String appSource) throws Exception {
+        return compileProject(appSource, Map.of(), Map.of());
+    }
+
+    /**
+     * The generalized fixture harness: {@code extraSources} writes further
+     * (or replacement) module files relative to the project root and
+     * {@code extraExternals} adds externals declarations
+     * (raw specifier &rarr; project-relative declaration path).
+     */
+    private static RealProject compileProject(String appSource,
+            Map<String, String> extraSources,
+            Map<String, String> extraExternals) throws Exception {
         Path proj = Files.createTempDirectory("project-lowering");
         writeFileIn(proj, "src/cfg.d.deal", HOST_DECLARATION);
         writeFileIn(proj, "src/util.deal", UTIL_SOURCE);
         writeFileIn(proj, "src/app.deal", appSource);
+        for (Map.Entry<String, String> extra : extraSources.entrySet()) {
+            writeFileIn(proj, extra.getKey(), extra.getValue());
+        }
         Path entry = proj.resolve("src/app.deal").toAbsolutePath();
         Path output = proj.resolve("out").toAbsolutePath();
+        Map<String, String> externals = new LinkedHashMap<>();
+        externals.put(HOST_CFG_SPECIFIER,
+            proj.resolve("src/cfg.d.deal").toAbsolutePath().toString());
+        for (Map.Entry<String, String> extra : extraExternals.entrySet()) {
+            externals.put(extra.getKey(),
+                proj.resolve(extra.getValue()).toAbsolutePath().toString());
+        }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entry, output, false, false, false, Backend.LUAJIT,
-            Map.of(HOST_CFG_SPECIFIER,
-                proj.resolve("src/cfg.d.deal").toAbsolutePath().toString()),
+            entry, output, false, false, false, Backend.LUAJIT, externals,
             List.of(proj.resolve("src").toAbsolutePath()),
             Path.of(".").toAbsolutePath().normalize());
         boolean compiled = orchestrator.compile();
@@ -274,8 +379,11 @@ public class ProjectLoweringTest {
             // layer's pinned rule); a project-classified declaration module
             // carries the standalone identity of its dotted module path.
             String specifier = null;
-            if (declarationModule.path().equals("host.cfg")) {
-                specifier = HOST_CFG_SPECIFIER;
+            for (String candidate : externals.keySet()) {
+                if (candidate.replace('/', '.').equals(declarationModule.path())) {
+                    specifier = candidate;
+                    break;
+                }
             }
             identities.put(declarationModule, specifier == null
                 ? IdentityTestFixtures.moduleIdentityOf(declarationModule.path())
@@ -647,52 +755,266 @@ public class ProjectLoweringTest {
     }
 
     // =========================================================================
-    // 4. The declaration-class fail-closed acceptance
+    // 4. The unified walk's class arm (in-project classes)
     // =========================================================================
 
-    private static void testDeclarationClassFailClosed() throws Exception {
-        System.out.println("-- a host declaration class literal resolves to the "
-            + "seed and fails closed at the class-construction validator --");
-        assertFailsClosed(HOST_CLASS_APP_SOURCE,
-            "the host declaration class literal");
-    }
-
-    private static void testBuiltinErrorFailClosed() throws Exception {
-        System.out.println("-- a builtin Error literal resolves to the seed and "
-            + "fails closed at the class-construction validator --");
-        assertFailsClosed(ERROR_APP_SOURCE, "the builtin Error literal");
-    }
-
-    private static void assertFailsClosed(String appSource, String what)
-            throws Exception {
-        RealProject project = compileProject(appSource);
+    private static void testInProjectClassArm() throws Exception {
+        System.out.println("-- the unified walk's class arm: an in-project class "
+            + "declared and constructed in one session --");
+        RealProject project = compileProject(CLASS_APP_SOURCE,
+            Map.of("src/util.deal", CLASS_UTIL_SOURCE), Map.of());
         try {
             SemanticLowerer.ProjectLoweringResult result = lower(project, invocation());
-            check(result.hasErrors() && result.project() == null,
-                what + " fails closed with no project: " + result.diagnostics());
-            check(result.tables().isEmpty() && result.registries().isEmpty()
-                    && result.seeds() == null && result.namespaces() == null,
-                what + " fails closed with no tables, no registries, no seeds, and "
-                    + "no registrations");
-            if (result.diagnostics().isEmpty()) {
+            check(!result.hasErrors() && result.project() != null,
+                "the class-declaring project lowers through the composed chain: "
+                    + result.diagnostics());
+            if (result.project() == null) {
                 return;
             }
-            CompilerDiagnostic diagnostic = result.diagnostics().get(0);
-            check("E6005".equals(diagnostic.code()),
-                what + " fails with E6005; got " + diagnostic.code());
-            check(diagnostic.message().contains(
-                    deal.semantic.ClassConstructionValidator.CONSTRUCTION_COHERENCE),
-                what + " fails at the class-construction validator; got "
-                    + diagnostic.message());
-            check(diagnostic.message().contains("capability CLASSES"),
-                what + " carries capability CLASSES; got " + diagnostic.message());
+            LoweredModuleUnit util = result.project().modules().get(UTIL);
+            check(util != null, "the class-declaring module is in the closure");
+            if (util == null) {
+                return;
+            }
+            // The class-declaration arm produced the unit's own layouts (the
+            // exported class and the local one); the seeds stay out of them.
+            ClassLayout pointLayout = util.classLayouts().get(POINT);
+            ClassLayout hiddenLayout = util.classLayouts().get(HIDDEN);
+            check(pointLayout != null && hiddenLayout != null,
+                "the unified walk produced the unit's own classLayouts entries: "
+                    + util.classLayouts().keySet());
+            check(!util.classLayouts().containsKey(ENDPOINT)
+                    && !util.classLayouts().containsKey(BUILTIN_ERROR),
+                "the class registration seeds stay out of the unit's own "
+                    + "classLayouts map");
+            if (pointLayout == null || hiddenLayout == null) {
+                return;
+            }
+            checkEq(List.of("x", "y"),
+                pointLayout.fields().stream().map(ClassLayout.FieldLayout::name)
+                    .toList(),
+                "the exported class layout carries its fields in declaration order");
+            check(pointLayout.fields().stream().allMatch(field -> field.required()
+                    && field.defaultOwner() == DefaultOwner.LOCAL),
+                "the in-project class fields carry the LOCAL owner member");
+            checkEq(List.of("label"),
+                hiddenLayout.fields().stream().map(ClassLayout.FieldLayout::name)
+                    .toList(),
+                "the local class layout carries its field in declaration order");
+
+            // The class-literal arm in the same session: one LOCAL CLASS_NEW
+            // per construction, with the provided field as a literal boundary
+            // and the omitted defaulted field as a default boundary.
+            List<SemanticOp> constructions = new ArrayList<>();
+            for (SemanticOp op : util.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_NEW) {
+                    constructions.add(op);
+                }
+            }
+            checkEq(2, constructions.size(),
+                "the unified walk produced one CLASS_NEW per class literal");
+            boolean sawPoint = false;
+            boolean sawHidden = false;
+            for (SemanticOp op : constructions) {
+                KindPayload.ClassNewPayload payload =
+                    (KindPayload.ClassNewPayload) op.payload();
+                check(payload.defaultOwner() == DefaultOwner.LOCAL
+                        && payload.classFactoryRef() == null,
+                    "the same-module literal carries LOCAL with no factory ref");
+                if (payload.classId().equals(POINT)) {
+                    sawPoint = true;
+                    checkEq(pointLayout, payload.layout(),
+                        "the exported class literal carries the unit's own layout");
+                    checkEq(1, payload.classDefaultOpIds().size(),
+                        "the omitted defaulted y field lists its CLASS_DEFAULT child");
+                    checkEq(List.of("x", "y"),
+                        payload.fieldBoundaries().stream()
+                            .map(KindPayload.FieldBoundary::field).toList(),
+                        "the construction boundaries run in declaration order");
+                    check(payload.fieldBoundaries().get(0).kind()
+                            == BoundaryKind.CLASS_LITERAL_FIELD
+                            && payload.fieldBoundaries().get(1).kind()
+                                == BoundaryKind.CLASS_DEFAULT_FIELD,
+                        "the provided field is a literal boundary and the omitted "
+                            + "defaulted field a default boundary");
+                }
+                if (payload.classId().equals(HIDDEN)) {
+                    sawHidden = true;
+                    checkEq(hiddenLayout, payload.layout(),
+                        "the local class literal carries the unit's own layout");
+                    check(payload.classDefaultOpIds().isEmpty()
+                            && payload.fieldBoundaries().size() == 1
+                            && payload.fieldBoundaries().get(0).kind()
+                                == BoundaryKind.CLASS_LITERAL_FIELD,
+                        "the fully provided local literal carries no default child");
+                }
+            }
+            check(sawPoint && sawHidden,
+                "both the exported and the local class literal lowered CLASS_NEW");
+
+            // The exported variant's CLASS_FACTORY registration; the local
+            // class never gets one.
+            ExternalModuleInterface utilInterface =
+                project.index().modules().get(UTIL);
+            ClassInterface pointInterface = null;
+            if (utilInterface != null) {
+                for (ClassInterface candidate : utilInterface.classes()) {
+                    if (candidate.classId().equals(POINT)) {
+                        pointInterface = candidate;
+                    }
+                }
+            }
+            check(pointInterface != null,
+                "the exported class carries its interface entry");
+            ClassFactoryRegistry produced = result.registryOf(UTIL);
+            check(produced != null,
+                "the class-declaring module carries its class-factory registry");
+            ClassFactoryRegistry registry = produced == null
+                ? new ClassFactoryRegistry(Map.of()) : produced;
+            if (pointInterface != null) {
+                ClassFactoryId entry = pointInterface.constructionEntry();
+                OpId factoryOpId = registry.factoryFor(entry);
+                check(factoryOpId != null,
+                    "the exported class's CLASS_FACTORY is registered under its "
+                        + "constructionEntry");
+                SemanticOp factory = null;
+                for (SemanticOp op : util.ops()) {
+                    if (op.opId().equals(factoryOpId)) {
+                        factory = op;
+                    }
+                }
+                check(factory != null
+                        && factory.kind() == SemanticOpKind.CLASS_FACTORY
+                        && factory.payload()
+                            instanceof KindPayload.ClassFactoryPayload factoryPayload
+                        && factoryPayload.classId().equals(POINT),
+                    "the registered id names the exported class's CLASS_FACTORY op");
+            }
+            boolean hiddenFactory = false;
+            for (SemanticOp op : util.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_FACTORY
+                        && op.payload()
+                            instanceof KindPayload.ClassFactoryPayload factory
+                        && factory.classId().equals(HIDDEN)) {
+                    hiddenFactory = true;
+                }
+            }
+            check(!hiddenFactory,
+                "the local class never gets a CLASS_FACTORY (a non-exported "
+                    + "class carries no factory id)");
+
+            // The composed chain re-runs over the class-carrying unit.
+            SemanticIrValidator.ComparisonFacts facts =
+                new SemanticIrValidator.ComparisonFacts(
+                    project.index().interfaceIndexDigest(),
+                    SemanticProfile.DEAL_V1_2_INT32,
+                    invocation().capabilityRegistryHash());
+            check(SemanticIrValidator.validate(util, facts).isEmpty(),
+                "the class-carrying unit passes the closed 14 rules");
+            check(AddressChainProtocol.validate(util).isEmpty(),
+                "the class-carrying unit passes the address-chain protocol");
+            check(deal.semantic.ControlFlowValidator.validate(util,
+                    result.tableOf(UTIL)).isEmpty(),
+                "the class-carrying unit passes the control-flow validator");
+            check(ClassConstructionValidator.validate(util, result.tableOf(UTIL),
+                    registry, new JsonDefaultChildTable(Map.of()), utilInterface,
+                    Map.of()).isEmpty(),
+                "the class-carrying unit passes the class-construction validator "
+                    + "(the composed chain's class arm)");
         } finally {
             deleteRecursively(project.root());
         }
     }
 
     // =========================================================================
-    // 5. The negative seeds
+    // 5. The declaration-class fail-closed acceptance
+    // =========================================================================
+
+    private static void testDeclarationClassFailClosed() throws Exception {
+        System.out.println("-- a host declaration class literal resolves to the "
+            + "seed and fails closed at the class-construction validator --");
+        assertFailsClosed(HOST_CLASS_APP_SOURCE, Map.of(), Map.of(),
+            "the host declaration class literal", ENDPOINT.text());
+    }
+
+    private static void testBuiltinErrorFailClosed() throws Exception {
+        System.out.println("-- a builtin Error literal resolves to the seed and "
+            + "fails closed at the class-construction validator --");
+        assertFailsClosed(ERROR_APP_SOURCE, Map.of(), Map.of(),
+            "the builtin Error literal", BUILTIN_ERROR.text());
+    }
+
+    private static void testExternCDeclarationClassFailClosed() throws Exception {
+        System.out.println("-- an extern-C declaration class literal resolves to "
+            + "the FFI_PLAN seed and fails closed at the class-construction "
+            + "validator --");
+        RealProject project = compileProject(EXTERN_C_CLASS_APP_SOURCE,
+            Map.of("src/native.d.deal", NATIVE_DECLARATION),
+            Map.of(NATIVE_SPECIFIER, "src/native.d.deal"));
+        try {
+            check(project.externCModules().containsKey(NATIVE),
+                "the extern-C declaration module carries the real phase-3.9 "
+                    + "generated metadata: " + project.externCModules().keySet());
+            check(project.surface().moduleIds().contains(NATIVE)
+                    && project.surface().require(NATIVE).kind()
+                        == HostDeclarationSurface.DeclarationKind.EXTERN_C,
+                "the declaration surface classifies the module extern-C: "
+                    + project.surface().moduleIds());
+            checkFailsClosed(lower(project, invocation()),
+                "the extern-C declaration class literal", NATIVE_VEC2.text());
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    private static void assertFailsClosed(String appSource,
+            Map<String, String> extraSources, Map<String, String> extraExternals,
+            String what, String expectedClassText) throws Exception {
+        RealProject project = compileProject(appSource, extraSources, extraExternals);
+        try {
+            checkFailsClosed(lower(project, invocation()), what, expectedClassText);
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    /**
+     * The four fail-closed assertions of a seeded-owner construction (the
+     * intended intermediate state): the first E6005 from the
+     * class-construction validator, capability {@code CLASSES}, naming the
+     * seeded class identity, with no project, no tables, no registries, no
+     * seeds, and no namespace registrations.
+     */
+    private static void checkFailsClosed(SemanticLowerer.ProjectLoweringResult result,
+            String what, String expectedClassText) {
+        check(result.hasErrors() && result.project() == null,
+            what + " fails closed with no project: " + result.diagnostics());
+        check(result.tables().isEmpty() && result.registries().isEmpty()
+                && result.seeds() == null && result.namespaces() == null,
+            what + " fails closed with no tables, no registries, no seeds, and "
+                + "no registrations");
+        if (result.diagnostics().isEmpty()) {
+            return;
+        }
+        CompilerDiagnostic diagnostic = result.diagnostics().get(0);
+        check("E6005".equals(diagnostic.code()),
+            what + " fails with E6005; got " + diagnostic.code());
+        check(diagnostic.message().contains(
+                ClassConstructionValidator.CONSTRUCTION_COHERENCE),
+            what + " fails at the class-construction validator; got "
+                + diagnostic.message());
+        check(diagnostic.message().contains("capability CLASSES"),
+            what + " carries capability CLASSES; got " + diagnostic.message());
+        if (expectedClassText != null) {
+            check(diagnostic.message().contains(expectedClassText),
+                what + " names the seeded class identity " + expectedClassText
+                    + " (the seed lookup resolved it); got "
+                    + diagnostic.message());
+        }
+    }
+
+    // =========================================================================
+    // 6. The negative seeds
     // =========================================================================
 
     private static void testCorruptedUnitSeed() throws Exception {
@@ -947,8 +1269,10 @@ public class ProjectLoweringTest {
         testOneProjectLoweringAndDeterminism();
         testSeedsIntrinsicsAndNamespaces();
         testComposedChainOverUnifiedUnits();
+        testInProjectClassArm();
         testDeclarationClassFailClosed();
         testBuiltinErrorFailClosed();
+        testExternCDeclarationClassFailClosed();
         testCorruptedUnitSeed();
         testMissingModuleSeed();
         testNonV12InvocationSeed();

@@ -170,7 +170,7 @@ public final class CheckedProjectBuilder {
             for (StatementNode stmt : fact.ast().statements()) {
                 if (stmt instanceof ExportDeclaration ed
                         && ed.declaration() instanceof ClassDeclaration cd) {
-                    ClassId classId = new ClassId(fact.moduleId().path(), cd.name());
+                    ClassId classId = classIdOf(fact, cd);
                     constructionEntries.put(classId,
                         allocator.nextClassFactoryId(fact.moduleId(), sourceOrdinal, 0));
                 }
@@ -344,9 +344,41 @@ public final class CheckedProjectBuilder {
     }
 
     /**
+     * The canonical class identity of one exported class declaration of
+     * an index entry (descriptor-identity-propagation D1): an
+     * implementation module's class carries the checker-resolved
+     * {@link Symbol.ClassSymbol#identity()} projected through
+     * {@link DescriptorService#semanticModulePath} — the same producer
+     * the checker, the declaration surface, the canonical type text, and
+     * the lowerer's class arms use, so the index entry's
+     * {@code ClassInterface} is the identity a class literal resolves and
+     * the construction entries key on exactly that identity. The private
+     * deployment wiring key ({@code ClassSymbol.modulePath()}) never
+     * renders descriptor text. A declaration module's class keeps the
+     * pinned {@code @<moduleId>/<ClassName>} declaration spelling.
+     */
+    private static ClassId classIdOf(ModuleFact fact, ClassDeclaration cd) {
+        if (fact.isDeclarationFile()) {
+            return new ClassId(fact.moduleId().path(), cd.name());
+        }
+        SymbolTable table = fact.symbolTable();
+        Symbol symbol = table == null ? null : table.resolve(cd.name());
+        if (symbol instanceof Symbol.ClassSymbol classSymbol) {
+            return new ClassId(
+                DescriptorService.semanticModulePath(classSymbol.identity()),
+                classSymbol.name());
+        }
+        // A missing checked ClassSymbol is a producer defect the per-kind
+        // builders report; the wiring path is the failure-path fallback
+        // only.
+        return new ClassId(fact.moduleId().path(), cd.name());
+    }
+
+    /**
      * Implementation-entry classes: one {@link ClassInterface} per
      * exported class from the module's checked {@code ClassSymbol}
-     * records ({@code {name, fields, modulePath}}, module-path-resolved),
+     * records, carrying the checker-resolved class identity (the
+     * descriptor-text identity, never the private deployment wiring key),
      * fields rendered via the pinned {@code TypeNode → CanonicalTypeText}
      * grammar with {@code optional}/{@code nullable} from the record and
      * {@code hasDefault} from {@code defaultExpr} presence.
@@ -369,7 +401,9 @@ public final class CheckedProjectBuilder {
                         "exported class '" + cd.name() + "' has no checked ClassSymbol "
                             + "(missing checked facts)");
                 }
-                ClassId classId = new ClassId(classSymbol.modulePath(), classSymbol.name());
+                ClassId classId = new ClassId(
+                    DescriptorService.semanticModulePath(classSymbol.identity()),
+                    classSymbol.name());
                 List<FieldInterface> fields = new ArrayList<>(classSymbol.fields().size());
                 for (ClassField field : classSymbol.fields()) {
                     fields.add(buildFieldInterface(field, context));

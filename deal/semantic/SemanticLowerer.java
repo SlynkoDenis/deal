@@ -5600,7 +5600,7 @@ public final class SemanticLowerer {
          *         enclosing-region binding
          */
         private void lowerClassDeclaration(ClassDeclaration declaration, boolean exported) {
-            ClassId classId = new ClassId(module.path(), declaration.name());
+            ClassId classId = classIdOf(declaration);
             if (classLayouts.containsKey(classId)) {
                 throw new ConstructUnlowered("duplicate class declaration '"
                     + declaration.name() + "' (the checker rejects duplicate class names; "
@@ -6132,6 +6132,35 @@ public final class SemanticLowerer {
                         CANONICAL_RUNTIME_VALIDATION_ID)),
                 span, descriptorKindPolicy(descriptor), SourceOriginKind.SYNTHETIC,
                 classNewOpId);
+        }
+
+        /**
+         * The checker-resolved class identity of one class declaration
+         * (ISSUE-0634; design sources
+         * {@code project-lowering-entry-and-registration-seeds} D4 and
+         * the project lowering contract): the checked
+         * {@code ClassSymbol}'s canonical identity projected through the
+         * single {@link DescriptorService} module-path producer — the
+         * same producer the class-literal, field-access, and
+         * class-descriptor arms use, so a unit's own
+         * {@code classLayouts} key, its {@code CLASS_NEW} payloads, its
+         * class-typed descriptors, and the interface index's
+         * {@code ClassInterface} are one identity ({@code ClassSymbol}'s
+         * {@code modulePath} is the private deployment wiring key and
+         * never renders descriptor text). A declaration without a
+         * checked {@code ClassSymbol} is a producer defect.
+         */
+        private ClassId classIdOf(ClassDeclaration declaration) {
+            SymbolTable scope = currentCheckerScope();
+            Symbol symbol = scope == null ? null : scope.resolve(declaration.name());
+            if (!(symbol instanceof Symbol.ClassSymbol classSymbol)) {
+                throw new ConstructUnlowered("class declaration '"
+                    + declaration.name() + "' has no checked ClassSymbol (a missing "
+                    + "checker fact is a producer defect)");
+            }
+            return new ClassId(
+                DescriptorService.semanticModulePath(classSymbol.identity()),
+                classSymbol.name());
         }
 
         /**
