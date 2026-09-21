@@ -88,6 +88,12 @@ TEST_MAINS=(
   'fg|=== Running Project Migration Integration Tests (ISSUE-0269 T8) ===|java -ea -cp build deal.test.ProjectMigrationIntegrationTest'
   'fg|=== Running Project Integration Gates (ISSUE-0270 T9: out-of-root both-backend gates) ===|java -ea -cp build deal.test.ProjectIntegrationGatesTest'
   'fg|=== Running Production Project-Graph Fixture Gates (ISSUE-0506 D11) ===|java -ea -cp build deal.test.ProjectGraphFixturesGatesTest'
+  # ISSUE-0630 registration: the declaration surface producer — the host
+  # and extern-C per-declaration-module facts (exports, order, per-class
+  # field records and kinds), the retained JS declared-map byte
+  # identity, the descriptor-path negative seed, and the surface-shape
+  # invariants (project-lowering-entry-and-registration-seeds D3).
+  'fg|=== Running Host Declaration Surface Tests (ISSUE-0630) ===|java -ea -cp build deal.test.HostDeclarationSurfaceTest'
   'fg|=== Running Source Module Resolver Tests (ISSUE-0267 T6) ===|java -ea -cp build deal.module.SourceModuleResolverTest'
   'fg|=== Running LuaJIT Async Export Invoker Tests (ISSUE-0417 component, ISSUE-0418 verification matrix) ===|java -ea -cp build:/usr/share/java/junit4.jar:/usr/share/java/hamcrest-core.jar org.junit.runner.JUnitCore deal.test.LuaJitAsyncExportInvokerTest'
 'fg|=== Running Registry Async-Export Boundary Tests (ISSUE-0346 REGISTRY) ===|java -ea -cp build:/usr/share/java/junit4.jar:/usr/share/java/hamcrest-core.jar org.junit.runner.JUnitCore deal.test.RegistryAsyncExportBoundaryTest'

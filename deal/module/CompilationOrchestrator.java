@@ -41,6 +41,7 @@ import deal.semantic.CapabilityRegistry;
 import deal.semantic.CheckedProjectBuilder;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
+import deal.semantic.HostDeclarationSurface;
 import deal.semantic.LoweringSupport;
 import deal.semantic.MigrationPlanner;
 import deal.semantic.ModuleFact;
@@ -286,6 +287,17 @@ public final class CompilationOrchestrator {
      */
     private final Map<String, FfiGeneratedModule> ffiGenerations =
         new LinkedHashMap<>();
+
+    /**
+     * The compilation's declaration surface (ISSUE-0630, design source
+     * {@code project-lowering-entry-and-registration-seeds} D3): one
+     * immutable fact record per host and extern-C declaration module the
+     * compilation imports, produced once at the start of phase 4 before
+     * any emission arm runs. Null before phase 4 and on a producer
+     * defect (an unrepresentable declared class field type), where the
+     * compile carries the first E6005 and publishes nothing.
+     */
+    private HostDeclarationSurface hostDeclarationSurface;
 
     /**
      * The compiler-default planning result of this compile (ISSUE-0541,
@@ -1083,6 +1095,16 @@ public final class CompilationOrchestrator {
         if (hasErrors) { printDiagnostics(); return false; }
 
         log("Phase 4: Code generation");
+        // Declaration surface (ISSUE-0630, design source
+        // project-lowering-entry-and-registration-seeds D3 and the
+        // declaration-surface contract): phase-4 input data, produced
+        // once per compile over every host and extern-C declaration
+        // module the compilation imports, before any emission arm runs.
+        // A producer defect (a declared class field type with no runtime
+        // representation) fails the compile through the descriptor path
+        // with the first E6005 and publishes nothing.
+        hostDeclarationSurface = produceHostDeclarationSurface();
+        if (hasErrors) { printDiagnostics(); return false; }
         codegenAll();
         if (hasErrors) { printDiagnostics(); return false; }
 
@@ -3562,28 +3584,69 @@ public final class CompilationOrchestrator {
     }
 
     /**
-     * The ISSUE-0328 host-module declaration record for one imported
-     * declaration file (js-v12-host-abi-completion D1): the declared
-     * export map plus, per class export name, the declaration AST's
-     * {@link ClassField} records with their resolved declared types.
-     * A declaration file never runs the phase-3 name-resolver pass, so
-     * the field types resolve structurally through an
-     * {@link ExportExtractor} over the declaration's own AST — the
-     * same resolution the declaration's export signatures use — with
-     * the declaration's import aliases mapped exactly like the
-     * phase-1 extraction. A same-module class field type (e.g.
-     * {@code endpoint: Endpoint} in {@code cfg.d.deal}) therefore
-     * resolves to the declaring module's class identity, which the
-     * JS emitter's descriptor service projects to the canonical
-     * {@code @$external/&lt;specifier&gt;/&lt;ClassName&gt;} atom.
+     * The compilation's declaration surface (ISSUE-0630, design source
+     * {@code project-lowering-entry-and-registration-seeds} D3): the one
+     * immutable fact record per host and extern-C declaration module the
+     * compilation imports, with the declared exports, the per-class field
+     * records in declaration order with their resolved declared types,
+     * and the per-class declaration kind. Produced once per compile at
+     * the start of phase 4; the retained host consumers read the host
+     * projection of this surface.
+     *
+     * @return the produced surface, or null when production failed (the
+     *         compile carries the first E6005 and publishes nothing)
      */
-    private HostModuleDeclarations hostDeclarationsOf(
-            ModuleInfo imported) {
-        Map<String, Type> declaredExports = imported.exports != null
-            ? imported.exports : Map.of();
-        Map<String, List<HostModuleDeclarations.HostField>>
-            classFields = new LinkedHashMap<>();
+    public HostDeclarationSurface hostDeclarationSurface() {
+        return hostDeclarationSurface;
+    }
 
+    /**
+     * Produces the declaration surface over every host and extern-C
+     * declaration module of the compilation (the spec stdlib declaration
+     * modules keep their {@code BuiltinModule} classification and are not
+     * host declarations). A producer defect — the first declared class
+     * field whose resolved declared type has no runtime representation —
+     * merges its E6005 into the compile's diagnostics and yields no
+     * surface.
+     *
+     * @return the produced surface, or null on a producer defect
+     */
+    private HostDeclarationSurface produceHostDeclarationSurface() {
+        List<HostDeclarationSurface.DeclarationFacts> facts =
+            new ArrayList<>();
+        for (ModuleInfo info : modules.values()) {
+            if (!info.isDeclarationFile || info.rawAst == null
+                    || isSpecStdlibModuleInfo(info)) {
+                continue;
+            }
+            facts.add(declarationFactsOf(info));
+        }
+        HostDeclarationSurface.Production production =
+            HostDeclarationSurface.produce(facts);
+        if (production.hasErrors()) {
+            diagnostics.addAll(production.diagnostics());
+            hasErrors = true;
+            return null;
+        }
+        log("  Declaration surface: " + facts.size()
+            + " declaration module(s)");
+        return production.surface();
+    }
+
+    /**
+     * The declaration facts of one declaration module: the declared
+     * export map (the phase-1 {@link ExportExtractor} output for a
+     * declaration file, in declaration order), the per-class field
+     * records in declaration order with their resolved declared types,
+     * and the declaration kind ({@code EXTERN_C} for a module the
+     * metadata phase classifies extern-C, {@code HOST} otherwise). The
+     * field types resolve in the declaring module's own context through
+     * an {@link ExportExtractor} seeded with the compilation's
+     * module-path classification and the declaration's resolved import
+     * aliases — the exact resolution the retained host consumers read.
+     */
+    private HostDeclarationSurface.DeclarationFacts declarationFactsOf(
+            ModuleInfo imported) {
         Map<String, String> importAliasMap = new HashMap<>();
         for (StatementNode stmt : imported.rawAst.statements()) {
             if (stmt instanceof ImportDeclaration imp) {
@@ -3609,27 +3672,72 @@ public final class CompilationOrchestrator {
             imported.modulePath, true, modulePathClassification()::get);
         extractor.setImportModulePaths(importAliasMap);
         extractor.extract(imported.rawAst);
+        Map<String, HostDeclarationSurface.DeclaredClass> classes =
+            new LinkedHashMap<>();
+        HostDeclarationSurface.DeclarationKind kind = isExternCModuleInfo(imported)
+            ? HostDeclarationSurface.DeclarationKind.EXTERN_C
+            : HostDeclarationSurface.DeclarationKind.HOST;
         for (StatementNode stmt : imported.rawAst.statements()) {
-            ClassDeclaration cd = null;
-            if (stmt instanceof ClassDeclaration c) {
-                cd = c;
-            } else if (stmt instanceof ExportDeclaration ed
-                    && ed.declaration() instanceof ClassDeclaration c) {
-                cd = c;
-            }
+            ClassDeclaration cd = classDeclarationOf(stmt);
             if (cd == null) {
                 continue;
             }
-            List<HostModuleDeclarations.HostField> fields =
+            List<HostDeclarationSurface.DeclaredField> fields =
                 new ArrayList<>();
             for (ClassField cf : cd.fields()) {
-                fields.add(new HostModuleDeclarations.HostField(
+                fields.add(new HostDeclarationSurface.DeclaredField(
                     cf, extractor.resolveFieldType(cf.type())));
             }
-            classFields.putIfAbsent(cd.name(), fields);
+            classes.putIfAbsent(cd.name(),
+                new HostDeclarationSurface.DeclaredClass(
+                    cd.name(), kind, fields));
         }
-        return new HostModuleDeclarations(declaredExports,
-            classFields);
+        Map<String, Type> declaredExports = imported.exports != null
+            ? imported.exports : Map.of();
+        return new HostDeclarationSurface.DeclarationFacts(
+            new ModuleId(imported.modulePath), kind, declaredExports,
+            classes);
+    }
+
+    /**
+     * The ISSUE-0328 host-module declaration record for one imported
+     * declaration file (js-v12-host-abi-completion D1): the declared
+     * export map plus, per class export name, the declaration AST's
+     * {@link ClassField} records with their resolved declared types.
+     * A declaration file never runs the phase-3 name-resolver pass, so
+     * the field types resolve structurally through an
+     * {@link ExportExtractor} over the declaration's own AST — the
+     * same resolution the declaration's export signatures use — with
+     * the declaration's import aliases mapped exactly like the
+     * phase-1 extraction. A same-module class field type (e.g.
+     * {@code endpoint: Endpoint} in {@code cfg.d.deal}) therefore
+     * resolves to the declaring module's class identity, which the
+     * JS emitter's descriptor service projects to the canonical
+     * {@code @$external/&lt;specifier&gt;/&lt;ClassName&gt;} atom.
+     *
+     * <p>The facts are the host projection of the compilation's one
+     * declaration surface (ISSUE-0630): the resolution runs once per
+     * declaration module at the surface's production, so the retained
+     * JS/JVM declared maps keep byte-identical facts.</p>
+     */
+    private HostModuleDeclarations hostDeclarationsOf(
+            ModuleInfo imported) {
+        HostDeclarationSurface.DeclarationFacts facts = hostDeclarationSurface
+            .require(new ModuleId(imported.modulePath));
+        Map<String, List<HostModuleDeclarations.HostField>> classFields =
+            new LinkedHashMap<>();
+        for (Map.Entry<String, HostDeclarationSurface.DeclaredClass> entry
+                : facts.classes().entrySet()) {
+            List<HostModuleDeclarations.HostField> fields =
+                new ArrayList<>();
+            for (HostDeclarationSurface.DeclaredField field
+                    : entry.getValue().fields()) {
+                fields.add(new HostModuleDeclarations.HostField(
+                    field.declaration(), field.type()));
+            }
+            classFields.put(entry.getKey(), fields);
+        }
+        return new HostModuleDeclarations(facts.exports(), classFields);
     }
 
     /**
