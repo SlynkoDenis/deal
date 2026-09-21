@@ -249,17 +249,19 @@ public final class NameResolver {
             Type.Boolean.INSTANCE, IntrinsicResolvers.HAS));
 
         Span synth = Span.synthetic(modulePath);
-        LiteralExpr emptyString = new LiteralExpr(synth,
-            new LiteralValue.StringLiteral(""));
 
-        List<ClassField> errorFields = List.of(
-            new ClassField(synth, "code", false, false,
-                new NamedType(synth, "string"), Optional.of(emptyString)),
-            new ClassField(synth, "message", false, false,
-                new NamedType(synth, "string"), Optional.of(emptyString))
-        );
+        // The compiler-owned builtin `Error` declaration is sourced from
+        // its one authority (ISSUE-0631): the root binding below and the
+        // project lowering's builtin layout seed both derive from the
+        // same declaration record, so the two can never diverge.
+        BuiltinErrorDeclaration builtinError =
+            BuiltinErrorDeclaration.synthesized(synth);
+        List<ClassField> errorFields = new ArrayList<>();
+        for (BuiltinErrorDeclaration.Field field : builtinError.fields()) {
+            errorFields.add(field.declaration());
+        }
         root.define("Error", new Symbol.ClassSymbol("Error", errorFields, "",
-            intrinsicErrorIdentity()));
+            builtinError.identity()));
     }
 
     /**

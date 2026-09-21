@@ -277,7 +277,8 @@ public class SemanticIrSchemaTest {
             List.of("VARIABLE", "TABLE_SLOT", "ARRAY_SLOT", "CLASS_FIELD"), "AssignTargetKind");
         testClosedEnum(DeleteTargetKind.class, List.of("TABLE_SLOT", "ARRAY_SLOT", "CLASS_FIELD"),
             "DeleteTargetKind");
-        testClosedEnum(DefaultOwner.class, List.of("LOCAL", "SHARED_FACTORY", "RETAINED_ABI"),
+        testClosedEnum(DefaultOwner.class, List.of("LOCAL", "SHARED_FACTORY", "RETAINED_ABI",
+            "HOST_DEFAULTS", "FFI_PLAN", "BUILTIN_DEFAULTS"),
             "DefaultOwner");
         testClosedEnum(ExternalExecutionOwner.class, List.of("SHARED_BODY", "RETAINED_ABI"),
             "ExternalExecutionOwner");

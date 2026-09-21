@@ -89,7 +89,10 @@ import java.util.Set;
  *       shape is closed (LOCAL for same-module classes with the
  *       omitted-default child list; SHARED_FACTORY for imported classes
  *       with the interface's {@code constructionEntry} and empty child
- *       list; RETAINED_ABI is never produced — E10's); every provided
+ *       list; RETAINED_ABI is never produced — E10's; and the three
+ *       class registration seeds HOST_DEFAULTS/FFI_PLAN/BUILTIN_DEFAULTS
+ *       of ISSUE-0631 are rejected as fail-closed producer defects until
+ *       their construction children realize them); every provided
  *       name is a declared field; {@code fieldBoundaries} = exactly one
  *       {@code CLASS_LITERAL_FIELD} per provided field plus one
  *       {@code CLASS_DEFAULT_FIELD} per omitted required-present
@@ -783,6 +786,31 @@ public final class ClassConstructionValidator {
                         + " carries defaultOwner RETAINED_ABI: the retained ABI "
                         + "transfer is E10's (ISSUE-0239) and is never produced in "
                         + "this epic — the lowerer defers with RETAINED_ABI_DEFERRED");
+                }
+                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS -> {
+                    // The declaration-class and builtin-Error owners are
+                    // the project lowering's class registration seeds
+                    // (ISSUE-0631): a registration fact, never a
+                    // construction shape. Their construction execution is
+                    // the construction children's; until it lands every
+                    // consumer rejects them as a fail-closed producer
+                    // defect — no default evaluation and no emission.
+                    return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                        + " carries defaultOwner " + payload.defaultOwner()
+                        + ": the declaration-class and builtin-Error owners are"
+                        + " class registration seeds (ISSUE-0631) and their"
+                        + " construction is not realized in this slice — a"
+                        + " fail-closed producer defect, never executed or"
+                        + " default-evaluated");
+                }
+                default -> {
+                    // Defensive: an owner outside the closed set can only
+                    // arrive from a forged payload, and it never gets a
+                    // construction shape.
+                    return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                        + " carries defaultOwner " + payload.defaultOwner()
+                        + ": an owner outside the closed default-ownership set"
+                        + " is a fail-closed producer defect");
                 }
             }
 

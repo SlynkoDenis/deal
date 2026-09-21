@@ -2468,6 +2468,13 @@ public final class LuaSemanticEmitter {
             switch (payload.defaultOwner()) {
                 case LOCAL -> emitClassNewLocalDefaults(op, payload, provided);
                 case SHARED_FACTORY -> emitClassNewFactoryTransfer(op, payload, provided);
+                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS ->
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " carries defaultOwner " + payload.defaultOwner()
+                        + ": the declaration-class and builtin-Error owners are the"
+                        + " project lowering's class registration seeds (ISSUE-0631)"
+                        + " and their construction is not emitted in this slice — a"
+                        + " fail-closed producer defect, never emitted");
                 default -> throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " carries defaultOwner " + payload.defaultOwner()
                     + " outside the emitted owners (producer defect)");
