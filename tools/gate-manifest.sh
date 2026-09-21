@@ -99,6 +99,15 @@ TEST_MAINS=(
   # identity, the descriptor-path negative seed, and the surface-shape
   # invariants (project-lowering-entry-and-registration-seeds D3).
   'fg|=== Running Host Declaration Surface Tests (ISSUE-0630) ===|java -ea -cp build deal.test.HostDeclarationSurfaceTest'
+  # ISSUE-0631 registration: the project-level class registration seeds —
+  # the three closed DefaultOwner members, one ClassRegistration per
+  # declared class of every declaration module of the real T1 surface
+  # (host and extern-C, with the plan cross-check), the compiler-owned
+  # builtin Error layout, the negative seeds, and the fail-closed
+  # consumer arms (project-lowering-entry-and-registration-seeds D4-D6
+  # and the registration-seed contract; semantic-ir-construct-coverage-
+  # cutover K9 items 3/6 and K13 item 1).
+  'fg|=== Running Class Registration Seeds Tests (ISSUE-0631) ===|java -ea -cp build deal.test.ClassRegistrationSeedsTest'
   'fg|=== Running Source Module Resolver Tests (ISSUE-0267 T6) ===|java -ea -cp build deal.module.SourceModuleResolverTest'
   'fg|=== Running LuaJIT Async Export Invoker Tests (ISSUE-0417 component, ISSUE-0418 verification matrix) ===|java -ea -cp build:/usr/share/java/junit4.jar:/usr/share/java/hamcrest-core.jar org.junit.runner.JUnitCore deal.test.LuaJitAsyncExportInvokerTest'
 'fg|=== Running Registry Async-Export Boundary Tests (ISSUE-0346 REGISTRY) ===|java -ea -cp build:/usr/share/java/junit4.jar:/usr/share/java/hamcrest-core.jar org.junit.runner.JUnitCore deal.test.RegistryAsyncExportBoundaryTest'

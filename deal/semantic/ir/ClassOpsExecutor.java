@@ -684,13 +684,17 @@ public final class ClassOpsExecutor {
         KindPayload.ClassNewPayload payload = (KindPayload.ClassNewPayload) op.payload();
         // This child's surface: LOCAL execution only. SHARED_FACTORY
         // execution is executeClassNewSharedFactory's; RETAINED_ABI is
-        // E10's — both fail closed here, never silently executed as
+        // E10's and the class registration seeds (HOST_DEFAULTS/
+        // FFI_PLAN/BUILTIN_DEFAULTS, ISSUE-0631) have no execution
+        // surface — all fail closed here, never silently executed as
         // LOCAL.
         if (payload.defaultOwner() != DefaultOwner.LOCAL) {
             throw new Defect("CLASS_NEW " + op.opId() + " carries defaultOwner "
                 + payload.defaultOwner() + ": this executor surface is LOCAL "
                 + "execution — SHARED_FACTORY transfer is "
-                + "executeClassNewSharedFactory's and RETAINED_ABI transfer is E10's; "
+                + "executeClassNewSharedFactory's, RETAINED_ABI transfer is E10's, "
+                + "and the HOST_DEFAULTS/FFI_PLAN/BUILTIN_DEFAULTS registration "
+                + "seeds (ISSUE-0631) have no execution surface; "
                 + "a non-LOCAL owner reaching executeClassNewLocal is a producer "
                 + "defect, never executed");
         }
@@ -1275,15 +1279,20 @@ public final class ClassOpsExecutor {
         KindPayload.ClassNewPayload payload = (KindPayload.ClassNewPayload) op.payload();
 
         // This child's surface: SHARED_FACTORY execution. LOCAL execution
-        // is {@link #executeClassNewLocal}'s; RETAINED_ABI is E10's — a
+        // is {@link #executeClassNewLocal}'s; RETAINED_ABI is E10's and
+        // the class registration seeds (HOST_DEFAULTS/FFI_PLAN/
+        // BUILTIN_DEFAULTS, ISSUE-0631) have no execution surface — a
         // non-SHARED_FACTORY owner reaching this surface is a producer
         // defect, never silently executed as a transfer.
         if (payload.defaultOwner() != DefaultOwner.SHARED_FACTORY) {
             throw new Defect("CLASS_NEW " + op.opId() + " carries defaultOwner "
                 + payload.defaultOwner() + ": this child's executor surface is "
-                + "SHARED_FACTORY transfer (executeClassNewLocal is the LOCAL surface and "
-                + "RETAINED_ABI transfer is E10's) — a non-SHARED_FACTORY owner reaching "
-                + "executeClassNewSharedFactory is a producer defect, never executed");
+                + "SHARED_FACTORY transfer (executeClassNewLocal is the LOCAL surface, "
+                + "RETAINED_ABI transfer is E10's, and the "
+                + "HOST_DEFAULTS/FFI_PLAN/BUILTIN_DEFAULTS registration seeds of "
+                + "ISSUE-0631 have no execution surface) — a non-SHARED_FACTORY owner "
+                + "reaching executeClassNewSharedFactory is a producer defect, never "
+                + "executed");
         }
         if (payload.classFactoryRef() == null) {
             throw new Defect("CLASS_NEW " + op.opId() + " carries a null classFactoryRef: "

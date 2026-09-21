@@ -925,6 +925,14 @@ public sealed interface KindPayload
      * order) → default application → provided application with extra-key
      * rejection → field validation (declaration order) → tag; zero return
      * boundaries.
+     *
+     * <p>The closed owner set's {@code HOST_DEFAULTS}, {@code FFI_PLAN},
+     * and {@code BUILTIN_DEFAULTS} members are the project lowering's class
+     * registration seeds (ISSUE-0631), never a produced construction shape
+     * until their construction children land; {@code RETAINED_ABI} is
+     * never produced on the production path. A payload carrying one of
+     * those owners is rejected fail-closed by the validator and by every
+     * emitter/oracle owner arm.</p>
      */
     record ClassNewPayload(ClassId classId, ClassLayout layout, List<ProvidedField> providedFields,
                            DefaultOwner defaultOwner, List<OpId> classDefaultOpIds,

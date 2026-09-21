@@ -2025,6 +2025,14 @@ public final class SemanticOracle {
                         classLayouts, checkRunner(op, payload, boundaryOps,
                             (ValueId) factoryOp.result()), replayRunner);
                 }
+                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS ->
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " carries defaultOwner " + payload.defaultOwner()
+                        + ": the declaration-class and builtin-Error owners are the"
+                        + " project lowering's class registration seeds (ISSUE-0631)"
+                        + " and their construction is not executed in this slice — a"
+                        + " fail-closed producer defect, never executed and never"
+                        + " default-evaluated");
                 default -> throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " carries defaultOwner " + payload.defaultOwner()
                     + " outside the executable owners (producer defect)");
