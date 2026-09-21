@@ -79,7 +79,9 @@ import java.util.Set;
  * and project validation gate contracts;
  * {@code luajit-jvm-single-lowering-production-cutover} C1/C4/C7/C10;
  * {@code semantic-ir-construct-coverage-cutover} K3/K12's lowering
- * context).
+ * context), extended by ISSUE-0636 with the in-project imported-class
+ * resolution ({@code project-lowering-entry-and-registration-seeds} D10
+ * and the in-project imported-class contract; K3).
  *
  * <ol>
  *   <li>a real multi-module checked project (an entry module, an imported
@@ -107,6 +109,20 @@ import java.util.Set;
  *       {@code CLASS_NEW(LOCAL)} constructions, and the exported class's
  *       {@code CLASS_FACTORY} registration are asserted over the produced
  *       unit and the composed chain re-runs over it;</li>
+ *   <li>the in-project imported-class resolution (ISSUE-0636; D10 and the
+ *       in-project imported-class contract; K3): the dependent module's
+ *       checker-valid literals of two imported in-project classes lower
+ *       {@code CLASS_NEW(SHARED_FACTORY)} with each owner's
+ *       {@code constructionEntry} factory reference, an empty
+ *       {@code classDefaultOpIds} list, the literal-order provided fields
+ *       and the declaration-order boundaries (the omitted defaulted field
+ *       wired to the owner factory op's result), zero
+ *       {@code RETAINED_ABI_DEFERRED}, and the composed chain re-run with
+ *       the in-project facts; the same project's cross-module call resolves
+ *       through the accumulated {@code EXTERNAL_ENTRY} records as a
+ *       {@code SHARED_BODY} external, and the inconsistent-fact seed (an
+ *       owner outside the closure and outside the declaration set) still
+ *       returns the deferral with no project;</li>
  *   <li>the four negative seeds (a corrupted unit, a missing module, a
  *       non-v1.2 invocation, an alias without a resolved import fact)
  *       return the first E6005 and no project, no tables, no registries, no
@@ -261,6 +277,43 @@ public class ProjectLoweringTest {
           return null;
         }
         """;
+
+    /**
+     * The imported in-project class resolution fixture (ISSUE-0636;
+     * design sources {@code project-lowering-entry-and-registration-seeds}
+     * D10 and the in-project imported-class contract;
+     * {@code semantic-ir-construct-coverage-cutover} K3): the owner module
+     * declares an exported class with an omitted defaulted field and an
+     * exported factory function; the dependent module constructs the
+     * imported class and calls the imported function in one project walk.
+     */
+    private static final String IMPORTED_CLASS_UTIL_SOURCE = """
+        export class Point {
+          x: int = 0;
+          y: int = 1;
+        }
+
+        export class Segment {
+          length: int = 0;
+        }
+
+        export function makePoint(x: int): Point {
+          return {x: x};
+        }
+        """;
+
+    private static final String IMPORTED_CLASS_APP_SOURCE = """
+        import * as u from "util"
+
+        export function main(): null {
+          let p: u.Point = {x: 5};
+          let s: u.Segment = {length: 3};
+          let q: u.Point = u.makePoint(7);
+          return null;
+        }
+        """;
+
+    private static final ClassId SEGMENT = new ClassId("src", "Segment");
 
     // The compiler's canonical module path of a root-contained module is
     // the configured root text plus the source's relative directory
@@ -927,6 +980,287 @@ public class ProjectLoweringTest {
     }
 
     // =========================================================================
+    // 4b. In-project imported-class resolution (ISSUE-0636)
+    // =========================================================================
+
+    private static void testImportedInProjectClassResolution() throws Exception {
+        System.out.println("-- the in-project imported-class construction: "
+            + "CLASS_NEW(SHARED_FACTORY) with the owner's factory reference --");
+        RealProject project = compileProject(IMPORTED_CLASS_APP_SOURCE,
+            Map.of("src/util.deal", IMPORTED_CLASS_UTIL_SOURCE), Map.of());
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(project, invocation());
+            check(!result.hasErrors() && result.project() != null,
+                "the imported in-project class literal lowers through the one "
+                    + "project entry: " + result.diagnostics());
+            boolean retainedAbiDeferred = false;
+            for (CompilerDiagnostic diagnostic : result.diagnostics()) {
+                if (diagnostic.message().contains("RETAINED_ABI_DEFERRED")) {
+                    retainedAbiDeferred = true;
+                }
+            }
+            check(!retainedAbiDeferred,
+                "the checker-valid in-project input reports zero "
+                    + "RETAINED_ABI_DEFERRED");
+            if (result.project() == null) {
+                return;
+            }
+            LoweredModuleUnit util = result.project().modules().get(UTIL);
+            LoweredModuleUnit app = result.project().modules().get(APP);
+            check(util != null && app != null,
+                "both the owner and the dependent module are in the closure");
+            if (util == null || app == null) {
+                return;
+            }
+            // The in-project records of the owner: the interface entry from
+            // the project index, the owner unit's layout, the owner
+            // registry's factory op id for the interface constructionEntry,
+            // and the factory op's result ValueId.
+            ExternalModuleInterface utilInterface = project.index().modules().get(UTIL);
+            ClassInterface pointEntry = null;
+            if (utilInterface != null) {
+                for (ClassInterface candidate : utilInterface.classes()) {
+                    if (candidate.classId().equals(POINT)) {
+                        pointEntry = candidate;
+                    }
+                }
+            }
+            ClassLayout ownerLayout = util.classLayouts().get(POINT);
+            ClassFactoryRegistry ownerRegistry = result.registryOf(UTIL);
+            check(pointEntry != null && ownerLayout != null && ownerRegistry != null,
+                "the owner's interface entry, layout, and registry resolve");
+            if (pointEntry == null || ownerLayout == null || ownerRegistry == null) {
+                return;
+            }
+            OpId factoryOpId = ownerRegistry.factoryFor(pointEntry.constructionEntry());
+            SemanticOp factoryOp = factoryOpId == null ? null : opOf(util, factoryOpId);
+            check(factoryOpId != null && factoryOp != null
+                    && factoryOp.kind() == SemanticOpKind.CLASS_FACTORY
+                    && factoryOp.result() instanceof ValueId,
+                "the owner's CLASS_FACTORY is registered under the interface "
+                    + "constructionEntry with a result value");
+            if (factoryOpId == null || factoryOp == null
+                    || !(factoryOp.result() instanceof ValueId factoryResult)) {
+                return;
+            }
+            SharedFactoryFacts facts = new SharedFactoryFacts(POINT, pointEntry,
+                ownerLayout, factoryOpId, factoryResult);
+
+            // The dependent module's imported literals: one CLASS_NEW per
+            // constructed imported class, each with defaultOwner
+            // SHARED_FACTORY, the owner's constructionEntry as the factory
+            // reference, an empty CLASS_DEFAULT child list, the provided
+            // fields, and the declaration-order boundary list.
+            Map<ClassId, KindPayload.ClassNewPayload> constructions =
+                new LinkedHashMap<>();
+            for (SemanticOp op : app.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_NEW
+                        && op.payload() instanceof KindPayload.ClassNewPayload candidate) {
+                    constructions.put(candidate.classId(), candidate);
+                }
+            }
+            checkEq(Set.of(POINT, SEGMENT), constructions.keySet(),
+                "the dependent module lowers one CLASS_NEW per constructed imported "
+                    + "in-project class");
+            KindPayload.ClassNewPayload payload = constructions.get(POINT);
+            check(payload != null, "the imported Point literal lowered CLASS_NEW");
+            if (payload == null) {
+                return;
+            }
+            checkEq(DefaultOwner.SHARED_FACTORY, payload.defaultOwner(),
+                "the imported literal carries defaultOwner SHARED_FACTORY");
+            checkEq(facts.interfaceEntry().constructionEntry(),
+                payload.classFactoryRef(),
+                "the literal carries the owner's interface constructionEntry as its "
+                    + "factory reference");
+            check(payload.classDefaultOpIds().isEmpty(),
+                "the SHARED_FACTORY literal carries an empty classDefaultOpIds list "
+                    + "(the defaults transfer to the owner's factory)");
+            checkEq(ownerLayout, payload.layout(),
+                "the payload layout is the owner unit's layout, resolved through the "
+                    + "in-project interface facts");
+            checkEq(List.of("x"), payload.providedFields().stream()
+                    .map(KindPayload.ProvidedField::name).toList(),
+                "the provided fields stay in literal order");
+            checkEq(List.of("x", "y"), payload.fieldBoundaries().stream()
+                    .map(KindPayload.FieldBoundary::field).toList(),
+                "the field boundaries run in declaration order");
+            checkEq(List.of(BoundaryKind.CLASS_LITERAL_FIELD,
+                    BoundaryKind.CLASS_DEFAULT_FIELD),
+                payload.fieldBoundaries().stream()
+                    .map(KindPayload.FieldBoundary::kind).toList(),
+                "the provided field is a literal boundary and the omitted defaulted "
+                    + "field a default boundary");
+            SemanticOp defaultBoundary = opOf(app,
+                payload.fieldBoundaries().get(1).boundaryOpId());
+            check(defaultBoundary != null
+                    && defaultBoundary.payload()
+                        instanceof KindPayload.BoundaryPayload boundary
+                    && boundary.input().equals(facts.factoryResult()),
+                "the omitted defaulted field's boundary wires the owner factory op's "
+                    + "result ValueId (the in-project factory reference)");
+
+            // Repeats are deterministic: the same accumulation and walk
+            // produce the byte-identical dependent unit.
+            SemanticLowerer.ProjectLoweringResult repeat = lower(project, invocation());
+            check(repeat.project() != null
+                    && java.util.Arrays.equals(
+                        SemanticIrDumper.dumpModule(app),
+                        SemanticIrDumper.dumpModule(
+                            repeat.project().modules().get(APP))),
+                "the repeated lowering of the imported in-project class project is "
+                    + "byte-identical");
+
+            // Every exported class of the lowered owner accumulates its own
+            // fact (the loop, not one fixture class): the second class
+            // constructs SHARED_FACTORY with its own constructionEntry and
+            // its own owner layout.
+            ClassInterface segmentEntry = null;
+            if (utilInterface != null) {
+                for (ClassInterface candidate : utilInterface.classes()) {
+                    if (candidate.classId().equals(SEGMENT)) {
+                        segmentEntry = candidate;
+                    }
+                }
+            }
+            ClassLayout segmentLayout = util.classLayouts().get(SEGMENT);
+            OpId segmentFactoryOpId = segmentEntry == null ? null
+                : ownerRegistry.factoryFor(segmentEntry.constructionEntry());
+            SemanticOp segmentFactoryOp = segmentFactoryOpId == null ? null
+                : opOf(util, segmentFactoryOpId);
+            KindPayload.ClassNewPayload segment = constructions.get(SEGMENT);
+            check(segment != null && segmentEntry != null && segmentLayout != null
+                    && segment.defaultOwner() == DefaultOwner.SHARED_FACTORY
+                    && segment.classFactoryRef().equals(
+                        segmentEntry.constructionEntry())
+                    && segment.classDefaultOpIds().isEmpty()
+                    && segment.layout().equals(segmentLayout)
+                    && segmentFactoryOp != null
+                    && segmentFactoryOp.kind() == SemanticOpKind.CLASS_FACTORY,
+                "every exported class of the lowered owner accumulates its own fact "
+                    + "(the second class constructs SHARED_FACTORY with its own "
+                    + "constructionEntry and layout)");
+
+            // The composed chain re-runs over the dependent unit with the
+            // in-project facts of both classes (the class-construction arm's
+            // imported path).
+            Map<ClassId, SharedFactoryFacts> inProjectFacts = new LinkedHashMap<>();
+            inProjectFacts.put(POINT, facts);
+            if (segmentEntry != null && segmentLayout != null
+                    && segmentFactoryOpId != null && segmentFactoryOp != null
+                    && segmentFactoryOp.result() instanceof ValueId segmentResult) {
+                inProjectFacts.put(SEGMENT, new SharedFactoryFacts(SEGMENT,
+                    segmentEntry, segmentLayout, segmentFactoryOpId, segmentResult));
+            }
+            check(ClassConstructionValidator.validate(app, result.tableOf(APP),
+                    result.registryOf(APP), new JsonDefaultChildTable(Map.of()),
+                    project.index().modules().get(APP),
+                    inProjectFacts).isEmpty(),
+                "the dependent unit passes the class-construction validator with the "
+                    + "in-project facts");
+
+            // The combined behavior: the dependent module's cross-module call
+            // resolves through the accumulated EXTERNAL_ENTRY records.
+            KindPayload.CallPayload externalCall = null;
+            for (SemanticOp op : app.ops()) {
+                if (op.kind() == SemanticOpKind.CALL
+                        && op.payload() instanceof KindPayload.CallPayload call
+                        && call.callee()
+                            instanceof KindPayload.CallCallee.Static staticCallee
+                        && staticCallee.binding()
+                            instanceof FunctionExecutionBinding.ExternalFunction external
+                        && external.moduleId().equals(UTIL)) {
+                    externalCall = call;
+                    check(external.executionOwner()
+                            == deal.semantic.ir.ExternalExecutionOwner.SHARED_BODY,
+                        "the cross-module callee is a SHARED_BODY external (no "
+                            + "retained-ABI owner enters the project lowering)");
+                }
+            }
+            check(externalCall != null,
+                "the dependent module's cross-module call carries the in-project "
+                    + "external binding");
+            if (externalCall != null) {
+                OpId entryRef = externalCall.externalEntryRef();
+                SemanticOp entry = entryRef == null ? null : opOf(util, entryRef);
+                check(entry != null
+                        && entry.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                        && entry.payload()
+                            instanceof KindPayload.ExternalEntryPayload entryPayload
+                        && entryPayload.exportName().equals("makePoint"),
+                    "the call's externalEntryRef names the owner's recorded "
+                        + "EXTERNAL_ENTRY (the accumulated in-project record)");
+            }
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    private static void testInconsistentFactSeed() throws Exception {
+        System.out.println("-- the inconsistent-fact negative: an owner outside the "
+            + "closure and outside the declaration set still defers --");
+        RealProject project = compileProject(IMPORTED_CLASS_APP_SOURCE,
+            Map.of("src/util.deal", IMPORTED_CLASS_UTIL_SOURCE), Map.of());
+        try {
+            // The same real project with the owner module removed from the
+            // closure and the index: the checker-resolved class identity
+            // stays, but no lowered implementation module, no declaration
+            // surface entry, and no registration seed covers it — the
+            // inconsistent-fact case the deferral remains for.
+            List<CheckedModuleInput> modules = new ArrayList<>();
+            for (CheckedModuleInput module : project.checkedProject().modules()) {
+                if (!module.moduleId().equals(UTIL)) {
+                    modules.add(module);
+                }
+            }
+            Map<ModuleId, ExternalModuleInterface> indexModules = new LinkedHashMap<>();
+            for (Map.Entry<ModuleId, ExternalModuleInterface> entry
+                    : project.index().modules().entrySet()) {
+                if (!entry.getKey().equals(UTIL)) {
+                    indexModules.put(entry.getKey(), entry.getValue());
+                }
+            }
+            ProjectInterfaceIndex strippedIndex = new ProjectInterfaceIndex(
+                ProjectInterfaceIndex.FORMAT_VERSION, indexModules);
+            List<SemanticRequirementManifest> manifests = new ArrayList<>();
+            for (SemanticRequirementManifest manifest : project.manifests()) {
+                if (!manifest.moduleId().equals(UTIL)) {
+                    manifests.add(manifest);
+                }
+            }
+            CompilerInvocation invocation = invocation();
+            CheckedProjectInput stripped = new CheckedProjectInput(invocation,
+                project.checkedProject().entryModule(), modules,
+                invocation.releaseStateHash());
+            SemanticLowerer.ProjectLoweringResult result =
+                SemanticLowerer.lowerProject(invocation, stripped, strippedIndex,
+                    manifests, project.surface(), project.declarationIdentities(),
+                    project.externCModules(),
+                    BuiltinErrorDeclaration.synthesized(
+                        modules.get(0).ast().span()),
+                    List.of(IntrinsicKind.INT_CONVERT,
+                        IntrinsicKind.NUMBER_CONVERT),
+                    Set.of());
+            check(result.hasErrors() && result.project() == null,
+                "the inconsistent-fact seed produces no project: "
+                    + result.diagnostics());
+            check(result.tables().isEmpty() && result.registries().isEmpty()
+                    && result.seeds() == null && result.namespaces() == null,
+                "the inconsistent-fact seed produces no tables, no registries, no "
+                    + "seeds, and no registrations");
+            if (!result.diagnostics().isEmpty()) {
+                CompilerDiagnostic diagnostic = result.diagnostics().get(0);
+                check("E6005".equals(diagnostic.code())
+                        && diagnostic.message().contains("RETAINED_ABI_DEFERRED"),
+                    "the inconsistent-fact seed returns the first E6005 "
+                        + "RETAINED_ABI_DEFERRED; got " + diagnostic.message());
+            }
+        } finally {
+            deleteRecursively(project.root());
+        }
+    }
+
+    // =========================================================================
     // 5. The declaration-class fail-closed acceptance
     // =========================================================================
 
@@ -1264,12 +1598,24 @@ public class ProjectLoweringTest {
         }
     }
 
+    /** The unit's op named by the id, or {@code null}. */
+    private static SemanticOp opOf(LoweredModuleUnit unit, OpId opId) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.opId().equals(opId)) {
+                return op;
+            }
+        }
+        return null;
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== Project Lowering Entry Tests (ISSUE-0634) ===\n");
         testOneProjectLoweringAndDeterminism();
         testSeedsIntrinsicsAndNamespaces();
         testComposedChainOverUnifiedUnits();
         testInProjectClassArm();
+        testImportedInProjectClassResolution();
+        testInconsistentFactSeed();
         testDeclarationClassFailClosed();
         testBuiltinErrorFailClosed();
         testExternCDeclarationClassFailClosed();

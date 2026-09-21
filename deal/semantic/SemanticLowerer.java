@@ -2018,9 +2018,18 @@ public final class SemanticLowerer {
      * {@code externalEntryRef} resolution), and every cross-module callee
      * of the closure is a {@code SHARED_BODY} external: no route plan, no
      * per-module route map, and no retained-ABI execution owner enter the
-     * project lowering. The in-project shared-factory facts of this stage
-     * are empty (the in-project imported-class resolution child realizes
-     * them).</p>
+     * project lowering. The in-project imported-construction facts
+     * (ISSUE-0636; D10 and the in-project imported-class contract) are
+     * accumulated the same way: one {@link SharedFactoryFacts} per
+     * exported class of every already-lowered implementation module (the
+     * interface entry from the project index, the owner unit's layout,
+     * the owner registry's factory op id for the interface
+     * {@code constructionEntry}, and the factory op's result
+     * {@link ValueId}), supplied to each dependent module's session and to
+     * its class-construction validation, so a checker-valid imported
+     * in-project class literal lowers {@code CLASS_NEW(SHARED_FACTORY)}
+     * with the owner's factory reference and zero
+     * {@code RETAINED_ABI_DEFERRED}.</p>
      *
      * <p><b>Session seeds.</b> Each session receives the class
      * registration seeds as its layout-resolution context (after the
@@ -2197,6 +2206,22 @@ public final class SemanticLowerer {
         Map<ModuleId, deal.semantic.ir.ClassFactoryRegistry> registries =
             new LinkedHashMap<>();
         Map<ModuleId, Map<String, OpId>> calleeExternalEntries = new LinkedHashMap<>();
+        // The in-project imported-construction facts (ISSUE-0636; design
+        // sources {@code project-lowering-entry-and-registration-seeds} D10
+        // and the in-project imported-class contract;
+        // {@code semantic-ir-construct-coverage-cutover} K3): one
+        // {@link SharedFactoryFacts} per exported class of every
+        // already-lowered implementation module, accumulated in dependency
+        // order and supplied to each dependent module's session, so a
+        // checker-valid literal of an in-project class lowers
+        // {@code CLASS_NEW(SHARED_FACTORY)} with the owner's factory
+        // reference. No route fact, no {@code ModuleRoute} plan input, and
+        // no retained-ABI execution owner enter the entry: every
+        // cross-module callee of the closure is a {@code SHARED_BODY}
+        // external and every in-project class owner is a lowered
+        // implementation module.
+        Map<ClassId, SharedFactoryFacts> inProjectFactoryFacts =
+            new LinkedHashMap<>();
 
         for (CheckedModuleInput module : checkedProject.modules()) {
             SemanticRequirementManifest manifest =
@@ -2221,7 +2246,8 @@ public final class SemanticLowerer {
             LoweredProjectModule lowered = lowerProjectModule(module, manifest,
                 interfaceHash, capabilityRegistryHash, allocator, closureRoutes,
                 calleeExternalEntries, callbackExports, seeds.seeds(),
-                conversionIntrinsics, ownInterface, comparisonFacts);
+                conversionIntrinsics, ownInterface, comparisonFacts,
+                inProjectFactoryFacts);
             if (lowered.hasErrors()) {
                 return projectFailureResult(lowered.diagnostics());
             }
@@ -2236,6 +2262,8 @@ public final class SemanticLowerer {
             if (!lowered.externalEntries().isEmpty()) {
                 calleeExternalEntries.put(module.moduleId(), lowered.externalEntries());
             }
+            accumulateInProjectFactoryFacts(ownInterface, lowered,
+                inProjectFactoryFacts);
         }
 
         // (5) The project-form gate over the complete closure.
@@ -2258,6 +2286,12 @@ public final class SemanticLowerer {
      * composed per-unit closed chain over the produced unit, and the
      * module's per-walk production records. Internal to
      * {@link #lowerProject} — no per-module result escapes the entry.
+     *
+     * <p>The in-project shared-factory facts supplied here (ISSUE-0636)
+     * are the dependency-order snapshot of the already-lowered
+     * implementation modules' exported classes; the dependent module's
+     * unit carries only the reference (its own layout map stays the
+     * module's own declared layouts).</p>
      */
     private static LoweredProjectModule lowerProjectModule(
             CheckedModuleInput module,
@@ -2271,10 +2305,12 @@ public final class SemanticLowerer {
             ClassRegistrationSeeds seeds,
             List<IntrinsicKind> conversionIntrinsics,
             deal.semantic.ir.ExternalModuleInterface ownInterface,
-            SemanticIrValidator.ComparisonFacts comparisonFacts) {
+            SemanticIrValidator.ComparisonFacts comparisonFacts,
+            Map<ClassId, SharedFactoryFacts> sharedFactories) {
         ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
             module.checks(), allocator, true, true, true, false, false, false,
-            module.ast().span(), true, true, ownInterface, Map.of());
+            module.ast().span(), true, true, ownInterface,
+            Map.copyOf(sharedFactories));
         lowerer.setModuleImports(module.imports());
         lowerer.setRegistrationSeeds(seeds);
         lowerer.setDeclaredConversionIntrinsics(conversionIntrinsics);
@@ -2308,13 +2344,75 @@ public final class SemanticLowerer {
         StructuredBodyTable table = lowerer.bodyTable();
         Optional<CompilerDiagnostic> unitChain = validateProjectUnit(unit, table,
             comparisonFacts, lowerer.pinnedWriteFacts(), lowerer.factoryRegistry(),
-            lowerer.jsonDefaultChildren(), ownInterface, Map.of());
+            lowerer.jsonDefaultChildren(), ownInterface, Map.copyOf(sharedFactories));
         if (unitChain.isPresent()) {
             return LoweredProjectModule.failure(List.of(unitChain.get()));
         }
         return new LoweredProjectModule(unit, table, lowerer.factoryRegistry(),
             lowerer.jsonDefaultChildren(), lowerer.recordedEntries(),
             lowerer.pinnedWriteFacts(), List.of());
+    }
+
+    /**
+     * Accumulates one already-lowered implementation module's exported
+     * classes' in-project shared-factory facts (ISSUE-0636; design
+     * sources {@code project-lowering-entry-and-registration-seeds} D10
+     * and the in-project imported-class contract;
+     * {@code semantic-ir-construct-coverage-cutover} K3): for each
+     * exported class of the module's own interface entry, the owner
+     * unit's layout, the owner registry's {@code CLASS_FACTORY} op id
+     * registered under the interface {@code constructionEntry}, and the
+     * factory op's result {@link ValueId}. The facts are accumulated in
+     * dependency order, computed once per owner, and read-only; the
+     * dependent module's unit carries only the reference.
+     *
+     * <p><b>Inconsistent facts stay deferred.</b> An interface class
+     * whose owner unit carries no layout, no registered factory, or no
+     * resolvable factory result accumulates no fact; a dependent literal
+     * of such a class then finds no fact and no registration seed and
+     * stays the fail-closed {@code RETAINED_ABI_DEFERRED} deferral —
+     * never a silently emitted {@code SHARED_FACTORY} construction.
+     * Checker-valid in-project input never takes that arm.</p>
+     *
+     * @param ownInterface the lowered module's own interface entry;
+     *                     non-null
+     * @param lowered      the module's produced lowering records;
+     *                     non-null
+     * @param accumulated  the project's accumulating facts map (mutated
+     *                     in dependency order); non-null
+     */
+    private static void accumulateInProjectFactoryFacts(
+            deal.semantic.ir.ExternalModuleInterface ownInterface,
+            LoweredProjectModule lowered,
+            Map<ClassId, SharedFactoryFacts> accumulated) {
+        for (deal.semantic.ir.ClassInterface classEntry : ownInterface.classes()) {
+            deal.semantic.ir.ClassLayout layout =
+                lowered.unit().classLayouts().get(classEntry.classId());
+            if (layout == null) {
+                continue;
+            }
+            OpId factoryOpId =
+                lowered.registry().factoryFor(classEntry.constructionEntry());
+            if (factoryOpId == null) {
+                continue;
+            }
+            SemanticOp factoryOp = opOf(lowered.unit(), factoryOpId);
+            if (factoryOp == null || !(factoryOp.result() instanceof ValueId result)) {
+                continue;
+            }
+            accumulated.put(classEntry.classId(), new SharedFactoryFacts(
+                classEntry.classId(), classEntry, layout, factoryOpId, result));
+        }
+    }
+
+    /** The unit's op named by the id, or {@code null}. */
+    private static SemanticOp opOf(LoweredModuleUnit unit, OpId opId) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.opId().equals(opId)) {
+                return op;
+            }
+        }
+        return null;
     }
 
     /**

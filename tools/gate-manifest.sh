@@ -264,5 +264,13 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # bindings/namespace registrations delivery, the composed per-unit
   # chain over the E7-armed unified units, the four named negative seeds,
   # and the declaration-class fail-closed acceptance.
+  # ISSUE-0636 extends the same main (its only test-list change is none):
+  # the in-project imported-class resolution — CLASS_NEW(SHARED_FACTORY)
+  # with the owner's constructionEntry and factory-result reference, the
+  # declaration-order boundaries, the accumulated EXTERNAL_ENTRY
+  # resolution of a cross-module call, and the inconsistent-fact deferral
+  # seed (project-lowering-entry-and-registration-seeds D10 and the
+  # in-project imported-class contract; semantic-ir-construct-coverage-
+  # cutover K3).
   'fg|=== Running Project Lowering Entry Tests (ISSUE-0634) ===|java -ea -cp build deal.test.ProjectLoweringTest'
 )
