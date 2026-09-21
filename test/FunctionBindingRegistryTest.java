@@ -300,23 +300,37 @@ public class FunctionBindingRegistryTest {
         List<SemanticOp> closureNews = ofKind(unit.ops(), SemanticOpKind.CLOSURE_NEW);
         check(closureNews.size() == 4, "four CLOSURE_NEW ops (f, g, h, k's expression); got "
             + closureNews.size());
-        check(unit.functionBindings().size() == closureNews.size(),
-            "one functionBinding per closure (registry one-to-one): "
+        check(unit.functionBindings().size() == closureNews.size() + 2,
+            "one functionBinding per closure (registry one-to-one) plus the two "
+                + "producer-less intrinsic seed registrations (ISSUE-0632): "
                 + unit.functionBindings().size() + " bindings for " + closureNews.size()
                 + " closures");
-        // The key set is exactly the CLOSURE_NEW result identities.
+        // The key set is exactly the CLOSURE_NEW result identities plus the
+        // two intrinsic seed keys (the producer-less conversion intrinsics).
         List<FunctionAllocationIdentity> keys = new ArrayList<>(
             unit.functionBindings().keySet());
+        List<FunctionAllocationIdentity> seedKeys = new ArrayList<>();
+        List<FunctionAllocationIdentity> closureKeys = new ArrayList<>();
+        for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
+                : unit.functionBindings().entrySet()) {
+            if (entry.getValue() instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                seedKeys.add(entry.getKey());
+            } else {
+                closureKeys.add(entry.getKey());
+            }
+        }
+        check(seedKeys.size() == 2, "the registry carries the two intrinsic seed keys; "
+            + "got " + seedKeys);
         List<FunctionAllocationIdentity> resultIdentities = new ArrayList<>();
         for (SemanticOp closureNew : closureNews) {
             resultIdentities.add(
                 new FunctionAllocationIdentity(((ValueId) closureNew.result()).id()));
         }
-        check(keys.size() == resultIdentities.size()
-                && new java.util.LinkedHashSet<>(keys).equals(
+        check(closureKeys.size() == resultIdentities.size()
+                && new java.util.LinkedHashSet<>(closureKeys).equals(
                     new java.util.LinkedHashSet<>(resultIdentities)),
-            "the map's keys are exactly the CLOSURE_NEW result identities (registry "
-                + "one-to-one); got " + keys + " for " + resultIdentities);
+            "the map's non-seed keys are exactly the CLOSURE_NEW result identities "
+                + "(registry one-to-one); got " + closureKeys + " for " + resultIdentities);
         for (SemanticOp closureNew : closureNews) {
             KindPayload.ClosureNewPayload payload =
                 (KindPayload.ClosureNewPayload) closureNew.payload();
@@ -346,10 +360,13 @@ public class FunctionBindingRegistryTest {
                 ((ValueId) closureNews.get(2).result()).id());
             FunctionAllocationIdentity kKey = new FunctionAllocationIdentity(
                 ((ValueId) closureNews.get(3).result()).id());
-            check(keys.equals(List.of(fKey, gKey, kKey, hKey)),
+            check(closureKeys.equals(List.of(fKey, gKey, kKey, hKey)),
                 "the map iterates in the walk's deterministic registration order "
                     + "[f, g, k, h] (a nested closure registers during its enclosing "
                     + "body walk, before the enclosing closure); got " + keys);
+            check(keys.size() == 6 && keys.subList(0, 2).equals(seedKeys),
+                "the two intrinsic seeds are registered first (they are seeded before "
+                    + "the hoisted names, ISSUE-0632); got " + keys);
         }
         // Non-production boundary: no BOUNDARY/MEMBER_READ/EXPORT_READ op.
         check(noOpsOfKind(unit, SemanticOpKind.BOUNDARY, SemanticOpKind.MEMBER_READ,
@@ -408,8 +425,9 @@ public class FunctionBindingRegistryTest {
         List<SemanticOp> closureNews = ofKind(unit.ops(), SemanticOpKind.CLOSURE_NEW);
         check(closureNews.size() == 1, "exactly one CLOSURE_NEW (the size-1 sibling h); got "
             + closureNews.size());
-        check(unit.functionBindings().size() == 3,
-            "three bindings: one LoweredBody per member plus h's closure; got "
+        check(unit.functionBindings().size() == 5,
+            "three bindings: one LoweredBody per member plus h's closure plus the two "
+                + "intrinsic seeds (ISSUE-0632); got "
                 + unit.functionBindings().size());
         // One LoweredBody per member keyed by the pre-assigned identity.
         FunctionAllocationIdentity fKey = new FunctionAllocationIdentity(f.identity().id());
@@ -437,12 +455,14 @@ public class FunctionBindingRegistryTest {
                     && hBody.functionId().equals(hPayload.function()),
                 "h's closure binding is LoweredBody keyed by its CLOSURE_NEW result identity");
         }
-        // Iteration order: declaration order f, g, h.
+        // Iteration order: the two intrinsic seeds first (they are seeded
+        // before the hoisted names, ISSUE-0632), then declaration order f, g, h.
         List<FunctionAllocationIdentity> keys = new ArrayList<>(
             unit.functionBindings().keySet());
-        check(keys.size() == 3 && keys.get(0).equals(fKey) && keys.get(1).equals(gKey)
-                && hKey != null && keys.get(2).equals(hKey),
-            "the map iterates in declaration order [f, g, h]; got " + keys);
+        check(keys.size() == 5 && keys.get(2).equals(fKey) && keys.get(3).equals(gKey)
+                && hKey != null && keys.get(4).equals(hKey),
+            "the map iterates in declaration order [f, g, h] after the two intrinsic "
+                + "seed keys; got " + keys);
         check(noOpsOfKind(unit, SemanticOpKind.BOUNDARY, SemanticOpKind.MEMBER_READ,
                 SemanticOpKind.EXPORT_READ),
             "the group unit carries no BOUNDARY/MEMBER_READ/EXPORT_READ op (this child "

@@ -4466,10 +4466,22 @@ public final class SemanticLowerer {
          * INIT operand and materialized by the invocation layer (E7); the
          * child emits no placeholder op, never a {@code CONST}, never a
          * closure.
+         *
+         * <p>The seeded identity also carries the closed
+         * {@code IntrinsicFunction} registration ({@code kind} plus the
+         * intrinsic's declared signature) through the registry child's
+         * seed entry point, so the key is registered exactly once and
+         * the bindings production validator's closed admission admits
+         * exactly the seed's {@code BINDING_INIT} as its producing
+         * position. The function-typed materialization that carries the
+         * identity as a first-class value stays the function-value
+         * child's: this walk emits neither a load of the intrinsic
+         * binding nor an intrinsic carrier.</p>
          */
         private void seedIntrinsicBindings() {
             for (String name : List.of("int", "number")) {
-                if (!(checks.symbolTable().resolve(name) instanceof Symbol.IntrinsicSymbol)) {
+                if (!(checks.symbolTable().resolve(name)
+                        instanceof Symbol.IntrinsicSymbol intrinsic)) {
                     continue;
                 }
                 BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
@@ -4493,12 +4505,24 @@ public final class SemanticLowerer {
                 // retained here so the adapted emission wires the exact
                 // identity the intrinsic binding's cell holds.
                 intrinsicIdentities.put(name, intrinsicValue);
-                // No static function-identity tracking for intrinsics: a
-                // first-class intrinsic value has no closed
-                // FunctionExecutionBinding shape, so a function-typed
-                // load of an intrinsic fails closed as the registry
-                // child's resolution (B5) — this child never emits an
-                // unvalidatable function-typed load.
+                // The seed's closed registration: exactly one
+                // IntrinsicFunction binding keyed by the seeded
+                // identity, with the intrinsic's declared signature as
+                // the checker's own symbol declares it (the closed gate
+                // pins it against the kind's declared signature).
+                IntrinsicKind kind = conversionIntrinsicKind(intrinsic.name());
+                if (kind == null) {
+                    throw new IllegalStateException("the intrinsic seed resolved '"
+                        + name + "' to the non-conversion intrinsic '"
+                        + intrinsic.name() + "' (producer defect)");
+                }
+                registry.registerIntrinsic(
+                    new FunctionAllocationIdentity(intrinsicValue.id()), kind,
+                    (RuntimeDescriptor.Func) DescriptorService.describe(intrinsic.type()));
+                // No static function-identity tracking for intrinsics: the
+                // function-typed load of the intrinsic binding is the
+                // function-value child's materialization; this walk never
+                // emits an unvalidatable function-typed load.
                 emitUserNullOp(SemanticOpKind.BINDING_INIT,
                     new KindPayload.BindingInitPayload(binding, INITIAL_LOOP_GENERATION,
                         intrinsicValue),
@@ -8971,6 +8995,8 @@ public final class SemanticLowerer {
                     hostValue.descriptor().paramTypes().size();
                 case FunctionExecutionBinding.ExternalFunction external ->
                     external.descriptor().paramTypes().size();
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    intrinsic.descriptor().paramTypes().size();
             };
         }
 
@@ -9017,6 +9043,21 @@ public final class SemanticLowerer {
                     + "callee module first and pass its recorded entries)");
             }
             return entry;
+        }
+
+        /**
+         * The fail-closed producer defect of an invocation that resolves the
+         * not-yet-realized intrinsic function carrier: this slice registers
+         * the closed {@code IntrinsicFunction} binding only — the carrier's
+         * materialization and its call execution are the function-typed-value
+         * child's.
+         */
+        private static ConstructUnlowered intrinsicCarrierDefect(
+                FunctionExecutionBinding.IntrinsicFunction intrinsic, String site) {
+            return new ConstructUnlowered("the '" + intrinsic.kind() + "' intrinsic "
+                + "function value resolved by " + site + " has no call execution in this "
+                + "slice (the intrinsic carrier is the function-typed-value child's — "
+                + "producer defect)");
         }
 
         /** The adapter's statically fixed source binding, or null (thunk/call-result sources). */
@@ -9166,6 +9207,9 @@ public final class SemanticLowerer {
                         parameterBoundaryIds.add(boundary.opId());
                     }
                 }
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
+                        + "'");
             }
             // The single return boundary per the closed table.
             OpId returnBoundaryOpId = null;
@@ -9216,6 +9260,9 @@ public final class SemanticLowerer {
                                     external.descriptor(), result, call.span(), callOpId);
                             }
                         }
+                        case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                            throw intrinsicCarrierDefect(intrinsic, "the adapted call "
+                                + "of '" + calleeName + "'");
                         case FunctionExecutionBinding.AdapterBinding nested ->
                             throw new ConstructUnlowered("nested adapter source of '"
                                 + calleeName + "' (adapter-of-adapter invocation is "
@@ -9236,6 +9283,9 @@ public final class SemanticLowerer {
                             external.descriptor(), result, call.span(), callOpId);
                     }
                 }
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
+                        + "'");
             }
             emit(buildOp(callOpId, SemanticOpKind.CALL,
                 new KindPayload.CallPayload(CallMode.INDIRECT,
@@ -9615,6 +9665,8 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.AdapterBinding adapter ->
                     throw new ConstructUnlowered("adapter-over-async lower via "
                         + "lowerAdapterOverAsync (producer defect)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicCarrierDefect(intrinsic, "the await call");
             }
             RuntimeDescriptor completion = signature.returnType();
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
@@ -9735,6 +9787,9 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.AdapterBinding nestedAdapter ->
                     throw new ConstructUnlowered("nested adapter source of '" + calleeName
                         + "' (adapter-of-adapter invocation is ISSUE-0531's)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw intrinsicCarrierDefect(intrinsic, "the adapter-over-async call "
+                        + "of '" + calleeName + "'");
             }
             AsyncTokenId outerToken = new AsyncTokenId.Alias(
                 ids.nextTokenId(module, nextOrdinal++, 0), sourceToken,
@@ -11676,17 +11731,35 @@ public final class SemanticLowerer {
                     && call.callee() instanceof IdentifierExpr identifier) {
                 Symbol symbol = checks.symbolTable().resolve(identifier.name());
                 if (symbol instanceof Symbol.IntrinsicSymbol intrinsic) {
-                    if ("int".equals(intrinsic.name())) {
-                        return IntrinsicKind.INT_CONVERT;
-                    }
-                    if ("number".equals(intrinsic.name())) {
-                        return IntrinsicKind.NUMBER_CONVERT;
+                    IntrinsicKind kind = conversionIntrinsicKind(intrinsic.name());
+                    if (kind != null) {
+                        return kind;
                     }
                 }
             }
             throw new ConstructUnlowered("call expression (only int()/number() intrinsic "
                 + "calls lower in this slice — INTRINSIC_CALL is the I3 terminal-check "
                 + "arm; the CALL machinery is E7's and bytes() is the bytes exclusion)");
+        }
+
+        /**
+         * The two conversion intrinsics' name-to-kind map (the seed's and
+         * the intrinsic-call classifier's single authority): {@code int}
+         * is {@code INT_CONVERT} and {@code number} is
+         * {@code NUMBER_CONVERT}; every other name — including the
+         * {@code bytes}/{@code has} intrinsics — maps to no conversion
+         * kind.
+         *
+         * @param name the root intrinsic binding's name; non-null
+         * @return the conversion kind, or {@code null} for a non-conversion
+         *         intrinsic
+         */
+        private static IntrinsicKind conversionIntrinsicKind(String name) {
+            return switch (name) {
+                case "int" -> IntrinsicKind.INT_CONVERT;
+                case "number" -> IntrinsicKind.NUMBER_CONVERT;
+                default -> null;
+            };
         }
 
         /**

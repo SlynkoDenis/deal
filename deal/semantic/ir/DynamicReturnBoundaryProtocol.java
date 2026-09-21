@@ -15,7 +15,12 @@ import java.util.Objects;
  * source kind of its own; the D15 invocation protocol resolves the
  * adapter's source value to its own binding, and the class is derived
  * from that source binding ({@code kindOf(sourceBinding)}) — this method
- * fails closed on an adapter input rather than guessing.</p>
+ * fails closed on an adapter input rather than guessing. An
+ * {@code IntrinsicFunction} is a boundary-shaped callable: the call op
+ * computes the conversion result and runs the recorded
+ * {@code HOST_TO_DEAL}/{@code HOST_SYNC_RETURN} cell, so its resolution
+ * class is {@code HOST} (the intrinsic carrier's realization and its
+ * invocation belong to the function-typed-value child).</p>
  *
  * <p>{@link #select(KindPayload.DynamicReturnBoundary, DynamicResolutionKind)}
  * selects the single recorded return-boundary cell the runtime executes
@@ -59,6 +64,8 @@ public final class DynamicReturnBoundaryProtocol {
                 external.executionOwner() == ExternalExecutionOwner.SHARED_BODY
                     ? DynamicResolutionKind.SHARED_BODY
                     : DynamicResolutionKind.EXTERNAL;
+            case FunctionExecutionBinding.IntrinsicFunction ignored ->
+                DynamicResolutionKind.HOST;
             case FunctionExecutionBinding.AdapterBinding ignored ->
                 throw new IllegalArgumentException("an AdapterBinding resolution derives its "
                     + "class from the D15-resolved source binding (kindOf(sourceBinding)); "

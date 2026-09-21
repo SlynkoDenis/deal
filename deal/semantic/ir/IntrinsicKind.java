@@ -1,5 +1,7 @@
 package deal.semantic.ir;
 
+import java.util.List;
+
 /**
  * The closed intrinsic-conversion set of {@code deal.semantic-ir/1}
  * (parent closed operation table; schema S3): the two conversion
@@ -13,6 +15,15 @@ package deal.semantic.ir;
  * completes before START and the conversion policy
  * ({@code INT_CONVERSION}/{@code NUMBER_CONVERSION}) is its only terminal
  * check. The conversions are payload fields, not snapshot selectors.</p>
+ *
+ * <p>Each kind carries its pinned declared signature — the checker's
+ * root {@code Symbol.IntrinsicSymbol} function type
+ * ({@code deal/checker/NameResolver.seedIntrinsics}): {@code INT_CONVERT}
+ * is {@code (number) -> int} and {@code NUMBER_CONVERT} is
+ * {@code (int) -> number}. The signature is the closed descriptor
+ * position of the {@code FunctionExecutionBinding.IntrinsicFunction}
+ * shape ({@link #declaredSignature()}); a binding carrying any other
+ * {@code (kind, descriptor)} pair fails the closed gate.</p>
  */
 public enum IntrinsicKind {
 
@@ -20,5 +31,27 @@ public enum IntrinsicKind {
     INT_CONVERT,
 
     /** The {@code number} conversion intrinsic. */
-    NUMBER_CONVERT
+    NUMBER_CONVERT;
+
+    /**
+     * The pinned declared signature of this conversion intrinsic: the
+     * intrinsic's declared function type as the compilation's single
+     * {@code deal.semantic.DescriptorService} descriptor producer renders it —
+     * {@code INT_CONVERT} is {@code (number)->int} and
+     * {@code NUMBER_CONVERT} is {@code (int)->number}. It is the only
+     * descriptor admissible in a {@code FunctionExecutionBinding
+     * .IntrinsicFunction} shape of this kind.
+     *
+     * @return the intrinsic's declared signature descriptor; non-null
+     */
+    public RuntimeDescriptor.Func declaredSignature() {
+        return switch (this) {
+            case INT_CONVERT -> new RuntimeDescriptor.Func(
+                List.of(RuntimeDescriptor.Number.INSTANCE),
+                RuntimeDescriptor.Int.INSTANCE);
+            case NUMBER_CONVERT -> new RuntimeDescriptor.Func(
+                List.of(RuntimeDescriptor.Int.INSTANCE),
+                RuntimeDescriptor.Number.INSTANCE);
+        };
+    }
 }

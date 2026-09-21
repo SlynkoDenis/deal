@@ -139,7 +139,12 @@ public final class BindingsProductionValidator {
     /** The adapter-source-shape rule (B9/B8): mode↔source shape, proof iff VALUE-over-binding. */
     public static final String ADAPTER_SOURCE_SHAPE = "ADAPTER_SOURCE_SHAPE";
 
-    /** The registry one-to-one rule (B9/B5): one registration per producing allocation. */
+    /**
+     * The registry one-to-one rule (B9/B5): one registration per producing
+     * allocation, plus the producer-less intrinsic-seed clause set
+     * (admission, converse, and the pinned declared signature of the two
+     * conversion intrinsics).
+     */
     public static final String REGISTRY_ONE_TO_ONE = "REGISTRY_ONE_TO_ONE";
 
     /** The no-adapter-at-boundary rule (B9/B6): the adapter result wires into its own position only. */
@@ -2012,6 +2017,15 @@ public final class BindingsProductionValidator {
         Map<Long, Integer> groupProductions = new LinkedHashMap<>();
         Map<Long, Integer> readProductions = new LinkedHashMap<>();
         Map<Long, Integer> boundaryInputs = new LinkedHashMap<>();
+        // Every value identity produced by an op of the unit: the
+        // producer-less test of the intrinsic-seed clauses (a seed
+        // init's operand is the result of no op — the seeded identity is
+        // allocated without a producing op).
+        Set<Long> producedValues = new LinkedHashSet<>();
+        // The seed writes per producer-less init operand: one BINDING_INIT
+        // per admitted seeded key, counted for the admission/converse
+        // clauses below.
+        Map<Long, Integer> seedInits = new LinkedHashMap<>();
         for (SemanticOp op : model.unit.ops()) {
             switch (op.kind()) {
                 case CLOSURE_NEW -> {
@@ -2051,6 +2065,9 @@ public final class BindingsProductionValidator {
                     // No producing position.
                 }
             }
+            if (op.result() instanceof ValueId produced) {
+                producedValues.add(produced.id());
+            }
         }
         for (SemanticOp op : model.unit.ops()) {
             if (op.payload() instanceof KindPayload.RecursiveGroupInitPayload group) {
@@ -2063,8 +2080,17 @@ public final class BindingsProductionValidator {
                 }
             }
         }
+        for (SemanticOp op : model.unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && !producedValues.contains(init.value().id())) {
+                seedInits.merge(init.value().id(), 1, Integer::sum);
+            }
+        }
         // Every registry key is produced by exactly one producing
-        // allocation (or one host crossing).
+        // allocation (or one host crossing), or — for the producer-less
+        // intrinsic seed — by exactly one seed BINDING_INIT and no other
+        // producing position.
         for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
                 : model.unit.functionBindings().entrySet()) {
             long key = entry.getKey().id();
@@ -2080,12 +2106,69 @@ public final class BindingsProductionValidator {
                         + boundaryCount + " host crossing(s) (exactly one producing host "
                         + "crossing per HostFunctionValue registration)");
                 }
+            } else if (entry.getValue() instanceof FunctionExecutionBinding.IntrinsicFunction
+                    intrinsic) {
+                // The intrinsic-seed admission (D13): a key whose binding
+                // is IntrinsicFunction is admissible exactly when the
+                // unit carries exactly one seed BINDING_INIT whose init
+                // operand is that key and the key contributes no other
+                // producing position (no closure/adapt/group/read
+                // production and no host crossing).
+                int seedCount = seedInits.getOrDefault(key, 0);
+                int boundaryCount = boundaryInputs.getOrDefault(key, 0);
+                if (count != 0 || boundaryCount != 0 || seedCount != 1) {
+                    return fail(model, REGISTRY_ONE_TO_ONE, "the IntrinsicFunction key "
+                        + entry.getKey() + " is produced by " + count + " producing op(s), "
+                        + boundaryCount + " host crossing(s), and " + seedCount
+                        + " seed BINDING_INIT(s) (exactly one seed BINDING_INIT whose init "
+                        + "operand is that key, and no other producing position, per "
+                        + "producer-less intrinsic registration)");
+                }
+                // The pinned declared signature: the closed (kind,
+                // descriptor) pair of the registration.
+                if (!intrinsic.descriptor().equals(intrinsic.kind().declaredSignature())) {
+                    return fail(model, REGISTRY_ONE_TO_ONE, "the IntrinsicFunction key "
+                        + entry.getKey() + " carries the pair (" + intrinsic.kind()
+                        + ", " + intrinsic.descriptor().canonicalSpecText()
+                        + ") which is not the kind's pinned declared signature ("
+                        + intrinsic.kind().declaredSignature().canonicalSpecText() + ")");
+                }
             } else {
                 if (count != 1) {
                     return fail(model, REGISTRY_ONE_TO_ONE, "the key " + entry.getKey()
                         + " is produced by " + count + " producing op(s) (exactly one "
                         + "producing allocation per registration)");
                 }
+            }
+        }
+        // The converse clause: every BINDING_INIT whose init operand
+        // identity is the result of no op of the unit must be keyed by
+        // exactly one IntrinsicFunction registration in the same unit
+        // and must not be any HOST_TO_DEAL crossing input — the seed
+        // surface is the only admitted producer-less key.
+        for (Map.Entry<Long, Integer> entry : seedInits.entrySet()) {
+            FunctionAllocationIdentity identity =
+                new FunctionAllocationIdentity(entry.getKey());
+            if (boundaryInputs.getOrDefault(entry.getKey(), 0) != 0) {
+                return fail(model, REGISTRY_ONE_TO_ONE, "the producer-less BINDING_INIT "
+                    + "operand " + identity + " is a HOST_TO_DEAL crossing input (the "
+                    + "seed surface is the only admitted producer-less key; a host-"
+                    + "materialized function value registers a HostFunctionValue at "
+                    + "its producing crossing)");
+            }
+            FunctionExecutionBinding binding = model.unit.functionBindings().get(identity);
+            if (!(binding instanceof FunctionExecutionBinding.IntrinsicFunction)) {
+                return fail(model, REGISTRY_ONE_TO_ONE, "the BINDING_INIT operand "
+                    + identity + " is the result of no op of the unit and is keyed by "
+                    + (binding == null ? "no registration" : ("the " + binding.getClass()
+                        .getSimpleName() + " registration"))
+                    + " (a producer-less init operand is admissible only under exactly one "
+                    + "IntrinsicFunction registration)");
+            }
+            if (entry.getValue() != 1) {
+                return fail(model, REGISTRY_ONE_TO_ONE, "the producer-less init operand "
+                    + identity + " carries " + entry.getValue() + " seed BINDING_INIT "
+                    + "op(s) (exactly one seed init per admitted intrinsic key)");
             }
         }
         // Every producing allocation registers exactly one binding.

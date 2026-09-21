@@ -494,6 +494,10 @@ public final class ContractSnapshotCanonicalizer {
                 CanonicalJson.e("exportName", CanonicalJson.str(b.exportName())),
                 CanonicalJson.e("moduleId", semanticIdJson(b.moduleId())),
                 CanonicalJson.e("type", CanonicalJson.str("externalFunction")));
+            case FunctionExecutionBinding.IntrinsicFunction b -> CanonicalJson.obj(
+                CanonicalJson.e("descriptor", descriptorText(b.descriptor())),
+                CanonicalJson.e("intrinsicKind", CanonicalJson.str(b.kind().name())),
+                CanonicalJson.e("type", CanonicalJson.str("intrinsicFunction")));
         };
     }
 
@@ -1161,6 +1165,10 @@ public final class ContractSnapshotCanonicalizer {
                 CanonicalJson.e("exportName", CanonicalJson.str(binding.exportName())),
                 CanonicalJson.e("moduleId", moduleIdJson(binding.modulePath())),
                 CanonicalJson.e("type", CanonicalJson.str("externalFunction")));
+            case "intrinsicFunction" -> CanonicalJson.obj(
+                CanonicalJson.e("descriptor", CanonicalJson.str(binding.descriptor())),
+                CanonicalJson.e("intrinsicKind", CanonicalJson.str(binding.intrinsicKind())),
+                CanonicalJson.e("type", CanonicalJson.str("intrinsicFunction")));
             default -> CanonicalJson.obj(
                 CanonicalJson.e("type", CanonicalJson.str(binding.shape())));
         };
@@ -1175,6 +1183,7 @@ public final class ContractSnapshotCanonicalizer {
         String descriptor = null;
         String targetSignature = null;
         OpId materializingBoundaryOpId = null;
+        String intrinsicKind = null;
         switch (shape) {
             case "loweredBody" -> {
                 // functionId + blockId; no enum positions the rules consult.
@@ -1206,13 +1215,18 @@ public final class ContractSnapshotCanonicalizer {
                 executionOwner = requireString(binding, "executionOwner");
                 descriptor = requireString(binding, "descriptor");
             }
+            case "intrinsicFunction" -> {
+                descriptor = requireString(binding, "descriptor");
+                intrinsicKind = requireString(binding, "intrinsicKind");
+            }
             default -> {
                 // An unknown binding shape tag is an R-ENUM position —
                 // carry it through as the shape string.
             }
         }
         return new RawBinding(allocationId, shape, modulePath, exportName, executionOwner,
-            captureMode, descriptor, targetSignature, materializingBoundaryOpId);
+            captureMode, descriptor, targetSignature, materializingBoundaryOpId,
+            intrinsicKind);
     }
 
     private static CanonicalJson.Value opJson(RawOp op) {

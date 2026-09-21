@@ -58,6 +58,11 @@ TEST_MAINS=(
 'fg|=== Running Adapter Shape Map / Payload Tests (ISSUE-0450 shape-map child) ===|java -ea -cp build deal.test.AdapterShapeMapPayloadTest'
 'fg|=== Running Bindings Production Validation Tests (ISSUE-0451 B9 validation child) ===|java -ea -cp build deal.test.BindingsValidationTest'
 'fg|=== Running Bindings Integration Verification (ISSUE-0452, sequencing item 9) ===|java -ea -cp build deal.test.BindingsIntegrationVerificationTest'
+  # ISSUE-0632 registration: the intrinsic seed registrations and the
+  # closed bindings-gate admission (project-lowering-entry-and-registration-seeds
+  # D7/D13, the registration-seed contract; semantic-ir-construct-coverage-cutover
+  # K9 item 7 and K14's registration half).
+  'fg|=== Running Intrinsic Seed Bindings / Closed Gate Admission Tests (ISSUE-0632) ===|java -ea -cp build deal.test.IntrinsicSeedBindingsTest'
   'fg|=== Running Protected Path Ops Tests (ISSUE-0262) ===|java -ea -cp build deal.test.ProtectedPathOpsTest'
   'fg|=== Running Identity Carrier Package Tests (ISSUE-0309) ===|java -ea -cp build deal.test.CanonicalIdentityTest'
   'fg|=== Running Sidecar Schema Validator Tests (ISSUE-0348) ===|java -ea -cp build deal.test.conformance.SidecarSchemaValidatorTest'

@@ -646,15 +646,24 @@ public class SemanticIrSchemaTest {
                     instanceof AdaptSourceRef.SharedCell,
             "AdapterBinding carries adaptOpId/captureMode/sourceRef/signatures");
 
+        FunctionExecutionBinding intrinsic = new FunctionExecutionBinding.IntrinsicFunction(
+            IntrinsicKind.INT_CONVERT, IntrinsicKind.INT_CONVERT.declaredSignature());
+        check(intrinsic instanceof FunctionExecutionBinding.IntrinsicFunction value
+                && value.kind() == IntrinsicKind.INT_CONVERT
+                && value.descriptor()
+                    .equals(IntrinsicKind.INT_CONVERT.declaredSignature()),
+            "IntrinsicFunction carries kind and descriptor (ISSUE-0632)");
+
         Set<Class<?>> permitted = Set.copyOf(Arrays.asList(
             FunctionExecutionBinding.LoweredBody.class,
             FunctionExecutionBinding.AdapterBinding.class,
             FunctionExecutionBinding.HostFunction.class,
             FunctionExecutionBinding.HostFunctionValue.class,
-            FunctionExecutionBinding.ExternalFunction.class));
+            FunctionExecutionBinding.ExternalFunction.class,
+            FunctionExecutionBinding.IntrinsicFunction.class));
         check(FunctionExecutionBinding.class.isSealed()
                 && permitted.equals(Set.copyOf(Arrays.asList(FunctionExecutionBinding.class.getPermittedSubclasses()))),
-            "FunctionExecutionBinding is sealed over exactly the 5 pinned variants");
+            "FunctionExecutionBinding is sealed over exactly the 6 pinned variants");
 
         BoundaryRealization checkOp = new BoundaryRealization.RuntimeValidation("check-1");
         BoundaryRealization proof = new BoundaryRealization.RepresentationProof("jvm-int-proof");
