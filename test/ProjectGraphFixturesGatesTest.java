@@ -26,11 +26,16 @@ import java.util.regex.Pattern;
  * {@code production-project-graph-fixtures} D3/D8; the
  * {@code ProjectIntegrationGatesTest} pattern): the five committed
  * fixture trees under {@code test/project-graph-fixtures/modules-manifests}
- * run through the real production whole-project pipeline — the real
- * {@link Main#run(String[])} CLI for compile verdicts and a real
+ * run through the whole-project pipeline — the test-scope harness compile
+ * entry ({@link HarnessCompileEntry}; ISSUE-0643 P10 item 3, mechanism 1)
+ * for the compile and artifact verdicts, the release-owned
+ * {@link Main#run(String[])} CLI for the production-invocation
+ * fail-closed probes of the three compile-ok gates (their fixtures carry
+ * HOST-kind declaration imports and a cross-module call the production arm
+ * does not realize at this boundary), and a real
  * {@link ProjectLocator#locate(String, deal.project.CliOverrides)} call
  * for the F5 locate verdict — with every pin transcribed from the landed
- * production emission, never hand-authored from a message pattern.
+ * emission, never hand-authored from a message pattern.
  *
  * <p>Gates: G1 declaration-cycle-two-modules (compile-ok), G2
  * runtime-cycle-class-default-three-modules (exactly one E2005), G3
@@ -47,8 +52,9 @@ import java.util.regex.Pattern;
  * (deleted afterwards) and the committed fixture trees stay byte-identical
  * after every run (asserted by a pre/post digest snapshot). The gates
  * spawn no subprocesses: all verdicts come from in-process
- * {@code Main.run} calls or in-process {@code ProjectLocator.locate}
- * calls.</p>
+ * {@link HarnessCompileEntry} calls, in-process {@link Main#run(String[])}
+ * production-invocation probes, or in-process
+ * {@code ProjectLocator.locate} calls.</p>
  */
 public class ProjectGraphFixturesGatesTest {
 
@@ -132,7 +138,16 @@ public class ProjectGraphFixturesGatesTest {
         check(Files.isRegularFile(file), "missing fixture file: " + file);
     }
 
-    /** Runs the CLI with System.err captured; returns {exitCode, stderr}. */
+    /**
+     * Runs the same CLI-equivalent arguments through the test-scope
+     * harness compile entry ({@link HarnessCompileEntry}; ISSUE-0643 P10
+     * item 3, mechanism 1) with System.err captured; returns {exitCode,
+     * stderr}. The three compile-ok gate fixtures carry HOST-kind
+     * declaration imports and a cross-module call the release-owned
+     * production invocation fails closed, so the retained per-module
+     * artifact verdicts stay green through the harness invocation while
+     * the production arm's outcome is asserted separately.
+     */
     private static String[] runCliCapturingErr(String[] args) throws IOException {
         ByteArrayOutputStream err = new ByteArrayOutputStream();
         PrintStream originalErr = System.err;
@@ -146,6 +161,62 @@ public class ProjectGraphFixturesGatesTest {
         }
         return new String[]{String.valueOf(exitCode),
             err.toString(StandardCharsets.UTF_8)};
+    }
+
+    /**
+     * Runs the release-owned production CLI ({@link Main#run(String[])})
+     * with System.err captured; returns {exitCode, stderr}.
+     */
+    private static String[] runProductionCliCapturingErr(String[] args)
+            throws IOException {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = Main.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new String[]{String.valueOf(exitCode),
+            err.toString(StandardCharsets.UTF_8)};
+    }
+
+    /**
+     * The production-invocation fail-closed assertion of one re-expressed
+     * gate fixture (ISSUE-0643 P10 item 2): the release-owned
+     * {@link Main} compile exits nonzero with one E6005
+     * {@code SHARED_EMITTER_COVERAGE} (carrying the expected stable token
+     * when the fixture fails through the closure guard) and stages
+     * nothing.
+     *
+     * @param args          the CLI arguments of the fixture
+     * @param out           the fixture's fresh output directory (must not
+     *                      exist after the failed compile)
+     * @param expectedToken the stable guard detail token
+     *                      ({@code HOST_MODULE_IMPORT} or
+     *                      {@code EXTERNAL_ASYNC_CALL}); null when the
+     *                      fixture fails through the emission arm (no
+     *                      stable token)
+     * @param context       the assertion context
+     */
+    private static void checkProductionFailClosed(String[] args, Path out,
+            String expectedToken, String context) throws IOException {
+        String[] run = runProductionCliCapturingErr(args);
+        check(!"0".equals(run[0]),
+            context + ": the release-owned production invocation fails"
+                + " closed (exit " + run[0] + "): " + run[1]);
+        check(run[1].contains("E6005")
+                && run[1].contains("SHARED_EMITTER_COVERAGE")
+                && (expectedToken == null
+                    || run[1].contains(expectedToken)),
+            context + ": the production failure is E6005"
+                + " SHARED_EMITTER_COVERAGE (" + expectedToken + "): "
+                + run[1]);
+        check(!Files.exists(out),
+            context + ": the production failure stages no artifact under "
+                + out);
     }
 
     /** Deletes a temp tree. */
@@ -317,6 +388,16 @@ public class ProjectGraphFixturesGatesTest {
                 "F1 emits exactly one private module artifact"
                     + " (declaration modules emit no artifacts), got "
                     + privateArtifacts + ": " + artifacts);
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same declaration-import fixture closed
+            // with E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
+            // stages nothing.
+            checkProductionFailClosed(new String[]{
+                "compile", entry.toString(), "--output",
+                base.resolve("prod_out").toString()},
+                base.resolve("prod_out"), "HOST_MODULE_IMPORT",
+                "F1 declaration-cycle fixture");
         } finally {
             deleteRecursively(base);
         }
@@ -399,6 +480,16 @@ public class ProjectGraphFixturesGatesTest {
             check(privateArtifacts == 1,
                 "F3 emits exactly one private module artifact, got "
                     + privateArtifacts + ": " + artifacts);
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same declaration-import fixture closed
+            // with E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
+            // stages nothing.
+            checkProductionFailClosed(new String[]{
+                "compile", entry.toString(), "--output",
+                base.resolve("prod_out").toString()},
+                base.resolve("prod_out"), "HOST_MODULE_IMPORT",
+                "F3 leading-import-type fixture");
         } finally {
             deleteRecursively(base);
         }
@@ -435,6 +526,16 @@ public class ProjectGraphFixturesGatesTest {
             check(privateArtifacts == 1,
                 "F4 emits exactly one private module artifact, got "
                     + privateArtifacts + ": " + artifacts);
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same cross-module-call fixture closed
+            // with E6005 SHARED_EMITTER_COVERAGE (the emission arm; no
+            // closure-guard token) and stages nothing.
+            checkProductionFailClosed(new String[]{
+                "compile", entry.toString(), "--output",
+                base.resolve("prod_out").toString()},
+                base.resolve("prod_out"), null,
+                "F4 module-roots-bare-import fixture");
 
             // Negative control (scratch copy only): moduleRoots: [] —
             // the bare import no longer resolves, E2003 flips the gate.

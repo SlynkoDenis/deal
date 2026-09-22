@@ -162,6 +162,28 @@ public class E2IdentityIntegrationGatesTest {
             err.toString(StandardCharsets.UTF_8)};
     }
 
+    /**
+     * Runs the release-owned production CLI ({@link Main#run(String[])})
+     * with System.err captured; returns {exitCode, stderr}. The
+     * production-invocation fail-closed probes of this suite resolve the
+     * release-owned record and drive the production arm.
+     */
+    private static String[] runProductionCliCapturingErr(String[] args)
+            throws IOException {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = Main.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new String[]{String.valueOf(exitCode),
+            err.toString(StandardCharsets.UTF_8)};
+    }
+
     /** One finished subprocess: exit code plus merged stdout/stderr. */
     private record ProcessOutcome(int exitCode, String output) {
     }
@@ -856,6 +878,28 @@ public class E2IdentityIntegrationGatesTest {
             check(!mainLua.contains("\"" + DESC_EXT_SERVER_LEGACY + "\""),
                 "no producer emits the dotted v1.1 emission shape"
                     + " @host.cfg/ServerConfig");
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same fixture closed with E6005
+            // SHARED_EMITTER_COVERAGE naming the HOST-kind declaration
+            // import (the host load and the declaration-owned construction
+            // are the calls and construction children's) and stages
+            // nothing, while the harness invocation above keeps the
+            // dotted-externals identity subject green.
+            Path prodOut = base.resolve("prod_probe");
+            String[] prod = runProductionCliCapturingErr(new String[]{
+                "compile", entry.toString(), "--output", prodOut.toString()});
+            check(!"0".equals(prod[0]),
+                "the release-owned production invocation fails the"
+                    + " dotted-externals fixture closed: " + prod[1]);
+            check(prod[1].contains("E6005")
+                    && prod[1].contains("SHARED_EMITTER_COVERAGE")
+                    && prod[1].contains("HOST_MODULE_IMPORT")
+                    && prod[1].contains("'host.cfg'"),
+                "the production failure names E6005 SHARED_EMITTER_COVERAGE"
+                    + " HOST_MODULE_IMPORT and the raw specifier: " + prod[1]);
+            check(!Files.exists(prodOut),
+                "the production failure stages nothing under " + prodOut);
 
             // The canonical host fixture (the T5-conformance shape, not a
             // re-migration — this copy lives in the scratch deployment):

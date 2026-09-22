@@ -18,10 +18,12 @@ import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.LoweringSupport;
 import deal.semantic.RequirementManifestResult;
+import deal.semantic.ReleaseConfiguration;
 import deal.semantic.SemanticRequirementManifest;
 import deal.semantic.ir.BlockId;
 import deal.semantic.ir.CanonicalJson;
 import deal.semantic.ir.ConstructKind;
+import deal.diagnostics.CompilerDiagnostic;
 import deal.diagnostics.DiagnosticCode;
 import deal.semantic.ir.ExportPlan;
 import deal.semantic.ir.ExternalModuleInterface;
@@ -178,6 +180,93 @@ public class LoweringSupportTest {
             Path.of("std").toAbsolutePath().normalize(), null,
             ConformanceHarnessMetadata.invocation(
                 SemanticProfile.DEAL_V1_2_INT32));
+    }
+
+    /**
+     * The release-owned production invocation (ISSUE-0643 P10 item 2):
+     * the probe resolves the same record {@code deal.Main} and
+     * {@code CompilationOrchestrator.defaultInvocation()} resolve, so
+     * the compile dispatches to the production arm.
+     */
+    private static CompilerInvocation productionInvocation() {
+        return CompilerProfileProvider.resolve(
+            ReleaseConfiguration.CURRENT_RELEASE_STATE,
+            ReleaseConfiguration.releaseCapabilityRegistry());
+    }
+
+    /**
+     * The production-invocation fail-closed probe of this suite's
+     * excluded-construct fixtures (ISSUE-0643 P10 item 2): a fixture the
+     * harness arm above still compiles must fail closed under the
+     * release-owned record with E6005 and the named rule, staging
+     * nothing.
+     */
+    private static void productionProbe(Path tmp, Map<String, String> sources,
+                                        String entryName) throws Exception {
+        Path src = tmp.resolve("prod-src");
+        Files.createDirectories(src);
+        for (Map.Entry<String, String> source : sources.entrySet()) {
+            Files.writeString(src.resolve(source.getKey()), source.getValue());
+        }
+        Path output = tmp.resolve("prod-build");
+        CompilationOrchestrator orchestrator = new CompilationOrchestrator(
+            src.resolve(entryName).toAbsolutePath(), output, false, false,
+            false, false, Backend.LUAJIT, null,
+            List.of(src.toAbsolutePath()),
+            Path.of("std").toAbsolutePath().normalize(), null,
+            productionInvocation());
+        boolean ok = orchestrator.compile();
+        check(!ok, entryName + ": the release-owned production invocation "
+            + "fails the excluded-construct fixture closed");
+        List<CompilerDiagnostic> diagnostics = orchestrator.diagnostics();
+        check(diagnostics != null && diagnostics.stream().anyMatch(
+                diagnostic -> "E6005".equals(diagnostic.code())),
+            entryName + ": the production failure is E6005: " + diagnostics);
+        check(diagnostics != null && diagnostics.stream().anyMatch(
+                diagnostic -> diagnostic.message()
+                    .contains("CONSTRUCT_UNLOWERED")),
+            entryName + ": the production failure names CONSTRUCT_UNLOWERED: "
+                + diagnostics);
+        check(!Files.exists(output),
+            entryName + ": the production failure stages nothing under "
+                + output);
+    }
+
+    /**
+     * ISSUE-0643 P10 item 2: the {@code time.nowMillis} fixtures this
+     * suite compiles through the harness invocation (the manifest
+     * subject is arm-independent) fail closed under the release-owned
+     * production invocation with E6005 {@code CONSTRUCT_UNLOWERED} and
+     * stage nothing.
+     */
+    static void testProductionInvocationFailClosed() throws Exception {
+        System.out.println("-- The release-owned production invocation of the"
+            + " time.nowMillis fixtures: E6005 CONSTRUCT_UNLOWERED, nothing"
+            + " staged --");
+
+        Path tmp = Files.createTempDirectory("deal-manifest-production-");
+        try {
+            productionProbe(tmp.resolve("direct"), Map.of("main.deal", """
+                import * as time from "std/time"
+
+                export function main(): null {
+                  time.nowMillis()
+                  return null
+                }
+                """), "main.deal");
+            productionProbe(tmp.resolve("value-position"), Map.of(
+                "main.deal", """
+                    import * as time from "std/time"
+
+                    export function main(): null {
+                      let f: () => int = time.nowMillis
+                      f()
+                      return null
+                    }
+                    """), "main.deal");
+        } finally {
+            deleteRecursively(tmp);
+        }
     }
 
     private static RequirementManifestResult compileAndCompute(Path tmp,
@@ -1851,6 +1940,7 @@ public class LoweringSupportTest {
         testE10UncalledDeclarationArm();
         testE10StoredFunctionExpressionArm();
         testBytesBearingMarkerDeterminism();
+        testProductionInvocationFailClosed();
 
         System.out.println("\nPassed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

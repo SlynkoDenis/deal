@@ -197,6 +197,25 @@ public class ProjectMigrationIntegrationTest {
                     "the class-free out-of-root shared module runs under"
                         + " JVM: " + out);
             }
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails this suite's cross-module-call fixture
+            // closed with E6005 SHARED_EMITTER_COVERAGE (the shared.greet()
+            // call has no production emission arm — the calls child owns
+            // it) and stages nothing, while the harness invocation above
+            // keeps the locator/resolution/identity subject green.
+            Path prodOut = root.resolve("out_prod_probe");
+            String[] prod = runProductionCliCapturingErr(new String[]{
+                "compile", entry.toString(), "--output", prodOut.toString()});
+            check(!"0".equals(prod[0]),
+                "the release-owned production invocation fails the"
+                    + " cross-module call closed: " + prod[1]);
+            check(prod[1].contains("E6005")
+                    && prod[1].contains("SHARED_EMITTER_COVERAGE"),
+                "the production failure names E6005 SHARED_EMITTER_COVERAGE: "
+                    + prod[1]);
+            check(!Files.exists(prodOut),
+                "the production failure stages nothing under " + prodOut);
         } finally {
             deleteRecursively(root);
         }
@@ -616,6 +635,25 @@ public class ProjectMigrationIntegrationTest {
             check(Files.exists(root.resolve("build/lua/std/console.lua")),
                 "the project-local std implementation is deployed from the"
                     + " pinned surface");
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails this fixture closed with E6005
+            // CONSTRUCT_UNLOWERED (the unrecognized stdlib member call is
+            // a later-slice construct) and stages nothing, while the
+            // harness invocation above keeps the stdlib-surface resolution
+            // subject green.
+            Path prodOut = root.resolve("out_prod_probe");
+            String[] prod = runProductionCliCapturingErr(new String[]{
+                "compile", entry.toString(), "--output", prodOut.toString()});
+            check(!"0".equals(prod[0]),
+                "the release-owned production invocation fails the"
+                    + " project-local stdlib fixture closed: " + prod[1]);
+            check(prod[1].contains("E6005")
+                    && prod[1].contains("CONSTRUCT_UNLOWERED"),
+                "the production failure names E6005 CONSTRUCT_UNLOWERED: "
+                    + prod[1]);
+            check(!Files.exists(prodOut),
+                "the production failure stages nothing under " + prodOut);
 
             // Missing surface: a subprocess whose working directory has no
             // std/ and whose project has no local std/ — the import is

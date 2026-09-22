@@ -60,7 +60,7 @@ import java.util.Set;
  *       module import ({@code HOST_MODULE_IMPORT}) and a cross-module
  *       async call ({@code EXTERNAL_ASYNC_CALL}) while a
  *       {@code STDLIB}/{@code COMPILED}-only closure and a same-module
- *       async call stay accepted;</li>
+ *       async call stay accepted and execute under the real toolchains;</li>
  *   <li>a failing lowering (bytes) and a failing emission (a cross-module
  *       sync call) each stage nothing and leave the previous artifact set
  *       byte-identical;</li>
@@ -198,7 +198,12 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
-    /** The same-module async call: accepted and emitted. */
+    /**
+     * The same-module async call: accepted, emitted, and executable. The
+     * awaiting call sits in an exported zero-arity async function so the
+     * runner can invoke it through the artifact's published surface and
+     * really execute the ASYNC_START(DEAL_BODY)/AWAIT path.
+     */
     private static final String SAME_ASYNC_APP_SOURCE = """
         export function main(): null {
           return null;
@@ -208,7 +213,7 @@ public class ProductionProjectEmissionTest {
           return 1;
         }
 
-        async function worker(): int {
+        export async function worker(): int {
           return await compute();
         }
         """;
@@ -771,7 +776,11 @@ public class ProductionProjectEmissionTest {
             deleteRecursively(cross.root());
         }
 
-        // The same-module async call: accepted and emitted on both targets.
+        // The same-module async call: accepted, emitted, and executed on
+        // both targets. The awaiting call is reachable through the
+        // exported zero-arity async function's published surface, so the
+        // runner's invocation really runs the ASYNC_START(DEAL_BODY)/
+        // AWAIT path (never merely compiling a never-invoked body).
         Fixture same = asyncFixture(ASYNC_LIB_SOURCE, SAME_ASYNC_APP_SOURCE);
         Path sameOut = same.root().resolve("out-arm");
         try {
@@ -783,11 +792,95 @@ public class ProductionProjectEmissionTest {
                     + result.diagnostics());
                 checkEq("app.lua", result.artifactRelativePath(),
                     "the same-module async artifact is the entry chunk");
+                stager.publish();
             } finally {
                 stager.discard();
             }
+            check(Files.isRegularFile(sameOut.resolve("app.lua")),
+                "the published same-module async chunk exists");
+            writeFileIn(same.root(), "probe.lua", """
+                local surfaces = dofile("out-arm/app.lua")
+                assert(type(surfaces) == "table",
+                  "the chunk returns the entry surface")
+                local worker = surfaces.worker
+                assert(type(worker) == "table" and worker.__kind == "function",
+                  "the entry surface publishes the same-module async export")
+                local completion = worker.f()
+                assert(completion == 1,
+                  "the awaiting call completes with 1, got "
+                    .. tostring(completion))
+                print("PROBE|ASYNC-RESULT|" .. tostring(completion))
+                """);
+            ProcessOutcome luaRun = runProcess(List.of("luajit", "probe.lua"),
+                same.root());
+            checkEq(0, luaRun.exitCode(),
+                "the same-module await path executes under luajit: "
+                    + luaRun.output());
+            check(luaRun.stdout().contains("PROBE|ASYNC-RESULT|1"),
+                "the awaiting call completes with 1 under luajit: "
+                    + luaRun.stdout());
         } finally {
             deleteRecursively(same.root());
+        }
+
+        // The JVM target of the same fixture: the class source compiles
+        // with javac --release 25 -proc:none and the runner executes the
+        // exported async function through the artifact's published
+        // surface.
+        Fixture sameJvm = asyncFixture(ASYNC_LIB_SOURCE, SAME_ASYNC_APP_SOURCE);
+        Path jvmOut = sameJvm.root().resolve("out-arm");
+        Path jvmClasses = sameJvm.root().resolve("same-classes");
+        try {
+            PublicationStager stager = PublicationStager.forRoot(jvmOut);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(sameJvm, Backend.JVM, stager, false);
+                check(result.emitted(),
+                    "the same-module async JVM closure emits: "
+                        + result.diagnostics());
+                stager.publish();
+            } finally {
+                stager.discard();
+            }
+            check(Files.isRegularFile(jvmOut.resolve("App.java")),
+                "the published same-module async JVM artifact exists");
+            writeFileIn(jvmOut, "AsyncWorkerRunner.java", """
+                import deal.codegen.jvm.JvmRuntime;
+
+                public final class AsyncWorkerRunner {
+                  public static void main(String[] args) {
+                    App.main(new String[0]);
+                    JvmRuntime.Table surface = App.EXPORT_SURFACES.get("app");
+                    JvmRuntime.FunctionValue worker =
+                        (JvmRuntime.FunctionValue) surface.read("worker");
+                    Object completion = worker.fn.invoke(new Object[0]);
+                    System.out.println("PROBE|ASYNC-RESULT|" + completion);
+                  }
+                }
+                """);
+            Files.createDirectories(jvmClasses);
+            String classpath = absoluteClasspath();
+            ProcessOutcome javacRun = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", jvmClasses.toString(),
+                jvmOut.resolve("App.java").toAbsolutePath().toString(),
+                jvmOut.resolve("AsyncWorkerRunner.java").toAbsolutePath().toString()),
+                sameJvm.root());
+            checkEq(0, javacRun.exitCode(),
+                "the same-module async JVM artifact compiles: "
+                    + javacRun.output());
+            if (javacRun.exitCode() == 0) {
+                ProcessOutcome jvmRun = runProcess(List.of("java", "-cp",
+                    classpath + java.io.File.pathSeparator + jvmClasses,
+                    "AsyncWorkerRunner"), sameJvm.root());
+                checkEq(0, jvmRun.exitCode(),
+                    "the same-module await path executes under java: "
+                        + jvmRun.output());
+                check(jvmRun.stdout().contains("PROBE|ASYNC-RESULT|1"),
+                    "the awaiting call completes with 1 under java: "
+                        + jvmRun.stdout());
+            }
+        } finally {
+            deleteRecursively(sameJvm.root());
         }
     }
 

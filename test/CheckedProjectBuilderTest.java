@@ -41,6 +41,7 @@ import deal.semantic.CheckedProjectInput;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.ModuleFact;
+import deal.semantic.ReleaseConfiguration;
 import deal.semantic.ir.CanonicalJson;
 import deal.semantic.ir.ClassFactoryId;
 import deal.semantic.ir.ClassInterface;
@@ -267,6 +268,37 @@ public class CheckedProjectBuilderTest {
             boolean ok = orchestrator.compile();
             check(ok, "declaration-only-import-compile.deal compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same declaration-import fixture closed
+            // with E6005 SHARED_EMITTER_COVERAGE naming the HOST-kind
+            // import and publishes nothing (the host load is the calls
+            // child's), while the harness invocation above keeps the
+            // builder facts arm-independent.
+            Path prodOutput = tmp.resolve("prod-build");
+            CompilationOrchestrator production = new CompilationOrchestrator(
+                entry, prodOutput, false, false, false, false, Backend.LUAJIT,
+                null, List.of(strippedDir),
+                Path.of("std").toAbsolutePath().normalize(), null,
+                CompilerProfileProvider.resolve(
+                    ReleaseConfiguration.CURRENT_RELEASE_STATE,
+                    ReleaseConfiguration.releaseCapabilityRegistry()));
+            check(!production.compile(),
+                "the release-owned production invocation fails the"
+                    + " declaration-import fixture closed");
+            List<CompilerDiagnostic> productionDiagnostics =
+                production.diagnostics();
+            check(productionDiagnostics.stream().anyMatch(diagnostic ->
+                    "E6005".equals(diagnostic.code())
+                        && diagnostic.message()
+                            .contains("SHARED_EMITTER_COVERAGE")
+                        && diagnostic.message()
+                            .contains("HOST_MODULE_IMPORT")),
+                "the production failure is E6005 SHARED_EMITTER_COVERAGE"
+                    + " HOST_MODULE_IMPORT: " + productionDiagnostics);
+            check(!Files.exists(prodOutput),
+                "the production failure publishes nothing under " + prodOutput);
+
             CheckedProjectBuildResult result = orchestrator.checkedProject();
             check(result != null && !result.hasErrors(),
                 "the orchestrator built exactly one checked project result after phase 3");
