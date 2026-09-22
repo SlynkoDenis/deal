@@ -36,6 +36,7 @@ import deal.parser.Parser;
 import deal.project.ProjectDeploymentIdentity;
 import deal.project.ProjectLocator;
 import deal.semantic.CompilerInvocation;
+import deal.semantic.ir.SemanticProfile;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.ReleaseConfiguration;
 import deal.types.Type;
@@ -139,10 +140,15 @@ public class DefaultSemanticSerializerTest {
         }
     }
 
+    /**
+     * The harness invocation of this suite's compiles (ISSUE-0643 P10
+     * item 3): the suite's subject — the default-semantics serialization
+     * — is arm-independent, and the fixtures keep the harness arm's
+     * retained artifact behavior.
+     */
     private static CompilerInvocation invocation() {
-        return CompilerProfileProvider.resolve(
-            ReleaseConfiguration.CURRENT_RELEASE_STATE,
-            ReleaseConfiguration.releaseCapabilityRegistry());
+        return ConformanceHarnessMetadata.invocation(
+            SemanticProfile.DEAL_V1_2_INT32);
     }
 
     /** One in-process production compile over a scratch project; a

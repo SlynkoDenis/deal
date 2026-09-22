@@ -1,5 +1,6 @@
 package deal.test;
 
+import deal.codegen.Backend;
 import deal.diagnostics.CompilerDiagnostic;
 import deal.diagnostics.DiagnosticCode;
 import deal.module.CompilationOrchestrator;
@@ -196,9 +197,9 @@ public class StdlibClaimingTimeLockTest {
                 Files.writeString(src.resolve(source.getKey()), source.getValue());
             }
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, null,
+                src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, false, false, false, Backend.LUAJIT, null,
                 List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+                Path.of("std").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean ok = orchestrator.compile();
             check(ok, entryName + " compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());
@@ -1410,9 +1411,9 @@ public class StdlibClaimingTimeLockTest {
                 """);
             Files.writeString(src.resolve("lib.deal"), libSource);
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false,
+                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false, false, false, false, Backend.LUAJIT,
                 null, List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+                Path.of("std").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean ok = orchestrator.compile();
             check(ok, what + ": compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());

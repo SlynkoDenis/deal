@@ -97,7 +97,8 @@ public class ProjectIntegrationGatesTest {
     }
 
     /** Runs the CLI with System.err captured; returns {exitCode, stderr}. */
-    private static String[] runCliCapturingErr(String[] args) throws IOException {
+    private static String[] runProductionCliCapturingErr(String[] args)
+            throws IOException {
         ByteArrayOutputStream err = new ByteArrayOutputStream();
         PrintStream originalErr = System.err;
         int exitCode;
@@ -110,6 +111,71 @@ public class ProjectIntegrationGatesTest {
         }
         return new String[]{String.valueOf(exitCode),
             err.toString(StandardCharsets.UTF_8)};
+    }
+
+    /**
+     * Runs the same CLI-equivalent arguments through the test-scope
+     * harness compile entry ({@link HarnessCompileEntry}; ISSUE-0643 P10
+     * item 3, mechanism 1) with System.err captured; returns {exitCode,
+     * stderr}. The harness compile resolves the harness invocation, so
+     * the fixtures of this suite — multi-module projects with
+     * cross-module calls and extern-C declaration imports — keep their
+     * retained per-module artifact assertions green while the
+     * release-owned production invocation is asserted separately as the
+     * fail-closed outcome.
+     */
+    private static String[] runCliCapturingErr(String[] args)
+            throws IOException {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = HarnessCompileEntry.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new String[]{String.valueOf(exitCode),
+            err.toString(StandardCharsets.UTF_8)};
+    }
+
+    /**
+     * The production-invocation fail-closed assertion of one fixture
+     * whose construct is owned by a later slice (ISSUE-0643 P10 item 2):
+     * the release-owned {@code deal.Main} compile exits nonzero with one
+     * E6005 {@code SHARED_EMITTER_COVERAGE} carrying the expected stable
+     * token and stages no artifact.
+     *
+     * @param args          the CLI arguments of the fixture
+     * @param expectedToken the stable guard detail token
+     *                      ({@code HOST_MODULE_IMPORT} or
+     *                      {@code EXTERNAL_ASYNC_CALL}); null when the
+     *                      fixture fails through the emission arm (no
+     *                      stable token)
+     * @param artifactDir   the fixture's output directory (must not exist
+     *                      after the failed compile); may be null
+     * @param context       the assertion context
+     */
+    private static void checkProductionFailClosed(String[] args,
+            String expectedToken, Path artifactDir, String context)
+            throws IOException {
+        String[] run = runProductionCliCapturingErr(args);
+        check(!"0".equals(run[0]),
+            context + ": the release-owned production invocation fails"
+                + " closed (exit " + run[0] + "): " + run[1]);
+        check(run[1].contains("E6005")
+                && run[1].contains("SHARED_EMITTER_COVERAGE")
+                && (expectedToken == null
+                    || run[1].contains(expectedToken)),
+            context + ": the production failure is E6005"
+                + " SHARED_EMITTER_COVERAGE (" + expectedToken + "): "
+                + run[1]);
+        if (artifactDir != null) {
+            check(!Files.exists(artifactDir),
+                context + ": the production failure stages no artifact"
+                    + " under " + artifactDir);
+        }
     }
 
     /** One finished subprocess: exit code plus merged stdout/stderr. */
@@ -517,6 +583,17 @@ public class ProjectIntegrationGatesTest {
             check(!mainLua.contains("FFI_UNSUPPORTED_BACKEND"),
                 "the LuaJIT arm raises no FFI_UNSUPPORTED_BACKEND");
 
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the same extern-C fixture closed with
+            // E6005 SHARED_EMITTER_COVERAGE naming the HOST-kind import
+            // and stages no artifact (the FFI realization is the FFI
+            // child's; ISSUE-0625 retargets this to the production
+            // outcome).
+            checkProductionFailClosed(new String[]{
+                "compile", entry.toString(), "--output",
+                base.resolve("prod_out").toString()}, "HOST_MODULE_IMPORT",
+                base.resolve("prod_out"), "extern-c import");
+
             // Metadata consumption, part 1: an isolated copy whose
             // externals KEY changes emits the changed module key while
             // the loader text stays pinned.
@@ -705,6 +782,17 @@ public class ProjectIntegrationGatesTest {
                 "valid carries the pinned resolved-absolute loader text "
                     + fixtureLoader);
 
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation of the committed ffigen valid project fails
+            // closed with E6005 SHARED_EMITTER_COVERAGE naming the
+            // HOST-kind extern-C import and stages nothing.
+            checkProductionFailClosed(new String[]{
+                "compile", Path.of("test/fixtures/ffigen/valid/src/main.deal")
+                    .toAbsolutePath().toString(), "--backend", "lua",
+                "--output", base.resolve("prod_valid").toString()},
+                "HOST_MODULE_IMPORT", base.resolve("prod_valid"),
+                "ffigen valid project");
+
         } finally {
             deleteRecursively(base);
         }
@@ -805,6 +893,15 @@ public class ProjectIntegrationGatesTest {
                 "the class-free out-of-root shared module runs under JVM"
                     + " with the equivalent output semantics: "
                     + jvmRun.output());
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the cross-module-call fixture closed with
+            // E6005 SHARED_EMITTER_COVERAGE (the cross-module call is the
+            // calls child's) and stages nothing.
+            checkProductionFailClosed(new String[]{
+                "compile", entry.toString(), "--output",
+                base.resolve("prod_out").toString()}, null,
+                base.resolve("prod_out"), "class-free out-of-root project");
 
             // Determinism: repeated compiles into fresh output
             // directories are byte-identical on both backends.

@@ -289,10 +289,10 @@ public class ClassRegistrationSeedsTest {
         Path entry = proj.resolve(entryRelative).toAbsolutePath();
         Path output = proj.resolve("out").toAbsolutePath();
         return new CompilationOrchestrator(entry, output, false, false, false,
-            backend, Map.of(specifier,
+            false, backend, Map.of(specifier,
                 proj.resolve(moduleRelative).toAbsolutePath().toString()),
             List.of(proj.resolve("src").toAbsolutePath()),
-            Path.of(".").toAbsolutePath().normalize());
+            Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
     }
 
     private static void testHostDeclarationSeeds() throws Exception {

@@ -39,6 +39,7 @@ import deal.parser.*;
 import deal.semantic.CheckedProjectBuildResult;
 import deal.semantic.CapabilityRegistry;
 import deal.semantic.CheckedProjectBuilder;
+import deal.semantic.CheckedProjectInput;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.HostDeclarationSurface;
@@ -65,6 +66,7 @@ import deal.semantic.ir.ClassInterface;
 import deal.semantic.ir.ExternalModuleInterface;
 import deal.semantic.ir.FieldInterface;
 import deal.semantic.ir.FunctionSignatureAbi;
+import deal.semantic.ir.IntrinsicKind;
 import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.ModuleId;
 import deal.semantic.ir.OpId;
@@ -1043,9 +1045,22 @@ public final class CompilationOrchestrator {
         // diagnostics fail the compile exactly like frontend errors. The
         // JS backend has no closed route-plan target in this epic, so the
         // phase is skipped and the retained JS path is untouched.
+        // ISSUE-0643 (design source
+        // production-project-emission-and-atomic-cutover P4): the
+        // release-owned production invocation skips phase 3.7 entirely —
+        // the production arm consults no route plan, so no plan is
+        // computed and the route-plan view stays null. Every other
+        // LuaJIT/JVM invocation (the harness purposes and the test-only
+        // PUBLIC_BUILD records that are not the release-owned record)
+        // keeps the phase and the harness arm.
         log("Phase 3.7: Route plan");
-        planRoutesForCompile();
-        if (hasErrors) { printDiagnostics(); return false; }
+        if (productionArmApplies()) {
+            log("  Route plan skipped: the release-owned production invocation"
+                + " emits one project artifact");
+        } else {
+            planRoutesForCompile();
+            if (hasErrors) { printDiagnostics(); return false; }
+        }
 
         // Default planning phase (ISSUE-0541, design source
         // provider-versioned-default-plans D1-D4): after checking and
@@ -2554,10 +2569,28 @@ public final class CompilationOrchestrator {
     // Phase 4: Code generation
     // =========================================================================
 
+    /**
+     * Phase-4 dispatch (ISSUE-0643; design source
+     * {@code production-project-emission-and-atomic-cutover} P4/P5):
+     * {@link Backend#LUAJIT}/{@link Backend#JVM} with the release-owned
+     * production invocation ({@link #productionArmApplies()}) runs the
+     * production project emission arm — one lowering, one project
+     * artifact, no route plan; every other LuaJIT/JVM invocation runs
+     * the unchanged harness arm (phase 3.7 route planning, the
+     * per-module route dispatch, the retained loops and counters, the
+     * mixed-edge validation, and the per-module production emission);
+     * {@link Backend#JS} keeps its untouched pipeline.
+     *
+     * <p>The dispatch reads no routing, planner, registry,
+     * retained-backend, or retained-counter surface itself: those live
+     * in the harness arms this method only selects.</p>
+     */
     private void codegenAll() throws IOException {
         long phaseStart = System.currentTimeMillis();
         try {
-            if (backend == Backend.JVM) {
+            if (productionArmApplies()) {
+                emitProductionProject();
+            } else if (backend == Backend.JVM) {
                 // JVM use site (ISSUE-0091): emit one .java module class per
                 // module. Import resolution and the Lua runtime copies are
                 // LuaJIT-specific and skipped here.
@@ -2568,33 +2601,7 @@ public final class CompilationOrchestrator {
                 // two-pass emitter plus the runtime/stdlib deployment copies.
                 codegenAllJs();
             } else {
-                // Lua use site (emitter page D1): the LuaJIT emitter consumes
-                // the same per-compilation canonical identity surface the JS
-                // arm builds — one identity index over the module-path
-                // classification plus the intrinsic builtin Error module.
-                // Every descriptor the Lua emitter writes resolves through
-                // it; the local legacy dialect producer is retired.
-                ModuleIdentityResolver.IdentityIndex identityIndex =
-                    buildCanonicalIdentitySurface();
-                // ISSUE-0239 E10 dispatch: the ModuleRoutePlan selects the
-                // emitter per module — SHARED-routed modules lower to
-                // validated semantic IR and emit through the shared
-                // emitter; LEGACY-routed modules keep the retained
-                // backend. No within-run fallback exists: a shared
-                // lowering/emission failure fails the compile and
-                // publishes nothing.
-                for (CheckedModuleInput checked : sharedModulesInDependencyOrder()) {
-                    emitSharedLuaModule(checked);
-                }
-                for (ModuleInfo info : modules.values()) {
-                    if (info.isDeclarationFile) continue;
-                    if (routeOf(info) == ModuleRoute.SHARED) continue;
-                    codegenLuaModule(info, identityIndex);
-                    retainedEmissionCount++;
-                }
-                copyRuntimeLibrary();
-                copyStdlibModules();
-                validateMixedEdges();
+                codegenAllLua();
             }
         } catch (IOException stagingFailure) {
             // A staging write failure (D4): nothing is published, the
@@ -2608,6 +2615,186 @@ public final class CompilationOrchestrator {
         if (verbose) {
             System.out.println("  Phase 4 total: " + phaseElapsed + "ms");
         }
+    }
+
+    /**
+     * True exactly for a LuaJIT/JVM compile whose recorded invocation is
+     * the release-owned production invocation (P4): the phase-4 dispatch
+     * then runs the production arm and skips phase 3.7. The JS arm is
+     * separate and untouched.
+     */
+    private boolean productionArmApplies() {
+        if (backend != Backend.LUAJIT && backend != Backend.JVM) {
+            return false;
+        }
+        return isProductionInvocation(invocation);
+    }
+
+    /**
+     * The identity-based production-invocation predicate (P4; design
+     * source {@code production-project-emission-and-atomic-cutover}):
+     * true exactly for the record
+     * {@code CompilerProfileProvider.resolve(ReleaseConfiguration
+     * .CURRENT_RELEASE_STATE, ReleaseConfiguration
+     * .releaseCapabilityRegistry())} — the record {@code deal.Main}
+     * resolves and {@link #defaultInvocation()} returns. The test is
+     * record identity (purpose, semantic profile, release state,
+     * capability-registry digest, and the derived release-state hash),
+     * never a purpose-only test, so a test-only {@code PUBLIC_BUILD}
+     * invocation that records another release state or another registry
+     * digest keeps the harness arm.
+     *
+     * @param invocation the compile's recorded invocation; non-null
+     * @return whether the compile is the release-owned production
+     *         invocation
+     */
+    public static boolean isProductionInvocation(CompilerInvocation invocation) {
+        Objects.requireNonNull(invocation, "invocation must not be null");
+        return invocation.equals(defaultInvocation());
+    }
+
+    /**
+     * The LuaJIT harness arm of phase 4 (the unchanged per-module route
+     * dispatch): the canonical identity surface, the SHARED-routed
+     * modules lowered to validated semantic IR and emitted through the
+     * shared emitter, the retained backend for every other module, the
+     * runtime/stdlib deployment copies, and the mixed-edge validation.
+     * No within-run fallback exists: a shared lowering/emission failure
+     * fails the compile and publishes nothing.
+     */
+    private void codegenAllLua() throws IOException {
+        // Lua use site (emitter page D1): the LuaJIT emitter consumes
+        // the same per-compilation canonical identity surface the JS
+        // arm builds — one identity index over the module-path
+        // classification plus the intrinsic builtin Error module.
+        // Every descriptor the Lua emitter writes resolves through
+        // it; the local legacy dialect producer is retired.
+        ModuleIdentityResolver.IdentityIndex identityIndex =
+            buildCanonicalIdentitySurface();
+        // ISSUE-0239 E10 dispatch: the ModuleRoutePlan selects the
+        // emitter per module — SHARED-routed modules lower to
+        // validated semantic IR and emit through the shared
+        // emitter; LEGACY-routed modules keep the retained
+        // backend. No within-run fallback exists: a shared
+        // lowering/emission failure fails the compile and
+        // publishes nothing.
+        for (CheckedModuleInput checked : sharedModulesInDependencyOrder()) {
+            emitSharedLuaModule(checked);
+        }
+        for (ModuleInfo info : modules.values()) {
+            if (info.isDeclarationFile) continue;
+            if (routeOf(info) == ModuleRoute.SHARED) continue;
+            codegenLuaModule(info, identityIndex);
+            retainedEmissionCount++;
+        }
+        copyRuntimeLibrary();
+        copyStdlibModules();
+        validateMixedEdges();
+    }
+
+    /**
+     * The release-owned production arm of phase 4 (P5/P6): exactly one
+     * {@link ProductionProjectEmission#run} over the compile's declared
+     * inputs — the C9 source-map warning, the one project lowering, the
+     * pre-emission closure guard, the one production emission, and the
+     * one staged project artifact plus the unchanged LuaJIT deployment
+     * copies — then the one project emission record
+     * ({@link #semanticEmissionCount}; the retained counter stays zero
+     * and the per-module backend-result views stay empty). A lowering,
+     * guard, or emission failure merges its first E6005 diagnostic and
+     * stages nothing: the unchanged publication transaction then
+     * preserves the previous artifact set byte-for-byte.
+     */
+    private void emitProductionProject() throws IOException {
+        CheckedProjectBuildResult checked = checkedProjectBuild;
+        if (checked == null || checked.hasErrors() || checked.input() == null
+                || checked.index() == null) {
+            throw new IllegalStateException("the production arm runs after a"
+                + " successful checked-project build (producer defect)");
+        }
+        if (requirementManifests == null || requirementManifests.hasErrors()
+                || requirementManifests.manifests() == null) {
+            throw new IllegalStateException("the production arm runs after a"
+                + " successful manifest phase (producer defect)");
+        }
+        if (hostDeclarationSurface == null) {
+            throw new IllegalStateException("the production arm runs after a"
+                + " successful declaration surface (producer defect)");
+        }
+        ProductionProjectEmission.Result result = ProductionProjectEmission.run(
+            invocation, checked.input(), checked.index(),
+            requirementManifests.manifests(), hostDeclarationSurface,
+            declarationModuleIdentities(), externCGeneratedModules(),
+            builtinErrorDeclaration(checked.input()),
+            List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
+            Set.of(), backend, sourceMapExplicit, distributionHome, stager);
+        if (result.emitted()) {
+            semanticEmissionCount++;
+            log("  Generated (production project emission): "
+                + outputRoot.resolve(result.artifactRelativePath()));
+        } else {
+            diagnostics.addAll(result.diagnostics());
+            hasErrors = true;
+            log("  Production project emission failed: "
+                + result.diagnostics());
+        }
+    }
+
+    /**
+     * The compilation's declaration-module identity map: the public
+     * canonical identity of every declaration module the declaration
+     * surface covers, keyed by module identity (the one project
+     * lowering's registration-seed and class-identity input). The
+     * identity is the compilation's single module-path classification
+     * — the externals-listed declaration module's identity is the
+     * externals key exactly as written.
+     */
+    private Map<ModuleId, CanonicalModuleIdentity> declarationModuleIdentities() {
+        Map<String, CanonicalModuleIdentity> classification =
+            modulePathClassification();
+        Map<ModuleId, CanonicalModuleIdentity> identities = new LinkedHashMap<>();
+        for (ModuleId declarationModule : hostDeclarationSurface.moduleIds()) {
+            CanonicalModuleIdentity identity =
+                classification.get(declarationModule.path());
+            if (identity != null) {
+                identities.put(declarationModule, identity);
+            }
+        }
+        return identities;
+    }
+
+    /**
+     * The validated extern-C generated modules of this compile keyed by
+     * module identity (the one project lowering's FFI registration-seed
+     * input; empty when the compile imports no extern-C declaration).
+     */
+    private Map<ModuleId, FfiGeneratedModule> externCGeneratedModules() {
+        Map<ModuleId, FfiGeneratedModule> generatedModules = new LinkedHashMap<>();
+        for (Map.Entry<String, FfiGeneratedModule> generated
+                : ffiGenerations.entrySet()) {
+            generatedModules.put(new ModuleId(generated.getKey()),
+                generated.getValue());
+        }
+        return generatedModules;
+    }
+
+    /**
+     * The compiler-owned builtin {@code Error} declaration of this
+     * compile: the entry module's synthesized declaration — the same
+     * one authority the checker's root binding derives from
+     * ({@link BuiltinErrorDeclaration#synthesized}), so the builtin
+     * layout seed is never derived from source text, a host
+     * declaration, or an interface-index entry.
+     */
+    private static BuiltinErrorDeclaration builtinErrorDeclaration(
+            CheckedProjectInput checkedProject) {
+        for (CheckedModuleInput module : checkedProject.modules()) {
+            if (module.moduleId().equals(checkedProject.entryModule())) {
+                return BuiltinErrorDeclaration.synthesized(module.ast().span());
+            }
+        }
+        throw new IllegalStateException("the checked project carries no entry"
+            + " module (producer defect)");
     }
 
     /**

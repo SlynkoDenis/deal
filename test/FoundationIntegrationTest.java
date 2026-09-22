@@ -931,9 +931,17 @@ public class FoundationIntegrationTest {
                     + "LEGACY_SAFE_INT (inspectable for routing/regression)");
 
             Path src = writeProjectFixture(tmp);
+            // ISSUE-0643 P10 item 3: the fixture carries a cross-module call
+            // (a later-slice construct), while the suite's subject is the
+            // legacy-profile lowering rejection — arm-independent, so the
+            // orchestrator compile resolves the harness invocation.
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false,
-                null, List.of(src.toAbsolutePath()), Path.of("std").toAbsolutePath());
+                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"),
+                false, false, false, false, Backend.LUAJIT, null,
+                List.of(src.toAbsolutePath()), Path.of("std").toAbsolutePath(),
+                null, CompilerProfileProvider.resolveCommonShadow(
+                    SemanticProfile.DEAL_V1_2_INT32, ReleaseState.V1_2_ACTIVE,
+                    CapabilityRegistry.releaseRegistry()));
             check(orchestrator.compile(),
                 "the legacy-profile lowering fixture builds checked inputs");
             CheckedProjectBuildResult checked = orchestrator.checkedProject();
@@ -1325,9 +1333,10 @@ public class FoundationIntegrationTest {
             }
 
             // The post-flip public build: V1_2_ACTIVE over the promoted
-            // release registry derives DEAL_V1_2_INT32 and routes the
-            // int-using module SHARED (F4 rule 4 reachable — production
-            // shared routing is eligible post-activation).
+            // release registry derives DEAL_V1_2_INT32 and (ISSUE-0643 P4)
+            // runs the production arm — no route plan is computed or
+            // consulted, and exactly one project artifact is emitted with
+            // zero retained emissions.
             CompilerInvocation postFlip = CompilerProfileProvider.resolve(
                 ReleaseState.V1_2_ACTIVE,
                 ReleaseConfiguration.releaseCapabilityRegistry());
@@ -1345,29 +1354,27 @@ public class FoundationIntegrationTest {
             boolean postFlipOk = postFlipOrchestrator.compile();
             check(postFlipOk, "the post-flip public int-using build compiles: "
                 + postFlipOrchestrator.diagnostics());
-            RoutePlanResult postFlipPlan = postFlipOrchestrator.routePlan();
-            check(postFlipPlan != null && !postFlipPlan.hasErrors()
-                    && postFlipPlan.plan() != null,
-                "the post-flip public build produces exactly one route plan");
-            if (postFlipPlan != null && !postFlipPlan.hasErrors()
-                    && postFlipPlan.plan() != null) {
-                check(postFlipPlan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                    "the post-flip public plan routes the int-using module "
-                        + "SHARED (F4 rule 4; FOUNDATION_VALUES + SIGNED_INT32 "
-                        + "promoted): " + postFlipPlan.plan().entries());
-                check(postFlipPlan.plan().shadowModules().isEmpty(),
-                    "the post-flip shared plan has empty shadowModules "
-                        + "(production SHARED, never shadow)");
-            }
+            check(postFlipOrchestrator.routePlan() == null,
+                "the post-flip public build computes and consults no route plan "
+                    + "(ISSUE-0643 P4: the production arm skips phase 3.7)");
+            check(postFlipOrchestrator.semanticEmissionCount() == 1
+                    && postFlipOrchestrator.retainedEmissionCount() == 0,
+                "the post-flip public build records exactly one project emission "
+                    + "and zero retained emissions");
+            check(Files.exists(tmp.resolve("build-postflip/main.lua")),
+                "the post-flip public build publishes the one project artifact");
 
             // ISSUE-0239 E10 plan-time arm: an exported function called
             // from source carries two invocation shapes under the
             // statically-resolved call machine (ISSUE-0531's runtime
-            // selection), so the manifest claims CALLS and the post-flip
+            // selection), so the manifest claims CALLS and the harness
             // plan reroutes the module LEGACY — never E6005, never a
             // within-run fallback. The retained route compiles the
-            // dual-shape module end to end.
+            // dual-shape module end to end. ISSUE-0643 P10 item 2: the
+            // release-owned production invocation fails the same fixture
+            // closed (the shape lowers to CONSTRUCT_UNLOWERED), so the
+            // reroute subject is re-expressed through the harness
+            // invocation.
             Path dualSrc = tmp.resolve("dualsrc");
             Files.createDirectories(dualSrc);
             Files.writeString(dualSrc.resolve("main.deal"), """
@@ -1380,9 +1387,10 @@ public class FoundationIntegrationTest {
                   return null
                 }
                 """);
-            CompilerInvocation dualInvocation = CompilerProfileProvider.resolve(
-                ReleaseState.V1_2_ACTIVE,
-                ReleaseConfiguration.releaseCapabilityRegistry());
+            CompilerInvocation dualInvocation =
+                CompilerProfileProvider.resolveCommonShadow(
+                    SemanticProfile.DEAL_V1_2_INT32, ReleaseState.V1_2_ACTIVE,
+                    CapabilityRegistry.releaseRegistry());
             CompilationOrchestrator dualOrchestrator =
                 new CompilationOrchestrator(
                     dualSrc.resolve("main.deal").toAbsolutePath(),
@@ -1391,8 +1399,8 @@ public class FoundationIntegrationTest {
                     Path.of("std").toAbsolutePath().normalize(), null,
                     dualInvocation);
             boolean dualOk = dualOrchestrator.compile();
-            check(dualOk, "the post-flip dual-shape build compiles on the retained "
-                + "route: " + dualOrchestrator.diagnostics());
+            check(dualOk, "the dual-shape build compiles on the retained "
+                + "harness route: " + dualOrchestrator.diagnostics());
             RequirementManifestResult dualManifests =
                 dualOrchestrator.requirementManifests();
             check(dualManifests != null && !dualManifests.hasErrors()
@@ -1405,9 +1413,34 @@ public class FoundationIntegrationTest {
                     && dualPlan.plan() != null
                     && dualPlan.plan().entries().values().stream()
                         .allMatch(route -> route == ModuleRoute.LEGACY),
-                "the dual-shape module reroutes LEGACY at plan time post-flip "
+                "the dual-shape module reroutes LEGACY at plan time "
                     + "(CALLS not promoted — the parent verification-3 reroute, "
                     + "never E6005)");
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the dual-shape fixture closed with E6005
+            // CONSTRUCT_UNLOWERED and publishes nothing.
+            CompilationOrchestrator dualProduction = new CompilationOrchestrator(
+                dualSrc.resolve("main.deal").toAbsolutePath(),
+                tmp.resolve("build-dual-production"), false, false, false,
+                false, Backend.LUAJIT, null,
+                List.of(dualSrc.toAbsolutePath()),
+                Path.of("std").toAbsolutePath().normalize(), null,
+                CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
+                    ReleaseConfiguration.releaseCapabilityRegistry()));
+            boolean dualProductionOk = dualProduction.compile();
+            check(!dualProductionOk,
+                "the release-owned production invocation fails the dual-shape "
+                    + "fixture closed");
+            check(dualProduction.routePlan() == null,
+                "the production dual-shape compile consults no route plan");
+            check(dualProduction.diagnostics().stream()
+                    .anyMatch(d -> "E6005".equals(d.code())
+                        && d.message().contains("CONSTRUCT_UNLOWERED")),
+                "the production dual-shape failure names the construct rule: "
+                    + dualProduction.diagnostics());
+            check(!Files.exists(tmp.resolve("build-dual-production/main.lua")),
+                "the production dual-shape failure stages no artifact");
 
             // An internal V1_2_ACTIVE construction over the all-SHADOW
             // release default derives DEAL_V1_2_INT32 (the A1 row).
@@ -3182,12 +3215,12 @@ public class FoundationIntegrationTest {
          * Every activated-state gate fact as one predicate, evaluated end
          * to end under the asserted release state. Returns true iff all
          * hold: the public build of an int-using module under
-         * {@code V1_2_ACTIVE} derives {@code DEAL_V1_2_INT32} with a
-         * SHARED plan over the promoted release registry (F4 rule 4
-         * reachable), the pre-activation matrix row still derives
-         * {@code LEGACY_SAFE_INT} internally (never a production rollback
-         * target), the release constant is committed at
-         * {@code V1_2_ACTIVE} (a PRE_ACTIVATION probe fails), the flip
+         * {@code V1_2_ACTIVE} derives {@code DEAL_V1_2_INT32} and runs
+         * the production arm (no route plan, one project emission, zero
+         * retained emissions; ISSUE-0643 P4), the pre-activation matrix
+         * row still derives {@code LEGACY_SAFE_INT} internally (never a
+         * production rollback target), the release constant is committed
+         * at {@code V1_2_ACTIVE} (a PRE_ACTIVATION probe fails), the flip
          * stays exactly the one ReleaseConfiguration constant edit plus
          * the promotion list, and no CLI/source profile selection path
          * exists.
@@ -3247,18 +3280,31 @@ public class FoundationIntegrationTest {
                         || orchestrator.checkedProject().hasErrors()) {
                     return false;
                 }
+                // ISSUE-0643 P4: the release-owned production invocation
+                // skips phase 3.7 (no route plan, one project emission,
+                // zero retained emissions); the re-armed PRE_ACTIVATION
+                // probe keeps the harness arm and computes one.
                 RoutePlanResult plan = orchestrator.routePlan();
-                if (plan == null || plan.hasErrors() || plan.plan() == null) {
+                boolean productionArm =
+                    assertedState == ReleaseState.V1_2_ACTIVE;
+                if (productionArm) {
+                    if (plan != null
+                            || orchestrator.semanticEmissionCount() != 1
+                            || orchestrator.retainedEmissionCount() != 0) {
+                        return false;
+                    }
+                } else if (plan == null || plan.hasErrors()
+                        || plan.plan() == null) {
                     return false;
                 }
 
                 // The activated-state gate facts over the executed
                 // configuration: under V1_2_ACTIVE the public build
-                // derives DEAL_V1_2_INT32 with a SHARED plan and empty
-                // shadowModules (production SHARED eligible — F4 rule 4
-                // over the promoted release registry); the re-armed
-                // PRE_ACTIVATION run fails the DEAL_V1_2_INT32
-                // derivation facts here.
+                // derives DEAL_V1_2_INT32, runs the production arm (no
+                // route plan, one project emission, zero retained
+                // emissions — ISSUE-0643 P4), and keeps the promoted
+                // release registry hash; the re-armed PRE_ACTIVATION run
+                // fails the DEAL_V1_2_INT32 derivation facts here.
                 if (CompilerProfileProvider.publicProfile(assertedState)
                         != SemanticProfile.DEAL_V1_2_INT32) {
                     return false;
@@ -3277,11 +3323,9 @@ public class FoundationIntegrationTest {
                         != SemanticProfile.DEAL_V1_2_INT32) {
                     return false;
                 }
-                if (!plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED)) {
-                    return false;
-                }
-                if (!plan.plan().shadowModules().isEmpty()) {
+                if (!productionArm
+                        && !plan.plan().entries().values().stream()
+                            .allMatch(route -> route == ModuleRoute.LEGACY)) {
                     return false;
                 }
             } finally {

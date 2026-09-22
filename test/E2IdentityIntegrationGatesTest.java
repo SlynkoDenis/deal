@@ -138,14 +138,22 @@ public class E2IdentityIntegrationGatesTest {
         return file.toAbsolutePath();
     }
 
-    /** Runs the CLI with System.err captured; returns {exitCode, stderr}. */
+    /**
+     * Runs the same CLI-equivalent arguments through the test-scope
+     * harness compile entry ({@link HarnessCompileEntry}; ISSUE-0643 P10
+     * item 3, mechanism 1) with System.err captured; returns {exitCode,
+     * stderr}. This suite's fixtures carry cross-module calls and
+     * declaration imports the release-owned production invocation fails
+     * closed, while the suite's subject — the E2 identity gates — is
+     * arm-independent.
+     */
     private static String[] runCliCapturingErr(String[] args) throws IOException {
         ByteArrayOutputStream err = new ByteArrayOutputStream();
         PrintStream originalErr = System.err;
         int exitCode;
         try {
             System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
-            exitCode = Main.run(args);
+            exitCode = HarnessCompileEntry.run(args);
             System.err.flush();
         } finally {
             System.setErr(originalErr);

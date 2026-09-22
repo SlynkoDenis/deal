@@ -183,8 +183,15 @@ public class RuntimeSourceLocationTest {
         Path outputDir = tmpDir.resolve("build/lua");
         List<Path> moduleRoots = List.of(srcDir);
 
+        // ISSUE-0643 P10 item 3: the suite's subject — the runtime source
+        // location framing over the per-module artifacts — is
+        // arm-independent, so the compile resolves the harness invocation
+        // and keeps the retained artifact set.
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            mainFile, outputDir, false, false, false, null, moduleRoots, stdlibDir);
+            mainFile, outputDir, false, false, false, false,
+            deal.codegen.Backend.LUAJIT, null, moduleRoots,
+            stdlibDir, null, ConformanceHarnessMetadata.invocation(
+                deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32));
 
         boolean success = orchestrator.compile();
         if (!success) {

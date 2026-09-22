@@ -7,9 +7,11 @@ import deal.module.PlannedDefaultClass;
 import deal.module.ResolvedDefaultExpression;
 import deal.codegen.Backend;
 import deal.semantic.CompilerInvocation;
-import deal.semantic.CompilerProfileProvider;
-import deal.semantic.ReleaseConfiguration;
+import deal.semantic.ir.SemanticProfile;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -90,10 +92,57 @@ public class RuntimeConstructionPhasesTest {
         }
     }
 
+    /**
+     * The harness invocation of this battery's compiles (ISSUE-0643 P10
+     * item 3): every fixture of the A/B/D sections carries a construct
+     * the release-owned production invocation does not realize at this
+     * boundary (host declaration imports, bytes, {@code @jsonable}
+     * construction), so the in-process compiles resolve the
+     * COMMON_SHADOW harness invocation and keep the harness arm's
+     * retained per-module artifacts and runtime assertions unchanged.
+     */
     private static CompilerInvocation invocation() {
-        return CompilerProfileProvider.resolve(
-            ReleaseConfiguration.CURRENT_RELEASE_STATE,
-            ReleaseConfiguration.releaseCapabilityRegistry());
+        return ConformanceHarnessMetadata.invocation(
+            SemanticProfile.DEAL_V1_2_INT32);
+    }
+
+    /**
+     * Runs the test-scope harness compile entry in-process with
+     * System.err captured (ISSUE-0643 P10 item 3, mechanism 1).
+     */
+    private static RunResult runHarnessCli(String[] args) throws Exception {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = HarnessCompileEntry.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new RunResult(exitCode,
+            err.toString(StandardCharsets.UTF_8).trim());
+    }
+
+    /**
+     * Runs the release-owned production CLI in-process with System.err
+     * captured (the production-invocation fail-closed assertions of this
+     * battery).
+     */
+    private static RunResult runProductionCli(String[] args) throws Exception {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = deal.Main.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new RunResult(exitCode,
+            err.toString(StandardCharsets.UTF_8).trim());
     }
 
     private static void deleteRecursively(Path dir) {
@@ -782,19 +831,43 @@ public class RuntimeConstructionPhasesTest {
             if (gcc.exitCode() != 0) {
                 return;
             }
-            // Production CLI compile of the extern-C project.
+            // The extern-C project compiles in-process through the
+            // test-scope harness invocation (ISSUE-0643 P10 item 3): the
+            // fixture carries a HOST-kind extern-C declaration import, so
+            // the harness arm produces the retained per-module artifact
+            // set (main.lua) the run below executes.
             Path outDir = root.resolve("build/lua");
-            RunResult cli = runProcess(Path.of(".").toAbsolutePath()
-                .normalize(), "java", "-ea", "-cp",
-                buildDir.toString(), "deal.Main", "compile",
+            RunResult cli = runHarnessCli(new String[]{
+                "compile",
                 root.resolve("src/main.deal").toAbsolutePath().toString(),
-                "--backend", "lua", "--output", outDir.toString());
+                "--backend", "lua", "--output", outDir.toString()});
             check(cli.exitCode() == 0,
-                "the extern-C project compiles through the production"
-                    + " CLI: " + cli.output());
+                "the extern-C project compiles through the harness"
+                    + " invocation: " + cli.output());
             if (cli.exitCode() != 0) {
                 return;
             }
+
+            // ISSUE-0643 P10 item 2: the same fixture through the
+            // release-owned production invocation fails closed with
+            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
+            // stages nothing (the FFI realization is the FFI child's;
+            // ISSUE-0625 retargets this to the production outcome).
+            Path prodOut = root.resolve("build/prod-lua");
+            RunResult prod = runProductionCli(new String[]{
+                "compile",
+                root.resolve("src/main.deal").toAbsolutePath().toString(),
+                "--backend", "lua", "--output", prodOut.toString()});
+            check(prod.exitCode() != 0
+                    && prod.output().contains("E6005")
+                    && prod.output().contains("SHARED_EMITTER_COVERAGE")
+                    && prod.output().contains("HOST_MODULE_IMPORT"),
+                "the release-owned production invocation fails the extern-C"
+                    + " project closed with E6005 SHARED_EMITTER_COVERAGE"
+                    + " (HOST_MODULE_IMPORT): " + prod.output());
+            check(!Files.exists(prodOut),
+                "the production failure stages no artifact under " + prodOut);
+
             RunResult run = runProcess(outDir, "luajit", "main.lua");
             check(run.exitCode() == 0,
                 "the C-struct repeated-construction run exits 0: "

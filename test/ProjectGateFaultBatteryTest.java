@@ -278,10 +278,15 @@ public class ProjectGateFaultBatteryTest {
             externals.put(extra.getKey(),
                 proj.resolve(extra.getValue()).toAbsolutePath().toString());
         }
+        // P10 item 3: the battery's subject is the project lowering
+        // entry and its fixtures carry host, extern-C, and cross-module
+        // constructs, so the orchestrator compile runs through a harness
+        // invocation (COMMON_SHADOW) and keeps the harness arm — never
+        // the release-owned production invocation.
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entry, output, false, false, false, Backend.LUAJIT, externals,
+            entry, output, false, false, false, false, Backend.LUAJIT, externals,
             List.of(proj.resolve("src").toAbsolutePath()),
-            Path.of(".").toAbsolutePath().normalize());
+            Path.of(".").toAbsolutePath().normalize(), null, invocation());
         boolean compiled = orchestrator.compile();
         check(compiled, "the fixture project compiles through the production "
             + "pipeline: " + orchestrator.diagnostics());
@@ -1450,6 +1455,87 @@ public class ProjectGateFaultBatteryTest {
         return object.entries().stream().map(CanonicalJson.Entry::key).toList();
     }
 
+    /**
+     * The text between the signature's opening brace and its matching
+     * closing brace (string/char literals and comments are respected), or
+     * null when the signature is absent.
+     */
+    private static String methodBody(String source, String signature) {
+        int signatureAt = source.indexOf(signature);
+        if (signatureAt < 0) {
+            return null;
+        }
+        int open = source.indexOf('{', signatureAt + signature.length());
+        if (open < 0) {
+            return null;
+        }
+        int depth = 0;
+        boolean inString = false;
+        boolean inChar = false;
+        boolean inLineComment = false;
+        boolean inBlockComment = false;
+        for (int i = open; i < source.length(); i++) {
+            char c = source.charAt(i);
+            char next = i + 1 < source.length() ? source.charAt(i + 1) : '\0';
+            if (inLineComment) {
+                if (c == '\n') {
+                    inLineComment = false;
+                }
+                continue;
+            }
+            if (inBlockComment) {
+                if (c == '*' && next == '/') {
+                    inBlockComment = false;
+                    i++;
+                }
+                continue;
+            }
+            if (inString) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (inChar) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == '\'') {
+                    inChar = false;
+                }
+                continue;
+            }
+            if (c == '/' && next == '/') {
+                inLineComment = true;
+                i++;
+                continue;
+            }
+            if (c == '/' && next == '*') {
+                inBlockComment = true;
+                i++;
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+                continue;
+            }
+            if (c == '\'') {
+                inChar = true;
+                continue;
+            }
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return source.substring(open, i + 1);
+                }
+            }
+        }
+        return null;
+    }
+
     private static void testProductionPathUnchanged() throws Exception {
         System.out.println("-- frozen surfaces: the production compile path --");
         Path root = repoRoot();
@@ -1506,6 +1592,50 @@ public class ProjectGateFaultBatteryTest {
             check(orchestrator.contains(site),
                 "the production compile path keeps its call site '" + site + "'");
         }
+
+        // ISSUE-0643 P11: the phase-4 dispatch method and the production
+        // arm method of the orchestrator reach no retained backend, no
+        // route surface, no planner/registry, and no retained counter;
+        // the harness remnants stay outside their method bodies.
+        String dispatch = methodBody(orchestrator, "private void codegenAll()");
+        check(dispatch != null, "the phase-4 dispatch method is located");
+        if (dispatch != null) {
+            check(dispatch.contains("productionArmApplies()")
+                    && dispatch.contains("emitProductionProject()"),
+                "the dispatch selects the production arm through the"
+                    + " release-owned predicate: " + dispatch);
+            for (String forbidden : List.of("ModuleRoute", "ModuleRoutePlan",
+                    "MigrationPlanner", "CapabilityRegistry", "routeOf(",
+                    "validateMixedEdges", "LuaBackend", "JvmBackend",
+                    "retainedEmissionCount", "semanticEmissionCount")) {
+                check(!dispatch.contains(forbidden),
+                    "the phase-4 dispatch method references no '" + forbidden
+                        + "'");
+            }
+        }
+        String arm = methodBody(orchestrator,
+            "private void emitProductionProject()");
+        check(arm != null, "the production arm method is located");
+        if (arm != null) {
+            check(arm.contains("ProductionProjectEmission.run("),
+                "the production arm runs the production project emission"
+                    + " unit: " + arm);
+            for (String forbidden : List.of("ModuleRoute", "ModuleRoutePlan",
+                    "MigrationPlanner", "CapabilityRegistry", "routeOf(",
+                    "validateMixedEdges", "LuaBackend", "JvmBackend",
+                    "retainedEmissionCount", "generate(")) {
+                check(!arm.contains(forbidden),
+                    "the production arm method references no '" + forbidden
+                        + "'");
+            }
+        }
+        String predicate = methodBody(orchestrator,
+            "public static boolean isProductionInvocation(");
+        check(predicate != null
+                && predicate.contains("defaultInvocation()")
+                && !predicate.contains("purpose"),
+            "the production-invocation predicate is record identity, never"
+                + " a purpose-only test: " + predicate);
         String planner = Files.readString(
             root.resolve("deal/semantic/MigrationPlanner.java"),
             StandardCharsets.UTF_8);

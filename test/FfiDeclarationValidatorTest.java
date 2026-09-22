@@ -32,6 +32,7 @@ import deal.project.OutputConfigResolver;
 import deal.project.ProjectContext;
 import deal.project.ProjectDeploymentIdentity;
 import deal.semantic.ir.CanonicalJson;
+import deal.semantic.ir.SemanticProfile;
 import deal.types.Type;
 
 import java.io.IOException;
@@ -1022,11 +1023,11 @@ public class FfiDeclarationValidatorTest {
             Path output = proj.resolve("build/jvm").toAbsolutePath();
             // Isolated-phase JVM path with the externals declaration.
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.JVM,
+                entry, output, false, false, false, false, Backend.JVM,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean success = orchestrator.compile();
             check(!success, "JVM extern-C compile fails");
             check(orchestrator.diagnostics().stream().anyMatch(d ->
@@ -1078,11 +1079,11 @@ public class FfiDeclarationValidatorTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("build/lua").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean success = orchestrator.compile();
             check(success, "Lua extern-C compile succeeds: "
                 + orchestrator.diagnostics());
@@ -1137,11 +1138,11 @@ public class FfiDeclarationValidatorTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("build/lua").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean success = orchestrator.compile();
             check(!success, "invalid extern-C fails the compile");
             check(orchestrator.diagnostics().stream().anyMatch(d ->
@@ -1183,11 +1184,11 @@ public class FfiDeclarationValidatorTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("build/lua").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean success = orchestrator.compile();
             check(!success, "failed struct validation fails the compile");
             check(orchestrator.diagnostics().stream().anyMatch(d ->
@@ -1251,11 +1252,11 @@ public class FfiDeclarationValidatorTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("build/lua").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean success = orchestrator.compile();
             check(success, "Lua extern-C compile succeeds: "
                 + orchestrator.diagnostics());

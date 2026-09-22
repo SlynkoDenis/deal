@@ -8,6 +8,7 @@ import deal.diagnostics.DiagnosticStructuredOutput;
 import deal.diagnostics.RangeOrigin;
 import deal.ast.*;
 import deal.checker.*;
+import deal.codegen.Backend;
 import deal.codegen.lua.LuaBackend;
 import deal.lexer.*;
 import deal.module.*;
@@ -16,7 +17,9 @@ import deal.project.ProjectContext;
 import deal.project.ProjectLocator;
 import deal.semantic.CapabilityRegistry;
 import deal.semantic.CompilerProfileProvider;
+import deal.semantic.CompilerInvocation;
 import deal.semantic.ir.ReleaseState;
+import deal.semantic.ir.SemanticProfile;
 import deal.source.ScalarSourceCursor;
 import deal.types.Type;
 import deal.types.Types;
@@ -35,6 +38,20 @@ public class ModuleSystemTest {
     private static int passed = 0;
     private static int failed = 0;
     private static Path tmpDir;
+
+    /**
+     * The harness invocation of this suite's compiles (ISSUE-0643 P10
+     * item 3): the suite's subject — multi-module orchestration, the
+     * locator/resolution/identity stack, and the per-module artifact set —
+     * is arm-independent, and its fixtures carry host declaration imports
+     * and cross-module calls the release-owned production invocation fails
+     * closed. The production-invocation pins (the cross-module async
+     * await-retention case and the CLI paths) are asserted separately.
+     */
+    private static CompilerInvocation harnessInvocation() {
+        return ConformanceHarnessMetadata.invocation(
+            SemanticProfile.DEAL_V1_2_INT32);
+    }
 
     private static void check(boolean condition, String message) {
         if (condition) { passed++; }
@@ -65,7 +82,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -94,7 +111,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -124,7 +141,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -158,7 +175,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, Path.of(".").toAbsolutePath().normalize(), null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -187,7 +204,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -220,7 +237,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, Path.of(".").toAbsolutePath().normalize(), null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -280,7 +297,7 @@ public class ModuleSystemTest {
         roots.add(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, Path.of(".").toAbsolutePath().normalize(), null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -677,7 +694,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Diamond dependency: compilation succeeded");
@@ -721,7 +738,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Module outside cycle: compilation succeeded");
@@ -751,7 +768,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         Path mainFile = tmpDir.resolve("src/main.deal");
         String resolved = orchestrator.resolveImportPath("./lib", mainFile);
@@ -797,6 +814,11 @@ public class ModuleSystemTest {
         Path outputDir = tmpDir.resolve("build/lua");
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
+        // ISSUE-0643 P10 item 2: this single-module fixture is the
+        // production-invocation pin of the module export-surface
+        // publication (ISSUE-0639) — the release-owned record emits the
+        // project chunk whose module-keyed surface the assertion below
+        // pins.
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
             entryFile, outputDir, true, null, moduleRoots, null);
 
@@ -841,7 +863,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, true, null, moduleRoots, null);
+            entryFile, outputDir, true, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Multi-module compilation succeeded");
@@ -869,7 +891,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "Compilation with type error should fail");
@@ -922,7 +944,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -940,6 +962,30 @@ public class ModuleSystemTest {
             "await import retention: main.lua exists");
         check(Files.exists(outputDir.resolve("ai_await_lib.lua")),
             "await import retention: lib.lua exists");
+
+        // ISSUE-0643 P10 item 2: the release-owned production invocation
+        // fails the cross-module async closure closed with E6005
+        // SHARED_EMITTER_COVERAGE (EXTERNAL_ASYNC_CALL, the emitting
+        // module, the callee module, and the export name) and stages
+        // nothing (the realization belongs to the calls child).
+        CompilationOrchestrator production = new CompilationOrchestrator(
+            entryFile, tmpDir.resolve("build/ai_await_production"), false,
+            null, moduleRoots, null);
+        check(!production.compile(),
+            "the release-owned production invocation fails the cross-module "
+                + "async closure closed");
+        check(production.diagnostics().stream().anyMatch(d ->
+                "E6005".equals(d.code())
+                    && d.message().contains("SHARED_EMITTER_COVERAGE")
+                    && d.message().contains("EXTERNAL_ASYNC_CALL")
+                    && d.message().contains("'ai_await_main'")
+                    && d.message().contains("'ai_await_lib'")
+                    && d.message().contains("'getValue'")),
+            "the production failure names the token, the emitting module, the "
+                + "callee module, and the export name: "
+                + production.diagnostics());
+        check(!Files.exists(tmpDir.resolve("build/ai_await_production")),
+            "the production failure stages no artifact");
     }
 
 
@@ -978,7 +1024,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -1018,7 +1064,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "Top-level executable statement should fail in v1.2");
@@ -1064,7 +1110,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "Class-field-default cycle must fail in v1.2");
@@ -1105,7 +1151,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Declaration-only cycle should succeed");
@@ -1159,7 +1205,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "Two disconnected cycles (top-level statement): compilation should fail");
@@ -1221,7 +1267,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Two disconnected cycles (both decl-only): compilation should succeed");
@@ -1260,7 +1306,7 @@ public class ModuleSystemTest {
         roots.add(stdlibDir.toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, stdlibDir.toAbsolutePath());
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, stdlibDir.toAbsolutePath(), null, harnessInvocation());
 
         // The compilation should succeed because the .d.deal provides type info.
         // The .lua not being copied is acceptable — the host provides it at runtime.
@@ -1308,7 +1354,7 @@ public class ModuleSystemTest {
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Cross-module class field access: compilation should succeed");
@@ -1350,7 +1396,7 @@ public class ModuleSystemTest {
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Cross-module class construction: compilation should succeed");
@@ -1389,7 +1435,7 @@ public class ModuleSystemTest {
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Cross-module class has(): compilation should succeed");
@@ -1418,7 +1464,7 @@ public class ModuleSystemTest {
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Qualified type annotation: compilation should succeed");
@@ -1458,7 +1504,7 @@ public class ModuleSystemTest {
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "Cross-module class E2E: compilation should succeed");
@@ -1511,7 +1557,7 @@ public class ModuleSystemTest {
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
 
         // ISSUE-0269 (D6 (d)): a class in a rooted non-externals .d.deal
         // has no public module identity — the only available form would
@@ -1542,7 +1588,7 @@ public class ModuleSystemTest {
             """);
         Path freeEntry = tmpDir.resolve("src/runner_free.deal").toAbsolutePath();
         CompilationOrchestrator freeOrchestrator = new CompilationOrchestrator(
-            freeEntry, outputDir, false, null, moduleRoots, null);
+            freeEntry, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
         check(freeOrchestrator.compile(),
             "a class-free declaration file compiles: " + freeOrchestrator.diagnostics());
         check(!Files.exists(outputDir.resolve("calc_free.lua")),
@@ -2235,7 +2281,7 @@ public class ModuleSystemTest {
 
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, true, null, roots, null);
+            entryFile, outputDir, true, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         check(orchestrator.compile(), "E2E single: compile succeeded");
 
@@ -2288,7 +2334,7 @@ public class ModuleSystemTest {
 
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, true, null, roots, null);
+            entryFile, outputDir, true, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         check(orchestrator.compile(), "E2E multi: compile succeeded");
 
@@ -2354,7 +2400,7 @@ public class ModuleSystemTest {
         roots.add(stdlibDir.toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, true, null, roots, stdlibDir.toAbsolutePath());
+            entryFile, outputDir, true, false, false, false, Backend.LUAJIT, null, roots, stdlibDir.toAbsolutePath(), null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         List<CompilerDiagnostic> diags = orchestrator.diagnostics();
@@ -2425,7 +2471,7 @@ public class ModuleSystemTest {
 
         List<Path> roots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, roots, null, null, harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "E2E error: compilation should fail");
@@ -2739,7 +2785,7 @@ public class ModuleSystemTest {
         Path outputDir = tmpDir.resolve("build/" + name);
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, moduleRoots, null);
+            entryFile, outputDir, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
         orchestrator.compile();
         return orchestrator.diagnostics();
     }
@@ -2809,7 +2855,7 @@ public class ModuleSystemTest {
         Path commentedOut = tmpDir.resolve("build/em_anchor");
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator commentedOrchestrator = new CompilationOrchestrator(
-            commentedFile, commentedOut, false, null, moduleRoots, null);
+            commentedFile, commentedOut, false, false, false, false, Backend.LUAJIT, null, moduleRoots, null, null, harnessInvocation());
         check(!commentedOrchestrator.compile(),
             "commented entry without main fails compilation");
         CompilerDiagnostic commentedE2012 = commentedOrchestrator.diagnostics()
@@ -2841,8 +2887,8 @@ public class ModuleSystemTest {
         // shape, never SYNTHETIC and no anchor note.
         Path emptyFile = writeFile("src/em_empty.deal", "").toAbsolutePath();
         CompilationOrchestrator emptyOrchestrator = new CompilationOrchestrator(
-            emptyFile, tmpDir.resolve("build/em_empty"), false, null,
-            moduleRoots, null);
+            emptyFile, tmpDir.resolve("build/em_empty"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         emptyOrchestrator.compile();
         CompilerDiagnostic emptyE2012 = emptyOrchestrator.diagnostics().stream()
             .filter(d -> "E2012".equals(d.code()))
@@ -2868,8 +2914,8 @@ public class ModuleSystemTest {
         // SOURCE range at file start).
         Path wsFile = writeFile("src/em_ws.deal", " \t\n").toAbsolutePath();
         CompilationOrchestrator wsOrchestrator = new CompilationOrchestrator(
-            wsFile, tmpDir.resolve("build/em_ws"), false, null,
-            moduleRoots, null);
+            wsFile, tmpDir.resolve("build/em_ws"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         wsOrchestrator.compile();
         CompilerDiagnostic wsE2012 = wsOrchestrator.diagnostics().stream()
             .filter(d -> "E2012".equals(d.code()))
@@ -2907,8 +2953,8 @@ public class ModuleSystemTest {
             .toAbsolutePath();
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, tmpDir.resolve("build/importspan"), false, null,
-            moduleRoots, null);
+            entryFile, tmpDir.resolve("build/importspan"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         check(!orchestrator.compile(), "unresolved import fails compilation");
         CompilerDiagnostic e2003 = orchestrator.diagnostics().stream()
             .filter(d -> "E2003".equals(d.code()))
@@ -2948,8 +2994,8 @@ public class ModuleSystemTest {
         Path gateEntry = tmpDir.resolve("src/e2009span/gate_main.deal")
             .toAbsolutePath();
         CompilationOrchestrator gateOrchestrator = new CompilationOrchestrator(
-            gateEntry, tmpDir.resolve("build/e2009span"), false, null,
-            moduleRoots, null);
+            gateEntry, tmpDir.resolve("build/e2009span"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         check(!gateOrchestrator.compile(),
             "undeclared host import fails compilation");
         CompilerDiagnostic e2009 = gateOrchestrator.diagnostics().stream()
@@ -2995,8 +3041,8 @@ public class ModuleSystemTest {
         Path entryFile = tmpDir.resolve("src/cya.deal").toAbsolutePath();
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, tmpDir.resolve("build/cya"), false, null,
-            moduleRoots, null);
+            entryFile, tmpDir.resolve("build/cya"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         check(!orchestrator.compile(), "runtime cycle fails compilation");
         CompilerDiagnostic e2005 = orchestrator.diagnostics().stream()
             .filter(d -> "E2005".equals(d.code()))
@@ -3134,8 +3180,8 @@ public class ModuleSystemTest {
             .toAbsolutePath();
         List<Path> moduleRoots = List.of(tmpDir.resolve("src").toAbsolutePath());
         CompilationOrchestrator missingOrchestrator = new CompilationOrchestrator(
-            missingEntry, tmpDir.resolve("build/no_such"), false, null,
-            moduleRoots, null);
+            missingEntry, tmpDir.resolve("build/no_such"), false, false, false, false, Backend.LUAJIT, null,
+            moduleRoots, null, null, harnessInvocation());
         check(!missingOrchestrator.compile(), "nonexistent entry fails");
         CompilerDiagnostic missing = missingOrchestrator.diagnostics().stream()
             .filter(d -> "E2003".equals(d.code()))
@@ -3167,8 +3213,8 @@ public class ModuleSystemTest {
         Path umEntry = tmpDir.resolve("src/um_main.deal").toAbsolutePath();
         CompilationOrchestrator unreadableOrchestrator =
             new CompilationOrchestrator(
-                umEntry, tmpDir.resolve("build/um"), false, null,
-                moduleRoots, null);
+                umEntry, tmpDir.resolve("build/um"), false, false, false, false, Backend.LUAJIT, null,
+                moduleRoots, null, null, harnessInvocation());
         check(!unreadableOrchestrator.compile(), "unreadable module fails");
         // ISSUE-0269: an unreadable candidate (a directory answering
         // to the .deal candidate) is E2003 at the import span from the
@@ -3233,8 +3279,10 @@ public class ModuleSystemTest {
             System.setErr(new PrintStream(noise, true, StandardCharsets.UTF_8));
             orchestrator = new CompilationOrchestrator(
                 entry, tmpDir.resolve("build/dj_fail_direct"), false,
+                false, false, false, Backend.LUAJIT,
                 (Map<String, String>) null,
-                List.of(tmpDir.resolve("dj_proj/src").toAbsolutePath()), null);
+                List.of(tmpDir.resolve("dj_proj/src").toAbsolutePath()), null,
+                null, harnessInvocation());
             orchestrator.compile();
         } finally {
             System.err.flush();

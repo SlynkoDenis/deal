@@ -11,6 +11,7 @@ import deal.semantic.HostDeclarationSurface.DeclarationKind;
 import deal.semantic.HostDeclarationSurface.DeclaredClass;
 import deal.semantic.HostDeclarationSurface.DeclaredField;
 import deal.semantic.ir.ModuleId;
+import deal.semantic.ir.SemanticProfile;
 import deal.types.Type;
 import deal.types.Types;
 
@@ -187,11 +188,11 @@ public class HostDeclarationSurfaceTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("out").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("host/cfg",
                     proj.resolve("src/cfg.d.deal").toAbsolutePath().toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             check(orchestrator.compile(),
                 "the host-importing project compiles: "
                     + orchestrator.diagnostics());
@@ -306,11 +307,11 @@ public class HostDeclarationSurfaceTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("out").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.LUAJIT,
+                entry, output, false, false, false, false, Backend.LUAJIT,
                 Map.of("native/math",
                     proj.resolve("src/math.d.deal").toAbsolutePath().toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             check(orchestrator.compile(),
                 "the extern-C-importing project compiles: "
                     + orchestrator.diagnostics());
@@ -423,11 +424,11 @@ public class HostDeclarationSurfaceTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("out").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, Backend.JS,
+                entry, output, false, false, false, false, Backend.JS,
                 Map.of("host/cfg",
                     proj.resolve("src/cfg.d.deal").toAbsolutePath().toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             check(orchestrator.compile(),
                 "the host-importing project compiles on JS: "
                     + orchestrator.diagnostics());
@@ -475,11 +476,11 @@ public class HostDeclarationSurfaceTest {
             Path entry = proj.resolve("src/app.deal").toAbsolutePath();
             Path output = proj.resolve("out").toAbsolutePath();
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, false, false, backend,
+                entry, output, false, false, false, false, backend,
                 Map.of("host/cfg",
                     proj.resolve("src/cfg.d.deal").toAbsolutePath().toString()),
                 List.of(proj.resolve("src").toAbsolutePath()),
-                Path.of(".").toAbsolutePath().normalize());
+                Path.of(".").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             check(!orchestrator.compile(),
                 "the unrepresentable declared class field type fails the compile");
 

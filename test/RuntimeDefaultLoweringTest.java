@@ -11,6 +11,7 @@ import deal.module.RuntimeDefaultEvaluator;
 import deal.module.RuntimeDefaultPlanLowering;
 import deal.codegen.Backend;
 import deal.semantic.CompilerInvocation;
+import deal.semantic.ir.SemanticProfile;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.ReleaseConfiguration;
 
@@ -93,10 +94,15 @@ public class RuntimeDefaultLoweringTest {
         }
     }
 
+    /**
+     * The harness invocation of this suite's compiles (ISSUE-0643 P10
+     * item 3): the suite's subject — the runtime default lowering and
+     * construction phases — is arm-independent, and the fixtures keep
+     * the harness arm's retained artifact behavior.
+     */
     private static CompilerInvocation invocation() {
-        return CompilerProfileProvider.resolve(
-            ReleaseConfiguration.CURRENT_RELEASE_STATE,
-            ReleaseConfiguration.releaseCapabilityRegistry());
+        return ConformanceHarnessMetadata.invocation(
+            SemanticProfile.DEAL_V1_2_INT32);
     }
 
     private static void deleteRecursively(Path dir) {

@@ -400,10 +400,17 @@ public class ProjectLoweringTest {
             externals.put(extra.getKey(),
                 proj.resolve(extra.getValue()).toAbsolutePath().toString());
         }
+        // ISSUE-0643 P10 item 3: the fixture project carries host and
+        // extern-C declaration imports and cross-module calls, while the
+        // suite's subject — the one project lowering entry — is
+        // arm-independent, so the compile resolves the harness invocation
+        // and keeps the harness arm.
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entry, output, false, false, false, Backend.LUAJIT, externals,
+            entry, output, false, false, false, false, Backend.LUAJIT, externals,
             List.of(proj.resolve("src").toAbsolutePath()),
-            Path.of(".").toAbsolutePath().normalize());
+            Path.of(".").toAbsolutePath().normalize(), null,
+            ConformanceHarnessMetadata.invocation(
+                deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32));
         boolean compiled = orchestrator.compile();
         check(compiled, "the fixture project compiles through the production "
             + "pipeline: " + orchestrator.diagnostics());

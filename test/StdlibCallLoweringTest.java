@@ -7,6 +7,7 @@ import deal.ast.MemberAccessExpr;
 import deal.ast.StatementNode;
 import deal.ast.VariableDeclaration;
 import deal.checker.SymbolTable;
+import deal.codegen.Backend;
 import deal.diagnostics.CompilerDiagnostic;
 import deal.module.CompilationOrchestrator;
 import deal.semantic.CapabilityRegistry;
@@ -151,9 +152,9 @@ public class StdlibCallLoweringTest {
                 Files.writeString(src.resolve(source.getKey()), source.getValue());
             }
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, null,
+                src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, false, false, false, Backend.LUAJIT, null,
                 List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+                Path.of("std").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
             boolean ok = orchestrator.compile();
             check(ok, entryName + " compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());

@@ -56,14 +56,42 @@ public class ProjectMigrationIntegrationTest {
         return file.toAbsolutePath();
     }
 
-    /** Runs the CLI with System.err captured; returns {exitCode, stderr}. */
-    private static String[] runCliCapturingErr(String[] args) throws IOException {
+    /**
+     * Runs the release-owned production CLI with System.err captured;
+     * returns {exitCode, stderr}.
+     */
+    private static String[] runProductionCliCapturingErr(String[] args)
+            throws IOException {
         ByteArrayOutputStream err = new ByteArrayOutputStream();
         PrintStream originalErr = System.err;
         int exitCode;
         try {
             System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
             exitCode = Main.run(args);
+            System.err.flush();
+        } finally {
+            System.setErr(originalErr);
+        }
+        return new String[]{String.valueOf(exitCode),
+            err.toString(StandardCharsets.UTF_8)};
+    }
+
+    /**
+     * Runs the same CLI-equivalent arguments through the test-scope
+     * harness compile entry ({@link HarnessCompileEntry}; ISSUE-0643 P10
+     * item 3, mechanism 1) with System.err captured; returns {exitCode,
+     * stderr}. This suite's fixtures carry cross-module calls and stdlib
+     * member calls the release-owned production invocation fails closed,
+     * while the suite's subject — the locator/resolution/identity stack —
+     * is arm-independent.
+     */
+    private static String[] runCliCapturingErr(String[] args) throws IOException {
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        PrintStream originalErr = System.err;
+        int exitCode;
+        try {
+            System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+            exitCode = HarnessCompileEntry.run(args);
             System.err.flush();
         } finally {
             System.setErr(originalErr);

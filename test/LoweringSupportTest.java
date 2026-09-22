@@ -6,6 +6,7 @@ import deal.ast.Span;
 import deal.ast.StatementNode;
 import deal.checker.CheckResult;
 import deal.checker.SymbolTable;
+import deal.codegen.Backend;
 import deal.ir.IrDumper;
 import deal.module.CompilationOrchestrator;
 import deal.semantic.CapabilityRegistry;
@@ -161,6 +162,24 @@ public class LoweringSupportTest {
      * the manifest phase) and returns the manifest result; null when the
      * compile or the checked project failed.
      */
+    /**
+     * The harness invocation of this suite's compiles (ISSUE-0643 P10
+     * item 3): the fixtures carry later-slice constructs
+     * ({@code time.nowMillis}, function-typed values) the release-owned
+     * production invocation fails closed, while the suite's subject —
+     * the checked project, the manifests, and the read-only recomputation
+     * — is arm-independent.
+     */
+    private static CompilationOrchestrator harnessOrchestrator(Path entry,
+                                                               Path output) {
+        return new CompilationOrchestrator(entry, output, false, false, false,
+            false, Backend.LUAJIT, null,
+            List.of(entry.getParent().toAbsolutePath()),
+            Path.of("std").toAbsolutePath().normalize(), null,
+            ConformanceHarnessMetadata.invocation(
+                SemanticProfile.DEAL_V1_2_INT32));
+    }
+
     private static RequirementManifestResult compileAndCompute(Path tmp,
                                                                Map<String, String> sources,
                                                                String entryName)
@@ -170,10 +189,9 @@ public class LoweringSupportTest {
         for (Map.Entry<String, String> source : sources.entrySet()) {
             Files.writeString(src.resolve(source.getKey()), source.getValue());
         }
-        CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, null,
-            List.of(src.toAbsolutePath()),
-            Path.of("std").toAbsolutePath().normalize());
+        CompilationOrchestrator orchestrator =
+            harnessOrchestrator(src.resolve(entryName).toAbsolutePath(),
+                tmp.resolve("build"));
         boolean ok = orchestrator.compile();
         check(ok, entryName + " compiles through phase 3 + builder + manifests: "
             + orchestrator.diagnostics());
@@ -1303,10 +1321,9 @@ public class LoweringSupportTest {
                 }
                 """;
             Files.writeString(src.resolve("main.deal"), source);
-            CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false, null,
-                List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+            CompilationOrchestrator orchestrator =
+                harnessOrchestrator(src.resolve("main.deal").toAbsolutePath(),
+                    tmp.resolve("build"));
             boolean ok = orchestrator.compile();
             check(ok, "the fixture compiles: " + orchestrator.diagnostics());
             CheckedProjectBuildResult checked = orchestrator.checkedProject();
@@ -1365,10 +1382,9 @@ public class LoweringSupportTest {
                   return null
                 }
                 """);
-            CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false, null,
-                List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+            CompilationOrchestrator orchestrator =
+                harnessOrchestrator(src.resolve("main.deal").toAbsolutePath(),
+                    tmp.resolve("build"));
             boolean ok = orchestrator.compile();
             check(ok, "the wrapper scenario compiles end to end: " + orchestrator.diagnostics());
             CheckedProjectBuildResult checked = orchestrator.checkedProject();

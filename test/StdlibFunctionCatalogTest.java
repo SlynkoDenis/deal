@@ -40,6 +40,7 @@ import deal.ast.VariableDeclaration;
 import deal.ast.WhileStatement;
 import deal.checker.Symbol;
 import deal.checker.SymbolTable;
+import deal.codegen.Backend;
 import deal.module.CompilationOrchestrator;
 import deal.semantic.CheckedModuleInput;
 import deal.semantic.CheckedProjectBuildResult;
@@ -51,6 +52,7 @@ import deal.semantic.ir.ExternalModuleKind;
 import deal.semantic.ir.ModuleId;
 import deal.semantic.ir.ResolvedImport;
 import deal.semantic.ir.RuntimeDescriptor;
+import deal.semantic.ir.SemanticProfile;
 import deal.semantic.ir.StdlibFunctionId;
 import deal.types.Type;
 
@@ -162,9 +164,9 @@ public class StdlibFunctionCatalogTest {
             Files.writeString(src.resolve(source.getKey()), source.getValue());
         }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, null,
+            src.resolve(entryName).toAbsolutePath(), tmp.resolve("build"), false, false, false, false, Backend.LUAJIT, null,
             List.of(src.toAbsolutePath()),
-            Path.of("std").toAbsolutePath().normalize());
+            Path.of("std").toAbsolutePath().normalize(), null, ConformanceHarnessMetadata.invocation(SemanticProfile.DEAL_V1_2_INT32));
         boolean ok = orchestrator.compile();
         check(ok, entryName + " compiles through phase 3 + builder: "
             + orchestrator.diagnostics());

@@ -139,7 +139,7 @@ public class ProjectGraphFixturesGatesTest {
         int exitCode;
         try {
             System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
-            exitCode = Main.run(args);
+            exitCode = HarnessCompileEntry.run(args);
             System.err.flush();
         } finally {
             System.setErr(originalErr);

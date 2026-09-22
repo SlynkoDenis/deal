@@ -18,7 +18,9 @@ import deal.semantic.ReleaseConfiguration;
 import deal.source.ScalarSourceCursor;
 import deal.types.Type;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -759,6 +761,35 @@ public class DirectiveTest {
                 "the manifest-backed extern-C import emits no E2010: "
                     + backed.diagnostics());
 
+            // ISSUE-0643 P10 item 2: the same fixture through the
+            // release-owned production invocation fails closed with
+            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
+            // stages nothing (the FFI realization is the FFI child's).
+            ByteArrayOutputStream prodErr = new ByteArrayOutputStream();
+            PrintStream originalErr = System.err;
+            int prodExit;
+            try {
+                System.setErr(new PrintStream(prodErr, true,
+                    java.nio.charset.StandardCharsets.UTF_8));
+                prodExit = deal.Main.run(new String[]{"compile",
+                    entry.toString(), "--output",
+                    tmp.resolve("prod_out").toString()});
+                System.err.flush();
+            } finally {
+                System.setErr(originalErr);
+            }
+            String prodText = prodErr.toString(
+                java.nio.charset.StandardCharsets.UTF_8);
+            check(prodExit != 0 && prodText.contains("E6005")
+                    && prodText.contains("SHARED_EMITTER_COVERAGE")
+                    && prodText.contains("HOST_MODULE_IMPORT"),
+                "the release-owned production invocation fails the extern-C "
+                    + "fixture closed with E6005 SHARED_EMITTER_COVERAGE "
+                    + "(HOST_MODULE_IMPORT): " + prodText);
+            check(!Files.exists(tmp.resolve("prod_out")),
+                "the production failure stages no artifact under the "
+                    + "probe output");
+
             // Case 3: an externals entry that declares the file without
             // nativeLibrary is the invalid-manifest-policy rejection —
             // rejected at locate time by ProjectLocator step 4(b)
@@ -799,7 +830,12 @@ public class DirectiveTest {
 
     /**
      * Locates the production context for {@code entry} and builds the
-     * context-driven orchestrator, or null after a failing check.
+     * context-driven orchestrator, or null after a failing check. The
+     * compile resolves the harness invocation (ISSUE-0643 P10 item 3):
+     * the suite's extern-C fixtures carry a HOST-kind declaration import
+     * the release-owned production invocation fails closed, while the
+     * suite's subject — the directive/manifest policy — is
+     * arm-independent.
      */
     private static CompilationOrchestrator locateOrchestrator(Path entry) {
         ProjectLocator.LocateResult located = ProjectLocator.locate(
@@ -812,9 +848,8 @@ public class DirectiveTest {
         if (located.context() == null) {
             return null;
         }
-        CompilerInvocation invocation = CompilerProfileProvider.resolve(
-            ReleaseConfiguration.CURRENT_RELEASE_STATE,
-            ReleaseConfiguration.releaseCapabilityRegistry());
+        CompilerInvocation invocation = ConformanceHarnessMetadata.invocation(
+            deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32);
         return new CompilationOrchestrator(located.context(),
             entry.toAbsolutePath().normalize(), false, false, false, false,
             null, invocation);

@@ -203,7 +203,13 @@ public class PublicationStagerTest {
         return true;
     }
 
-    /** One orchestrator compile of a single-source-dir project. */
+    /**
+     * One orchestrator compile of a single-source-dir project. The
+     * compile resolves the harness invocation (ISSUE-0643 P10 item 3):
+     * the suite's subject — the staging/publication transaction over the
+     * per-module artifact set — is arm-independent, and the identical
+     * compile inputs keep every artifact assertion.
+     */
     private static boolean compileProject(Path srcDir, Path outputDir,
             Backend backend, boolean dumpIr, boolean sourceMap,
             StringBuilder capturedErr) throws IOException {
@@ -211,9 +217,11 @@ public class PublicationStagerTest {
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
             entry.toAbsolutePath().normalize(),
             outputDir.toAbsolutePath().normalize(),
-            false, dumpIr, sourceMap, backend,
+            false, dumpIr, sourceMap, sourceMap, backend,
             (Map<String, String>) null,
-            List.of(srcDir.toAbsolutePath().normalize()), null);
+            List.of(srcDir.toAbsolutePath().normalize()), null, null,
+            ConformanceHarnessMetadata.invocation(
+                deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32));
         if (capturedErr != null) {
             PrintStream originalErr = System.err;
             ByteArrayOutputStream captured = new ByteArrayOutputStream();

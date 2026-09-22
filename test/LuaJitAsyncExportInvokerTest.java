@@ -1,5 +1,6 @@
 package deal.test;
 
+import deal.codegen.Backend;
 import deal.codegen.lua.AsyncExportInvocationRequest;
 import deal.codegen.lua.LuaJitAsyncExportInvoker;
 import deal.codegen.lua.LuaJitAsyncExportInvoker.EnvelopeJson;
@@ -230,9 +231,12 @@ public class LuaJitAsyncExportInvokerTest {
             }
         }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entrySource.toAbsolutePath(), outRoot, false, externals,
+            entrySource.toAbsolutePath(), outRoot, false, false, false, false,
+            Backend.LUAJIT, externals,
             List.of(srcRoot.toAbsolutePath()),
-            Path.of("").toAbsolutePath());
+            Path.of("").toAbsolutePath(), null,
+            ConformanceHarnessMetadata.invocation(
+                deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32));
         boolean ok = orchestrator.compile();
         assertTrue("production compilation must succeed: "
             + orchestrator.diagnostics(), ok);
@@ -807,9 +811,12 @@ public class LuaJitAsyncExportInvokerTest {
         Path entrySource = srcRoot.resolve(entryFileName);
         Files.writeString(entrySource, source);
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entrySource.toAbsolutePath(), outRoot, false, null,
+            entrySource.toAbsolutePath(), outRoot, false, false, false, false,
+            Backend.LUAJIT, null,
             List.of(srcRoot.toAbsolutePath()),
-            Path.of("").toAbsolutePath());
+            Path.of("").toAbsolutePath(), null,
+            ConformanceHarnessMetadata.invocation(
+                deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32));
         boolean ok = orchestrator.compile();
         assertFalse("the mutation control must fail compilation: "
             + orchestrator.diagnostics(), ok);

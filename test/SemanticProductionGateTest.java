@@ -120,12 +120,30 @@ public class SemanticProductionGateTest {
     }
 
     /** The production compilation path of the gate (E10): ProjectLocator +
-     * the context-taking orchestrator constructor with the promoted
-     * release registry — the same surface the CLI uses. */
+     * the context-taking orchestrator constructor with the release-owned
+     * record — the same surface the CLI uses. */
     private static CompilationOrchestrator compileProject(Path project,
                                                           String entry,
                                                           String output)
             throws IOException {
+        CompilationOrchestrator orchestrator =
+            compileProjectAllowingFailure(project, entry, output);
+        if (orchestrator.diagnostics().stream()
+                .anyMatch(d -> "error".equals(d.severity()))) {
+            throw new IllegalStateException("compile failed: "
+                + orchestrator.diagnostics());
+        }
+        return orchestrator;
+    }
+
+    /**
+     * One release-owned production compile that returns the orchestrator
+     * even when the compile fails (the retargeted production-invocation
+     * pins: the project-artifact outcome for a covered fixture, the named
+     * fail-closed outcome otherwise; ISSUE-0643 P10 item 1).
+     */
+    private static CompilationOrchestrator compileProjectAllowingFailure(
+            Path project, String entry, String output) throws IOException {
         Path entryFile = project.resolve(entry).toAbsolutePath().normalize();
         ProjectLocator.LocateResult located = ProjectLocator.locate(
             entryFile.toString(), new CliOverrides(null, null));
@@ -138,12 +156,59 @@ public class SemanticProductionGateTest {
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
             located.context(), entryFile, false, false, false, false, null,
             invocation);
+        orchestrator.compile();
+        return orchestrator;
+    }
+
+    /**
+     * One harness-invocation compile of the same fixture (ISSUE-0643 P10
+     * item 3): the retained-subject sections keep their route-plan,
+     * bytes-exception, and per-module artifact assertions through the
+     * harness arm, while the release-owned record's outcome is asserted
+     * separately.
+     */
+    private static CompilationOrchestrator compileHarnessProject(Path project,
+                                                                 String entry,
+                                                                 String output)
+            throws IOException {
+        Path entryFile = project.resolve(entry).toAbsolutePath().normalize();
+        ProjectLocator.LocateResult located = ProjectLocator.locate(
+            entryFile.toString(), new CliOverrides(null, null));
+        if (located.context() == null) {
+            throw new IllegalStateException("locate failed: " + located);
+        }
+        CompilerInvocation invocation = ConformanceHarnessMetadata.invocation(
+            deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32);
+        CompilationOrchestrator orchestrator = new CompilationOrchestrator(
+            located.context(), entryFile, false, false, false, false, null,
+            invocation);
         boolean success = orchestrator.compile();
         if (!success) {
-            throw new IllegalStateException("compile failed: "
+            throw new IllegalStateException("harness compile failed: "
                 + orchestrator.diagnostics());
         }
         return orchestrator;
+    }
+
+    /**
+     * The production-invocation fail-closed assertion of one fixture whose
+     * construct is owned by a later slice (ISSUE-0643 P10 item 2): the
+     * release-owned compile fails with E6005 SHARED_EMITTER_COVERAGE or the
+     * named construct rule and stages no artifact.
+     */
+    private static void checkProductionFailClosed(Path project, String entry,
+            String output, String expectedRule, String context)
+            throws IOException {
+        CompilationOrchestrator production =
+            compileProjectAllowingFailure(project, entry, output);
+        check(production.diagnostics().stream().anyMatch(d ->
+                "E6005".equals(d.code())
+                    && d.message().contains(expectedRule)),
+            context + ": the release-owned production invocation fails closed "
+                + "with E6005 " + expectedRule + ": "
+                + production.diagnostics());
+        check(!Files.exists(project.resolve(output)),
+            context + ": the production failure stages no artifact");
     }
 
     private static void testEmitterSeam() {
@@ -243,11 +308,10 @@ public class SemanticProductionGateTest {
                 "one semantic/zero retained artifacts: semantic="
                     + orchestrator.semanticEmissionCount() + " retained="
                     + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-flip plan routes the single module SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
 
             Path out = project.resolve("out");
             check(Files.isRegularFile(out.resolve("main.lua")),
@@ -368,11 +432,10 @@ public class SemanticProductionGateTest {
                 "the table-member-read module emits one semantic/zero retained "
                     + "artifacts: semantic=" + orchestrator.semanticEmissionCount()
                     + " retained=" + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-flip plan routes the table-member-read module SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             ProcessOutcome run = runProcess(project.resolve("out"),
                 List.of("luajit", "main.lua"));
             check(run.exitCode() == 0 && run.output().isEmpty(),
@@ -414,7 +477,8 @@ public class SemanticProductionGateTest {
     }
 
     private static void testRouteSelectionWithoutFallback() throws Exception {
-        System.out.println("-- Route selection: multi-module LEGACY, dual-shape LEGACY, no fallback --");
+        System.out.println("-- Route selection: the production project emission and the "
+            + "retained harness route --");
 
         Path project = Files.createTempDirectory("deal-e10-routes-");
         try {
@@ -425,8 +489,18 @@ public class SemanticProductionGateTest {
                 "import * as lib from \"./lib\"\n\n"
                     + "export function probe(): int {\n  return lib.value()\n}\n\n"
                     + "export function main(): null {\n  return null\n}\n");
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the cross-module-call closure closed with
+            // E6005 SHARED_EMITTER_COVERAGE (the realization belongs to the
+            // calls child) and stages nothing.
+            checkProductionFailClosed(project, "src/main.deal", "out",
+                "SHARED_EMITTER_COVERAGE", "the multi-module cross-module call");
+
+            // The retained all-LEGACY multi-module route stays the harness
+            // subject: zero semantic/two retained artifacts, an all-LEGACY
+            // plan, and the retained artifact set runs.
             CompilationOrchestrator orchestrator =
-                compileProject(project, "src/main.deal", "out");
+                compileHarnessProject(project, "src/main.deal", "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 2,
                 "the multi-module graph emits zero semantic/two retained artifacts: "
@@ -451,19 +525,14 @@ public class SemanticProductionGateTest {
                     "export function add(x: int, y: int): int {\n  return x + y\n}\n\n"
                         + "export function main(): null {\n  add(2, 3)\n"
                         + "  return null\n}\n");
-                CompilationOrchestrator dual =
-                    compileProject(dualProject, "src/main.deal", "out");
-                check(dual.semanticEmissionCount() == 0
-                        && dual.retainedEmissionCount() == 1,
-                    "the dual-shape module emits zero semantic/one retained artifact: "
-                        + "semantic=" + dual.semanticEmissionCount()
-                        + " retained=" + dual.retainedEmissionCount());
-                RoutePlanResult dualPlan = dual.routePlan();
-                check(dualPlan != null && !dualPlan.hasErrors()
-                        && dualPlan.plan() != null
-                        && dualPlan.plan().entries().values().stream()
-                            .allMatch(route -> route == ModuleRoute.LEGACY),
-                    "the dual-shape plan is LEGACY at plan time");
+                // ISSUE-0643 P10 item 2: the dual-shape module (an
+                // exported function called from source) is a later-slice
+                // shape — the statically-resolved slice admits exactly one
+                // invocation shape per function — so the release-owned
+                // production invocation fails it closed with
+                // CONSTRUCT_UNLOWERED and stages nothing.
+                checkProductionFailClosed(dualProject, "src/main.deal",
+                    "out", "CONSTRUCT_UNLOWERED", "the dual-shape module");
             } finally {
                 deleteRecursively(dualProject);
             }
@@ -547,8 +616,41 @@ public class SemanticProductionGateTest {
             try {
                 write(project, "deal.json", DEAL_JSON_LUA);
                 write(project, "src/main.deal", fixture.getValue());
+                // ISSUE-0643 P10 item 2: the release-owned production
+                // invocation's outcome for this fixture — the named
+                // fail-closed rule for a later-slice construct, or the one
+                // project artifact for the stored-closure shapes the
+                // production lowering covers.
+                if (fixture.getKey().startsWith("stored-closure")) {
+                    CompilationOrchestrator production =
+                        compileProject(project, "src/main.deal", "out");
+                    check(production.semanticEmissionCount() == 1
+                            && production.retainedEmissionCount() == 0,
+                        fixture.getKey() + ": the production arm emits one project "
+                            + "artifact: semantic="
+                            + production.semanticEmissionCount() + " retained="
+                            + production.retainedEmissionCount());
+                    check(production.routePlan() == null,
+                        fixture.getKey() + ": the production arm consults no "
+                            + "route plan");
+                    Path productionOut = project.resolve("out");
+                    ProcessOutcome productionRun = runProcess(productionOut,
+                        List.of("luajit", "main.lua"));
+                    check(productionRun.exitCode() == 0,
+                        fixture.getKey() + ": the production project artifact "
+                            + "runs: exit=" + productionRun.exitCode()
+                            + " output="
+                            + productionRun.output().replace("\n", "\\n"));
+                } else {
+                    String expectedRule = fixture.getKey()
+                        .equals("closure-capture")
+                            ? "CONSTRUCTION_COHERENCE" : "CONSTRUCT_UNLOWERED";
+                    checkProductionFailClosed(project, "src/main.deal", "out",
+                        expectedRule, fixture.getKey());
+                }
+                // The retained plan-time route stays the harness subject.
                 CompilationOrchestrator orchestrator =
-                    compileProject(project, "src/main.deal", "out");
+                    compileHarnessProject(project, "src/main.deal", "out");
                 check(orchestrator.semanticEmissionCount() == 0
                         && orchestrator.retainedEmissionCount() == 1,
                     fixture.getKey() + ": the module reroutes LEGACY at plan time: "
@@ -573,19 +675,25 @@ public class SemanticProductionGateTest {
     }
 
     private static void testBytesBearingRetainedRoute() throws Exception {
-        System.out.println("-- Rule 2b (ISSUE-0574): bytes-bearing projects stay on "
-            + "the retained route on both targets --");
+        System.out.println("-- Rule 2b (ISSUE-0574): the bytes-bearing route stays "
+            + "the harness subject; the release-owned invocation fails the bytes "
+            + "construct closed --");
 
-        // LuaJIT: the production PUBLIC_BUILD + V1_2_ACTIVE compile keeps
-        // the bytes-bearing module on plan-time LEGACY — zero semantic
-        // artifacts, one retained artifact, the recorded bytes exception,
-        // and the retained artifact running exactly as before (no E6005).
+        // LuaJIT: the release-owned production invocation fails the
+        // bytes-bearing module closed with its named construct rule and
+        // stages nothing (the bytes realization belongs to the bytes
+        // child); the harness invocation keeps the retained route report
+        // (all-LEGACY, the recorded bytes exception, the bytesBearing
+        // manifest row, and the retained artifact running as before).
         Path luaProject = Files.createTempDirectory("deal-e10-bytes-lua-");
         try {
             write(luaProject, "deal.json", DEAL_JSON_LUA);
             write(luaProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(luaProject, "src/main.deal", "out",
+                "CONSTRUCT_UNLOWERED", "the bytes-bearing LuaJIT module");
+
             CompilationOrchestrator orchestrator =
-                compileProject(luaProject, "src/main.deal", "out");
+                compileHarnessProject(luaProject, "src/main.deal", "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing LuaJIT module emits zero semantic/one retained "
@@ -608,7 +716,7 @@ public class SemanticProductionGateTest {
                         + "bytesExceptions key");
             }
             check(orchestrator.diagnostics().isEmpty(),
-                "no E6005 (rule 2b is never an error): "
+                "no E6005 under the harness arm (rule 2b is never an error): "
                     + orchestrator.diagnostics());
             RequirementManifestResult manifests =
                 orchestrator.requirementManifests();
@@ -628,15 +736,19 @@ public class SemanticProductionGateTest {
             deleteRecursively(luaProject);
         }
 
-        // JVM: the same production compile keeps the bytes-bearing module
-        // on the retained route; the retained artifact compiles under
-        // javac --release 25 -proc:none and runs under java as before.
+        // JVM: the same split — the release-owned production invocation
+        // fails the bytes construct closed, while the harness artifact
+        // compiles under javac --release 25 -proc:none and runs under java
+        // as before.
         Path jvmProject = Files.createTempDirectory("deal-e10-bytes-jvm-");
         try {
             write(jvmProject, "deal.json", DEAL_JSON_JVM);
             write(jvmProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(jvmProject, "src/main.deal", "out",
+                "CONSTRUCT_UNLOWERED", "the bytes-bearing JVM module");
+
             CompilationOrchestrator orchestrator =
-                compileProject(jvmProject, "src/main.deal", "out");
+                compileHarnessProject(jvmProject, "src/main.deal", "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing JVM module emits zero semantic/one retained "
@@ -730,11 +842,10 @@ public class SemanticProductionGateTest {
                 "the optional-read LuaJIT module emits one semantic/zero retained "
                     + "artifact: semantic=" + orchestrator.semanticEmissionCount()
                     + " retained=" + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-promotion plan routes the optional-read module SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             ProcessOutcome run = runProcess(luaProject.resolve("out"),
                 List.of("luajit", "main.lua"));
             check(run.exitCode() == 0 && run.output().isEmpty(),
@@ -979,12 +1090,10 @@ public class SemanticProductionGateTest {
                     + "retained artifact: semantic="
                     + orchestrator.semanticEmissionCount() + " retained="
                     + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-promotion plan routes the descriptor-boundary module "
-                    + "SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             Path out = luaProject.resolve("out");
             check(Files.readString(out.resolve("main.lua"))
                     .contains("__bcheck"),
@@ -1109,8 +1218,12 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(bytesProject, "src/main.deal",
+                "out", "CONSTRUCT_UNLOWERED",
+                "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
-                compileProject(bytesProject, "src/main.deal", "out");
+                compileHarnessProject(bytesProject, "src/main.deal",
+                    "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing module still emits zero semantic/one retained "
@@ -1348,12 +1461,10 @@ public class SemanticProductionGateTest {
                     + "retained artifact: semantic="
                     + orchestrator.semanticEmissionCount() + " retained="
                     + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-promotion plan routes the boundary-exercising "
-                    + "module SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             Path out = luaProject.resolve("out");
             check(Files.readString(out.resolve("main.lua"))
                     .contains("__bcheck"),
@@ -1480,8 +1591,12 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(bytesProject, "src/main.deal",
+                "out", "CONSTRUCT_UNLOWERED",
+                "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
-                compileProject(bytesProject, "src/main.deal", "out");
+                compileHarnessProject(bytesProject, "src/main.deal",
+                    "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing module still emits zero semantic/one retained "
@@ -1764,12 +1879,10 @@ public class SemanticProductionGateTest {
                     + "retained artifact: semantic="
                     + orchestrator.semanticEmissionCount() + " retained="
                     + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-promotion plan routes the branch/loop/discard module "
-                    + "SHARED");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             ProcessOutcome run = runProcess(luaProject.resolve("out"),
                 List.of("luajit", "main.lua"));
             check(run.exitCode() == 0 && run.output().isEmpty(),
@@ -1955,8 +2068,12 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(bytesProject, "src/main.deal",
+                "out", "CONSTRUCT_UNLOWERED",
+                "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
-                compileProject(bytesProject, "src/main.deal", "out");
+                compileHarnessProject(bytesProject, "src/main.deal",
+                    "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing module still emits zero semantic/one retained "
@@ -2244,12 +2361,10 @@ public class SemanticProductionGateTest {
                     + "retained artifact: semantic="
                     + orchestrator.semanticEmissionCount() + " retained="
                     + orchestrator.retainedEmissionCount());
-            RoutePlanResult plan = orchestrator.routePlan();
-            check(plan != null && !plan.hasErrors() && plan.plan() != null
-                    && plan.plan().entries().values().stream()
-                        .allMatch(route -> route == ModuleRoute.SHARED),
-                "the post-promotion plan routes the recursive-group module "
-                    + "SHARED (rule 4: every claim promoted)");
+            check(orchestrator.routePlan() == null,
+                "the release-owned production invocation computes and"
+                    + " consults no route plan (ISSUE-0643 P4: phase 3.7"
+                    + " stays skipped)");
             Path out = luaProject.resolve("out");
             check(Files.readString(out.resolve("main.lua"))
                     .contains("CLOSURE_NEW"),
@@ -2386,8 +2501,12 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
+            checkProductionFailClosed(bytesProject, "src/main.deal",
+                "out", "CONSTRUCT_UNLOWERED",
+                "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
-                compileProject(bytesProject, "src/main.deal", "out");
+                compileHarnessProject(bytesProject, "src/main.deal",
+                    "out");
             check(orchestrator.semanticEmissionCount() == 0
                     && orchestrator.retainedEmissionCount() == 1,
                 "the bytes-bearing module still emits zero semantic/one retained "

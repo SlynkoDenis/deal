@@ -371,4 +371,26 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # inputs are gathered through a harness-invocation compile (P10 item 3)
   # and the unit is driven with the release-owned production invocation.
   'fg|=== Running Production Project Emission Tests (ISSUE-0642) ===|java -ea -cp build deal.test.ProductionProjectEmissionTest'
+  # ISSUE-0643 registration: the phase-4 production dispatch and the
+  # atomic cutover acceptance tests
+  # (production-project-emission-and-atomic-cutover P4/P6/P7/P8/P10/P11
+  # and the production-arm, source-map, zero-retained-reachability,
+  # publication, and fail-closed producer-guard contracts;
+  # luajit-jvm-single-lowering-production-cutover C3/C5/C7/C8;
+  # conformance-lane-production-cutover L1/L4): the record-identity
+  # production-invocation predicate (the release-owned record against
+  # COMMON_SHADOW, LEGACY_REGRESSION, and the two test-only PUBLIC_BUILD
+  # record families), the LuaJIT and JVM production compiles' one project
+  # artifact with semanticEmissionCount()==1, retainedEmissionCount()==0,
+  # routePlan()==null, empty jvmGeneratedResults(), no per-module
+  # siblings, byte-identical repeats and real-toolchain execution, the
+  # two-module realizable fixture with the executed per-module export
+  # surfaces and the one-main probe, the conversion-overflow terminal,
+  # the atomic-failure preservation of the previous artifact set, the
+  # fail-closed families (HOST import, cross-module async, cross-module
+  # sync, bytes, builtin Error construction, time.nowMillis,
+  # function-typed materialization, extern-C on LuaJIT with the JVM E6006
+  # preserved), the accepted same-module async closure, the C9 source-map
+  # disposition, and the harness-arm dispatch rows.
+  'fg|=== Running Production Dispatch and Cutover Acceptance Tests (ISSUE-0643) ===|java -ea -cp build deal.test.ProductionDispatchTest'
 )

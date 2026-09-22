@@ -20,6 +20,7 @@ import deal.checker.NameResolver;
 import deal.checker.Symbol;
 import deal.checker.SymbolTable;
 import deal.checker.TypeChecker;
+import deal.codegen.Backend;
 import deal.diagnostics.CompilerDiagnostic;
 import deal.diagnostics.DiagnosticCode;
 import deal.ir.IrDumper;
@@ -252,9 +253,17 @@ public class CheckedProjectBuilderTest {
             Path entry = strippedDir.resolve("declaration-only-import-compile.deal");
             Path output = tmp.resolve("build");
 
+            // ISSUE-0643 P10 item 3: the fixture imports a declaration-only
+            // host module (a HOST-kind MODULE_IMPORT), so the in-process
+            // compile resolves the harness invocation and keeps the
+            // harness arm — the builder facts below are arm-independent.
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entry, output, false, null, List.of(strippedDir),
-                Path.of("std").toAbsolutePath().normalize());
+                entry, output, false, false, false, false, Backend.LUAJIT,
+                null, List.of(strippedDir),
+                Path.of("std").toAbsolutePath().normalize(), null,
+                CompilerProfileProvider.resolveCommonShadow(
+                    deal.semantic.ir.SemanticProfile.DEAL_V1_2_INT32,
+                    ReleaseState.V1_2_ACTIVE, CapabilityRegistry.releaseRegistry()));
             boolean ok = orchestrator.compile();
             check(ok, "declaration-only-import-compile.deal compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());

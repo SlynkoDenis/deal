@@ -32,6 +32,7 @@ import deal.semantic.ir.ReleaseState;
 import deal.semantic.ir.ResolvedImport;
 import deal.semantic.ir.SemanticCapability;
 import deal.semantic.ir.SemanticProfile;
+import deal.test.ConformanceHarnessMetadata;
 import deal.types.Type;
 import deal.types.Types;
 
@@ -1207,10 +1208,19 @@ public class MigrationPlannerTest {
                   return null
                 }
                 """);
+            // ISSUE-0643 P10 item 3: the wrapper scenario carries
+            // later-slice constructs (time.nowMillis, function-typed
+            // values), so the suite's orchestrator compile — whose subject
+            // is the route plan — resolves the harness invocation and
+            // keeps the harness arm. The production arm's routing-free
+            // outcome is asserted separately below.
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
                 src.resolve("main.deal").toAbsolutePath(), tmp.resolve("build"), false,
-                null, List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+                false, false, false, deal.codegen.Backend.LUAJIT, null,
+                List.of(src.toAbsolutePath()),
+                Path.of("std").toAbsolutePath().normalize(), null,
+                ConformanceHarnessMetadata.invocation(
+                    SemanticProfile.DEAL_V1_2_INT32));
             boolean ok = orchestrator.compile();
             check(ok, "the wrapper scenario compiles end to end: "
                 + orchestrator.diagnostics());
@@ -1226,11 +1236,11 @@ public class MigrationPlannerTest {
             check(plan.plan().entries().size() == 2
                     && plan.plan().entries().values().stream()
                         .allMatch(route -> route == ModuleRoute.LEGACY),
-                "PUBLIC_BUILD+PRE_ACTIVATION routes every implementation module "
-                    + "LEGACY (the propagated conflict and rule 3 alike)");
+                "the harness invocation routes every implementation module "
+                    + "LEGACY (the propagated conflict and the purpose rule alike)");
             check(plan.plan().shadowModules().isEmpty()
                     && plan.plan().abiEdges().isEmpty(),
-                "the public plan carries no shadow entries and no ABI records");
+                "the harness plan carries no shadow entries and no ABI records");
             check(orchestrator.checkedProject().index().modules().keySet().stream()
                     .anyMatch(m -> m.path().equals("std.time")),
                 "the index covers the std/time STDLIB declaration entry");
@@ -1242,9 +1252,12 @@ public class MigrationPlannerTest {
             // Determinism across two identical orchestrator compiles.
             Path secondOut = tmp.resolve("build2");
             CompilationOrchestrator second = new CompilationOrchestrator(
-                src.resolve("main.deal").toAbsolutePath(), secondOut, false, null,
+                src.resolve("main.deal").toAbsolutePath(), secondOut, false,
+                false, false, false, deal.codegen.Backend.LUAJIT, null,
                 List.of(src.toAbsolutePath()),
-                Path.of("std").toAbsolutePath().normalize());
+                Path.of("std").toAbsolutePath().normalize(), null,
+                ConformanceHarnessMetadata.invocation(
+                    SemanticProfile.DEAL_V1_2_INT32));
             boolean secondOk = second.compile();
             check(secondOk, "the second compile succeeds: " + second.diagnostics());
             RoutePlanResult secondPlan = second.routePlan();
@@ -1258,6 +1271,33 @@ public class MigrationPlannerTest {
             check(orchestrator.checkedProject().index().interfaceIndexDigest()
                     .equals(second.checkedProject().index().interfaceIndexDigest()),
                 "the interface index digest is stable across compiles");
+
+            // ISSUE-0643 P4: the release-owned production invocation runs
+            // the production arm — it computes and consults no route plan
+            // (phase 3.7 stays skipped, the route-plan view stays null) and
+            // fails the wrapper fixture closed at lowering (a later-slice
+            // construct); the harness plan above is the retained route
+            // subject.
+            CompilationOrchestrator production = new CompilationOrchestrator(
+                src.resolve("main.deal").toAbsolutePath(),
+                tmp.resolve("build-production"), false, false, false, false,
+                deal.codegen.Backend.LUAJIT, null,
+                List.of(src.toAbsolutePath()),
+                Path.of("std").toAbsolutePath().normalize(), null,
+                CompilerProfileProvider.resolve(
+                    ReleaseConfiguration.CURRENT_RELEASE_STATE,
+                    ReleaseConfiguration.releaseCapabilityRegistry()));
+            boolean productionOk = production.compile();
+            check(!productionOk,
+                "the release-owned production invocation fails the "
+                    + "later-slice fixture closed");
+            check(production.routePlan() == null,
+                "the production arm computes and consults no route plan");
+            check(production.diagnostics().stream()
+                    .anyMatch(d -> "E6005".equals(d.code())
+                        && d.message().contains("CONSTRUCT_UNLOWERED")),
+                "the production failure names the construct rule: "
+                    + production.diagnostics());
         } finally {
             deleteRecursively(tmp);
         }

@@ -34,6 +34,7 @@ import deal.semantic.CapabilityRegistry;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
 import deal.semantic.ModuleRoute;
+import deal.semantic.ReleaseConfiguration;
 import deal.semantic.RoutePlanResult;
 import deal.semantic.ir.InvocationPurpose;
 import deal.semantic.ir.ReleaseState;
@@ -317,6 +318,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class JvmBackendTest {
 
     private static final int DEFAULT_JOBS = 1;
+
+    /**
+     * The harness invocation of the retained-subject compiles (ISSUE-0643
+     * P10 item 3): COMMON_SHADOW / DEAL_V1_2_INT32, never the release-owned
+     * production record, so the retained per-module JVM artifact assertions
+     * stay green; the production-invocation pins keep the release-owned
+     * record and assert the project-artifact outcome.
+     */
+    private static CompilerInvocation harnessInvocation() {
+        return ConformanceHarnessMetadata.invocation(
+            SemanticProfile.DEAL_V1_2_INT32);
+    }
 
     private static final AtomicInteger passed = new AtomicInteger();
     private static final AtomicInteger failed = new AtomicInteger();
@@ -3646,9 +3659,18 @@ public class JvmBackendTest {
         Path outputDir = tmpDir.get().resolve("build/refof");
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots,
-            Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success = orchestrator.compile();
         check(success, "for-of over function/nested arrays compiles through "
             + "the orchestrator: " + orchestrator.diagnostics());
@@ -3687,9 +3709,18 @@ public class JvmBackendTest {
         Path bytesOut = tmpDir.get().resolve("build/refof_bytes");
         List<Path> roots2 = List.of(tmpDir.get().resolve("src2").toAbsolutePath());
         CompilationOrchestrator bytesOrchestrator = new CompilationOrchestrator(
-            bytesEntry, bytesOut, false, false, false, Backend.JVM,
-            null, roots2,
-            Path.of(".").toAbsolutePath().normalize());
+            bytesEntry,
+            bytesOut,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots2,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean bytesSuccess = bytesOrchestrator.compile();
         check(bytesSuccess,
             "the bytes-signature for-of compiles through the orchestrator: "
@@ -3726,9 +3757,18 @@ public class JvmBackendTest {
         Path tableOut = tmpDir.get().resolve("build/refof_table");
         List<Path> roots3 = List.of(tmpDir.get().resolve("src3").toAbsolutePath());
         CompilationOrchestrator tableOrchestrator = new CompilationOrchestrator(
-            tableEntry, tableOut, false, false, false, Backend.JVM,
-            null, roots3,
-            Path.of(".").toAbsolutePath().normalize());
+            tableEntry,
+            tableOut,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots3,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean tableSuccess = tableOrchestrator.compile();
         check(!tableSuccess,
             "the table-signature for-of fails the orchestrator: "
@@ -3940,9 +3980,18 @@ public class JvmBackendTest {
         List<Path> catchRoots =
             List.of(tmpDir.get().resolve("src").toAbsolutePath());
         CompilationOrchestrator catchOrchestrator = new CompilationOrchestrator(
-            catchEntry, catchOut, false, false, false, Backend.JVM,
-            null, catchRoots,
-            Path.of(".").toAbsolutePath().normalize());
+            catchEntry,
+            catchOut,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            catchRoots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean catchSuccess = catchOrchestrator.compile();
         check(catchSuccess,
             "captured catch-variable program compiles through the "
@@ -6538,8 +6587,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success = orchestrator.compile();
         check(success, "shared-carrier identity project compiles: "
             + orchestrator.diagnostics());
@@ -6626,8 +6685,18 @@ public class JvmBackendTest {
         check(Files.exists(tmpDir.get().resolve("bindings/cfg.d.deal")),
             "deal.json externals bind the host declaration");
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputRoot, false, false, false, Backend.JVM,
-            externals, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputRoot,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            externals,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean ok = orchestrator.compile();
         check(ok, "the host-class project compiles (the synthesized "
             + "records replace the retired import-time E6000): "
@@ -6731,8 +6800,18 @@ public class JvmBackendTest {
             "host/other",
             tmpDir.get().resolve("bindings/other.d.deal").toString());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputRoot, false, false, false, Backend.JVM,
-            externals, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputRoot,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            externals,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean ok = orchestrator.compile();
         check(ok, "the class-array host export shapes compile (the "
             + "import-time E6000 is gone): " + orchestrator.diagnostics());
@@ -6910,8 +6989,18 @@ public class JvmBackendTest {
         Map<String, String> externals2 = Map.of("host/cfg",
             tmpDir.get().resolve("bindings/cfg.d.deal").toString());
         CompilationOrchestrator orchestrator2 = new CompilationOrchestrator(
-            entryFile, outputRoot2, false, false, false, Backend.JVM,
-            externals2, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputRoot2,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            externals2,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean ok2 = orchestrator2.compile();
         check(ok2, "a class-array host-class FIELD stays supported (the "
             + "record storage maps onto the $HostArr$ carrier): "
@@ -6980,8 +7069,18 @@ public class JvmBackendTest {
         // compilation-wide class-declaration identity surface.
         Path outputDir1 = tmpDir.get().resolve("build/indirect_class_shape");
         CompilationOrchestrator orchestrator1 = new CompilationOrchestrator(
-            entryFile, outputDir1, false, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir1,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean ok1 = orchestrator1.compile();
         check(ok1, "indirect qualified-class project compiles (entry "
             + "imports only lib): " + orchestrator1.diagnostics());
@@ -7026,8 +7125,18 @@ public class JvmBackendTest {
             """);
         Path outputDir2 = tmpDir.get().resolve("build/direct_class_shape");
         CompilationOrchestrator orchestrator2 = new CompilationOrchestrator(
-            entryFile, outputDir2, false, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir2,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean ok2 = orchestrator2.compile();
         check(ok2, "direct-import qualified-class project compiles (entry "
             + "imports lib and util): " + orchestrator2.diagnostics());
@@ -7114,8 +7223,18 @@ public class JvmBackendTest {
             List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
             CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-                entryFile, outputDir, false, false, false, Backend.JVM,
-                null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
             boolean success = orchestrator.compile();
             check(success, "cross-module function-value case '" + c.what()
@@ -8649,14 +8768,13 @@ public class JvmBackendTest {
                     + "the real stored int32 mode");
         }
 
-        // The default orchestrator invocation is now the committed
-        // V1_2_ACTIVE public build: it plumbs the int32 mode. The
-        // ISSUE-0239 E10 plan-time arm reroutes the dual-shape
-        // fixture (an exported function called from source) LEGACY,
-        // so the retained backend still emits it and the recorded
-        // result proves the plumb end to end; the explicit
-        // PRE_ACTIVATION invocation keeps the legacy mode for the
-        // negative-control comparison (the internal matrix row).
+        // ISSUE-0643 P4/P10: the default orchestrator invocation is the
+        // release-owned production invocation — it runs the production arm
+        // (no route plan, no per-module backend results), so the dual-shape
+        // fixture (an exported function called from source) fails closed
+        // with E6005 CONSTRUCT_UNLOWERED; the harness invocation of the
+        // same fixture keeps the int32-plumb evidence through the retained
+        // per-module backend.
         writeFile("src/plumb_dual.deal",
             "export function run(): int { return 41 + 1; }\n"
                 + "export function main(): null { run() return null; }\n");
@@ -8667,20 +8785,36 @@ public class JvmBackendTest {
                 dualEntryFile, outputRoot, false, false, false, Backend.JVM,
                 null, roots, Path.of(".").toAbsolutePath().normalize());
         boolean defaultOk = defaultOrchestrator.compile();
-        check(defaultOk, "default orchestrator compile succeeds: "
-            + defaultOrchestrator.diagnostics());
+        check(!defaultOk,
+            "the release-owned production invocation fails the dual-shape "
+                + "fixture closed");
         check(defaultOrchestrator.invocation().semanticProfile()
                 == SemanticProfile.DEAL_V1_2_INT32,
             "the orchestrator default invocation derives DEAL_V1_2_INT32 "
                 + "under the committed V1_2_ACTIVE release state");
-        if (defaultOk) {
+        check(defaultOrchestrator.routePlan() == null
+                && defaultOrchestrator.jvmGeneratedResults().isEmpty(),
+            "the production arm consults no route plan and populates no "
+                + "per-module backend results");
+        check(defaultOrchestrator.diagnostics().stream().anyMatch(d ->
+                "E6005".equals(d.code())
+                    && d.message().contains("CONSTRUCT_UNLOWERED")),
+            "the default production failure names the construct rule: "
+                + defaultOrchestrator.diagnostics());
+        CompilationOrchestrator defaultHarness = new CompilationOrchestrator(
+            dualEntryFile, outputRoot, false, false, false, false, Backend.JVM,
+            null, roots, Path.of(".").toAbsolutePath().normalize(), null,
+            harnessInvocation());
+        boolean defaultHarnessOk = defaultHarness.compile();
+        check(defaultHarnessOk, "the harness invocation of the dual-shape "
+            + "fixture compiles: " + defaultHarness.diagnostics());
+        if (defaultHarnessOk) {
             JvmBackend.JvmCodegenResult plumbed =
-                defaultOrchestrator.jvmGeneratedResults()
+                defaultHarness.jvmGeneratedResults()
                     .get(dualEntryFile.toString());
             check(plumbed != null && plumbed.int32Mode(),
-                "the default invocation plumbs the int32 mode into the "
-                    + "backend post-flip (the dual-shape module reroutes "
-                    + "LEGACY at plan time under the ISSUE-0239 arm)");
+                "the harness invocation plumbs the DEAL_V1_2_INT32 mode into "
+                    + "the retained backend");
         }
 
         CompilationOrchestrator legacyOrchestrator =
@@ -8704,7 +8838,7 @@ public class JvmBackendTest {
                 "the explicit legacy invocation plumbs the LEGACY int mode "
                     + "into the backend");
         }
-        if (defaultOk && legacyOk) {
+        if (int32Ok && legacyOk) {
             String int32Source = int32Orchestrator.jvmGeneratedResults()
                 .get(entryFile.toString()).source();
             String legacySource = legacyOrchestrator.jvmGeneratedResults()
@@ -12116,10 +12250,22 @@ public class JvmBackendTest {
         Path outputDir = tmpDir.get().resolve("build/default_lua");
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
-        // The pre-ISSUE-0091 constructor (no backend parameter).
+        // The pre-ISSUE-0091 constructor (no backend parameter; the
+        // default backend stays LuaJIT). The harness invocation keeps the
+        // retained per-module LuaJIT artifact the assertions below pin.
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, null, roots,
-            Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.LUAJIT,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "default (LuaJIT) compile succeeds");
@@ -12153,8 +12299,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "JVM backend rejects function-typed class fields");
@@ -12178,9 +12334,18 @@ public class JvmBackendTest {
         Path optionalOut = tmpDir.get().resolve("build/optional_supported");
         CompilationOrchestrator optionalOrchestrator =
             new CompilationOrchestrator(
-                optionalEntry, optionalOut, false, false, false,
-                Backend.JVM, null, roots,
-                Path.of(".").toAbsolutePath().normalize());
+            optionalEntry,
+            optionalOut,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean optionalSuccess = optionalOrchestrator.compile();
         check(optionalSuccess,
             "optional class fields compile through the orchestrator: "
@@ -13689,8 +13854,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "JVM backend supports imported-class values: "
@@ -13745,8 +13920,18 @@ public class JvmBackendTest {
         List<Path> roots2 = List.of(tmpDir.get().resolve("src2").toAbsolutePath());
 
         CompilationOrchestrator orchestrator2 = new CompilationOrchestrator(
-            entryFile2, outputDir2, false, false, false, Backend.JVM,
-            null, roots2, Path.of(".").toAbsolutePath().normalize());
+            entryFile2,
+            outputDir2,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots2,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success2 = orchestrator2.compile();
         check(success2, "a same-named local class stays distinct from the "
@@ -13789,8 +13974,18 @@ public class JvmBackendTest {
         List<Path> roots3 = List.of(tmpDir.get().resolve("src3").toAbsolutePath());
 
         CompilationOrchestrator orchestrator3 = new CompilationOrchestrator(
-            entryFile3, outputDir3, false, false, false, Backend.JVM,
-            null, roots3, Path.of(".").toAbsolutePath().normalize());
+            entryFile3,
+            outputDir3,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots3,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success3 = orchestrator3.compile();
         check(success3, "construction of an imported class type compiles: "
@@ -13834,8 +14029,18 @@ public class JvmBackendTest {
         List<Path> roots4 = List.of(tmpDir.get().resolve("src4").toAbsolutePath());
 
         CompilationOrchestrator orchestrator4 = new CompilationOrchestrator(
-            entryFile4, outputDir4, false, false, false, Backend.JVM,
-            null, roots4, Path.of(".").toAbsolutePath().normalize());
+            entryFile4,
+            outputDir4,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots4,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success4 = orchestrator4.compile();
         check(success4, "imported construction with literal defaults "
@@ -13910,9 +14115,17 @@ public class JvmBackendTest {
         // imports each entry needs).
         CompilationOrchestrator orchestrator5 = new CompilationOrchestrator(
             tmpDir.get().resolve("src5/entry.deal").toAbsolutePath(),
-            outputDir5, false, false, false, Backend.JVM,
-            null, List.of(tmpDir.get().resolve("src5").toAbsolutePath()),
-            Path.of(".").toAbsolutePath().normalize());
+            outputDir5,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            List.of(tmpDir.get().resolve("src5").toAbsolutePath()),
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success5 = orchestrator5.compile();
         check(success5, "cross-module nominal check success shape compiles: "
             + orchestrator5.diagnostics());
@@ -13933,9 +14146,17 @@ public class JvmBackendTest {
         Path outputDir6 = tmpDir.get().resolve("build/imported_nominal_fail");
         CompilationOrchestrator orchestrator6 = new CompilationOrchestrator(
             tmpDir.get().resolve("src5/entry_fail.deal").toAbsolutePath(),
-            outputDir6, false, false, false, Backend.JVM,
-            null, List.of(tmpDir.get().resolve("src5").toAbsolutePath()),
-            Path.of(".").toAbsolutePath().normalize());
+            outputDir6,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            List.of(tmpDir.get().resolve("src5").toAbsolutePath()),
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success6 = orchestrator6.compile();
         check(success6, "cross-module nominal check failure shape compiles: "
             + orchestrator6.diagnostics());
@@ -13976,8 +14197,18 @@ public class JvmBackendTest {
         List<Path> roots6 = List.of(tmpDir.get().resolve("src6").toAbsolutePath());
 
         CompilationOrchestrator orchestrator7 = new CompilationOrchestrator(
-            entryFile6, outputDir7, false, false, false, Backend.JVM,
-            null, roots6, Path.of(".").toAbsolutePath().normalize());
+            entryFile6,
+            outputDir7,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots6,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success7 = orchestrator7.compile();
         check(success7, "imported class value pass-through compiles: "
@@ -14873,9 +15104,19 @@ public class JvmBackendTest {
         List<Path> originsRoots = List.of(
             tmpDir.get().resolve("src").toAbsolutePath());
         CompilationOrchestrator originsOrchestrator =
-            new CompilationOrchestrator(originsEntry, originsOut, false,
-                false, false, Backend.JVM, null, originsRoots,
-                Path.of(".").toAbsolutePath().normalize());
+            new CompilationOrchestrator(
+            originsEntry,
+            originsOut,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            originsRoots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean originsOk = originsOrchestrator.compile();
         check(originsOk, "canonical-origins project compiles: "
             + originsOrchestrator.diagnostics());
@@ -15314,8 +15555,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "unused project-module import compiles: "
@@ -15519,8 +15770,18 @@ public class JvmBackendTest {
         Path outputDir = tmpDir.get().resolve("build/table_boundary");
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success = orchestrator.compile();
         check(success, "orchestrator JVM path compiles std/json imports: "
             + orchestrator.diagnostics());
@@ -15711,8 +15972,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "stdlib-importing project compiles through the "
@@ -15779,8 +16050,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "relative declaration-file import compiles as a "
@@ -15812,8 +16093,18 @@ public class JvmBackendTest {
             """);
         Path outputDir2 = tmpDir.get().resolve("build/import_decl_class");
         CompilationOrchestrator orchestrator2 = new CompilationOrchestrator(
-            entryFile, outputDir2, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir2,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
         boolean success2 = orchestrator2.compile();
         check(!success2, "a class in an unlisted declaration fails the JVM compile");
         check(orchestrator2.diagnostics().stream()
@@ -16543,8 +16834,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "multi-module JVM compile succeeds: "
@@ -16600,8 +16901,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "class-isolation project compiles: "
@@ -16659,8 +16970,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(success, "sibling-import project compiles: "
@@ -16836,8 +17157,18 @@ public class JvmBackendTest {
         List<Path> roots = List.of(tmpDir.get().resolve("src").toAbsolutePath());
 
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            entryFile, outputDir, false, false, false, Backend.JVM,
-            null, roots, Path.of(".").toAbsolutePath().normalize());
+            entryFile,
+            outputDir,
+            false,
+            false,
+            false,
+            false,
+            Backend.JVM,
+            null,
+            roots,
+            Path.of(".").toAbsolutePath().normalize(),
+            null,
+            harnessInvocation());
 
         boolean success = orchestrator.compile();
         check(!success, "class-name collision fails the JVM compile");
@@ -16867,8 +17198,9 @@ public class JvmBackendTest {
 
     /**
      * {@code --source-map} combined with {@code --backend jvm} produces no
-     * sidecars; the orchestrator must print a warning instead of silently
-     * ignoring the request (ISSUE-0091 rework round 3).
+     * sidecars; the release-owned production compile prints the pinned C9
+     * warning instead of silently ignoring the request (ISSUE-0091 rework
+     * round 3; the C9 disposition of ISSUE-0643).
      */
     private static void testOrchestratorJvmSourceMapWarning() throws Exception {
         System.out.println("-- Orchestrator: JVM path warns on --source-map --");
@@ -16896,11 +17228,12 @@ public class JvmBackendTest {
         }
         check(success, "JVM compile with --source-map succeeds");
         String warning = captured.toString(StandardCharsets.UTF_8);
-        check(warning.contains("source-map"),
-            "warning printed when --source-map is requested on the JVM path: "
-                + warning);
+        check((deal.module.ProductionProjectEmission.WARNING_JVM + "\n")
+                .equals(warning),
+            "the pinned C9 warning prints exactly once on the JVM production "
+                + "path: " + warning);
         check(Files.exists(outputDir.resolve("Sm_main.java")),
-            "the .java artifact is still written");
+            "the one project artifact is still written");
         try (var stream = Files.walk(outputDir)) {
             check(stream.noneMatch(p -> p.toString().endsWith(".deal.map.json")),
                 "no source-map sidecars under the JVM backend");
@@ -17181,11 +17514,44 @@ public class JvmBackendTest {
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-async-slice :: jvm-async-multi-module: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the cross-module async closure closed with
+            // E6005 SHARED_EMITTER_COVERAGE (EXTERNAL_ASYNC_CALL) and
+            // stages nothing (the per-module async-entry linkage is the
+            // calls child's).
+            CompilationOrchestrator irPinAsyncProduction =
+                new CompilationOrchestrator(
+                    irPinEntry, irPinRoot.resolve("out-production"), false,
+                    false, false, false, Backend.JVM, irPinExternals,
+                    List.of(irPinRoot), null, null,
+                    CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
+                        ReleaseConfiguration.releaseCapabilityRegistry()));
+            check(!irPinAsyncProduction.compile()
+                    && irPinAsyncProduction.diagnostics().stream().anyMatch(d ->
+                        "E6005".equals(d.code())
+                            && d.message().contains("EXTERNAL_ASYNC_CALL")),
+                "jvm-async-slice :: jvm-async-multi-module: the release-owned "
+                    + "production invocation fails the closure closed: "
+                    + irPinAsyncProduction.diagnostics());
+            check(!Files.exists(irPinRoot.resolve("out-production")),
+                "jvm-async-slice :: jvm-async-multi-module: the production "
+                    + "failure stages no artifact");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {
@@ -17296,11 +17662,43 @@ module @<PROJECT>/main.deal:1:1-7:2
             Map<String, String> irPinExternals = Map.of("host/log",
                 irPinRoot.resolve("bindings/log.d.deal").toString());
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-host-abi-slice :: jvm-host-export-presence: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the host-importing closure closed with
+            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
+            // stages nothing (the host load is the calls/FFI children's).
+            CompilationOrchestrator irPinHostProduction =
+                new CompilationOrchestrator(
+                    irPinEntry, irPinRoot.resolve("out-production"), false,
+                    false, false, false, Backend.JVM, irPinExternals,
+                    List.of(irPinRoot), null, null,
+                    CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
+                        ReleaseConfiguration.releaseCapabilityRegistry()));
+            check(!irPinHostProduction.compile()
+                    && irPinHostProduction.diagnostics().stream().anyMatch(d ->
+                        "E6005".equals(d.code())
+                            && d.message().contains("HOST_MODULE_IMPORT")),
+                "jvm-host-abi-slice :: jvm-host-export-presence: the "
+                    + "release-owned production invocation fails the closure "
+                    + "closed: " + irPinHostProduction.diagnostics());
+            check(!Files.exists(irPinRoot.resolve("out-production")),
+                "jvm-host-abi-slice :: jvm-host-export-presence: the "
+                    + "production failure stages no artifact");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {
@@ -17370,8 +17768,18 @@ module @<PROJECT>/entry.deal:1:1-6:53
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-integration-join :: jvm-join-xmod-class-descriptor: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -17465,8 +17873,18 @@ module @<PROJECT>/main.deal:1:1-8:1
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-integration-join :: jvm-join-xmod-table-read-desc: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -17558,8 +17976,18 @@ module @<PROJECT>/main.deal:1:1-8:1
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-integration-join :: jvm-join-xmod-mismatch-desc: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -17661,11 +18089,43 @@ module @<PROJECT>/modelb.deal:1:1-2:1
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-modules-slice :: jvm-mod-imported-direct-call: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
+
+            // ISSUE-0643 P10 item 2: the release-owned production
+            // invocation fails the cross-module-call closure closed with
+            // E6005 SHARED_EMITTER_COVERAGE and stages nothing (the
+            // cross-module call is the calls child's).
+            CompilationOrchestrator irPinCallProduction =
+                new CompilationOrchestrator(
+                    irPinEntry, irPinRoot.resolve("out-production"), false,
+                    false, false, false, Backend.JVM, irPinExternals,
+                    List.of(irPinRoot), null, null,
+                    CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
+                        ReleaseConfiguration.releaseCapabilityRegistry()));
+            check(!irPinCallProduction.compile()
+                    && irPinCallProduction.diagnostics().stream().anyMatch(d ->
+                        "E6005".equals(d.code())
+                            && d.message().contains("SHARED_EMITTER_COVERAGE")),
+                "jvm-modules-slice :: jvm-mod-imported-direct-call: the "
+                    + "release-owned production invocation fails the closure "
+                    + "closed: " + irPinCallProduction.diagnostics());
+            check(!Files.exists(irPinRoot.resolve("out-production")),
+                "jvm-modules-slice :: jvm-mod-imported-direct-call: the "
+                    + "production failure stages no artifact");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {
@@ -17740,8 +18200,18 @@ module @<PROJECT>/main.deal:1:1-4:53
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-class-export-import: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -17838,8 +18308,18 @@ module @<PROJECT>/main.deal:1:1-7:2
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-class-construction-defaults: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -17943,8 +18423,18 @@ module @<PROJECT>/main.deal:1:1-8:2
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-class-param-pass: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -18036,8 +18526,18 @@ module @<PROJECT>/main.deal:1:1-7:2
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-class-return-mutate-roundtrip: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -18143,8 +18643,18 @@ module @<PROJECT>/main.deal:1:1-8:2
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-same-name-isolation: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
@@ -18280,8 +18790,18 @@ module @<PROJECT>/modelb.deal:1:1-4:62
             Path irPinEntry = irPinRoot.resolve("main.deal");
             Path irPinOut = irPinRoot.resolve("out");
             CompilationOrchestrator irPinOrch = new CompilationOrchestrator(
-                irPinEntry, irPinOut, false, true, false, Backend.JVM,
-                irPinExternals, List.of(irPinRoot), null);
+            irPinEntry,
+            irPinOut,
+            false,
+            true,
+            false,
+            false,
+            Backend.JVM,
+            irPinExternals,
+            List.of(irPinRoot),
+            null,
+            null,
+            harnessInvocation());
             boolean irPinOk = irPinOrch.compile();
             check(irPinOk, "jvm-xmod-classes-slice :: jvm-xmod-class-param-return-local-fn: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
