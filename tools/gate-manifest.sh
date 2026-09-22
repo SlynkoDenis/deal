@@ -320,4 +320,21 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the repeated dealMain()/cross-chunk idempotence), and the
   # byte-identical repeated emission.
   'fg|=== Running Module Export Surface Tests (ISSUE-0639) ===|java -ea -cp build deal.test.ModuleExportSurfaceTest'
+  # ISSUE-0641 registration: the JVM production project entry
+  # (JvmSemanticEmitter.emitProductionProject) — one public final class
+  # with public static void main and the dealMain() drive carrying the
+  # whole closure, the trace protocol suppressed, the production
+  # DEAL_ERROR_CODE terminal, the one entry-module ENTRY_INVOKE
+  # delegation, and the per-module export-surface registry keyed by the
+  # module identity (production-project-emission-and-atomic-cutover
+  # P1/P2/P3 and the production JVM emission contract;
+  # luajit-jvm-single-lowering-production-cutover C2): the verbatim
+  # className use, the emitted-text shapes (the runtime-class-only
+  # imports, one dealMain() drive, one main delegation, the surface
+  # registry and its declaration-order writes), the real-toolchain
+  # javac --release 25 -proc:none + java run (empty success output, no
+  # R| trace line, the two per-module surfaces after the run, the
+  # repeated dealMain() drive), the E8004 terminal, and the
+  # byte-identical repeated emission.
+  'fg|=== Running JVM Production Project Emission Tests (ISSUE-0641) ===|java -ea -cp build deal.test.JvmProductionProjectEmissionTest'
 )

@@ -114,7 +114,44 @@ public final class JvmSemanticEmitter {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
-        return new Session(project, tables, registries, true).emit();
+        return new Session(project, tables, registries, true, null).emit();
+    }
+
+    /**
+     * Emits the production JVM project artifact for the validated
+     * executable closure (the production counterpart of
+     * {@link #emitProject}; {@code production-project-emission-and-atomic-cutover}
+     * P1/P2/P3 and the production JVM emission contract): one
+     * {@code public final class <className>} carrying the whole closure
+     * with {@code public static void main(String[])}, the conformance
+     * trace protocol suppressed, the landed {@code DEAL_ERROR_CODE: <code>}
+     * terminal (a DEAL failure publishes the code line on stdout and
+     * exits 1; success exits 0 silently), the entry module's one
+     * {@code ENTRY_INVOKE} delegation, and the per-module export-surface
+     * registry keyed by the module identity.
+     *
+     * <p>The class name is used verbatim: the production arm passes the
+     * {@code JvmBackend.classNameFor(entryModule.path())} derivation. The
+     * entry consumes only the validated project, the per-module body
+     * tables and class-factory registries, and that class name — no AST,
+     * no {@code CheckResult}, no route input, no host declaration
+     * surface, and no extern-C generated-module input.</p>
+     *
+     * @param project    the validated executable closure; non-null
+     * @param tables     each module's block-membership table; non-null
+     * @param registries each module's class-factory registry; non-null
+     * @param className  the entry class name, used verbatim; non-null
+     * @return the emitted production project artifact
+     */
+    public static EmissionResult emitProductionProject(ExecutableLoweredProject project,
+                                                       Map<ModuleId, StructuredBodyTable> tables,
+                                                       Map<ModuleId, ClassFactoryRegistry> registries,
+                                                       String className) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(tables, "tables must not be null");
+        Objects.requireNonNull(registries, "registries must not be null");
+        Objects.requireNonNull(className, "className must not be null");
+        return new Session(project, tables, registries, false, className).emit();
     }
 
     /**
@@ -233,7 +270,8 @@ public final class JvmSemanticEmitter {
          * the owner's factory op and default blocks through the closure.
          */
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
-                Map<ModuleId, ClassFactoryRegistry> registries, boolean trace) {
+                Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
+                String className) {
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -242,12 +280,11 @@ public final class JvmSemanticEmitter {
             }
             this.trace = trace;
             this.entryModule = true;
-            String path = this.unit.moduleId().path();
-            StringBuilder name = new StringBuilder("SharedM");
-            for (char c : path.toCharArray()) {
-                name.append(Character.isJavaIdentifierPart(c) ? c : '_');
-            }
-            this.className = name.toString();
+            // A production project entry passes its class name verbatim
+            // (the JvmBackend.classNameFor(entry path) derivation); the
+            // trace project session keeps the shared conformance name.
+            this.className = className != null ? className
+                : sharedClassName(this.unit.moduleId().path());
             for (Map.Entry<ModuleId, LoweredModuleUnit> entry
                     : project.modules().entrySet()) {
                 registerUnit(entry.getValue(), tables.get(entry.getKey()),
