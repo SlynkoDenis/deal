@@ -51,9 +51,11 @@ import java.util.Set;
  * <ul>
  *   <li>an op-kind value outside the closed 55 → {@code R-PRIVATE-STEP}
  *       (a consumer-private semantic step);</li>
- *   <li>a {@code StdlibFunctionId} value {@code TIME_NOW_MILLIS} →
- *       {@code R-RESERVED-NAME}, any other out-of-set value →
- *       {@code R-ENUM};</li>
+ *   <li>an out-of-set {@code StdlibFunctionId} value → {@code R-ENUM}
+ *       (the stdlib selector reservation list is empty since
+ *       {@code TIME_NOW_MILLIS} became the 21st member, so
+ *       {@code R-RESERVED-NAME} covers only the reserved
+ *       {@code FailurePolicyId} names);</li>
  *   <li>a {@code FailurePolicyId} value among
  *       {@code EXTERNAL_PARAMETER}/{@code EXTERNAL_RETURN}/
  *       {@code STDLIB_PARAMETER}/{@code STDLIB_RETURN} →

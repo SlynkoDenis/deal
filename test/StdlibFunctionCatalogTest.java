@@ -537,7 +537,7 @@ public class StdlibFunctionCatalogTest {
     }
 
     // =========================================================================
-    // 3. Recognition positives over a real checked project (all 20 ids)
+    // 3. Recognition positives over a real checked project (all 21 ids)
     // =========================================================================
 
     static void testRecognitionPositiveBattery() throws Exception {

@@ -103,19 +103,19 @@ import java.util.Set;
  *       equals the verbatim design list (names + order + counts: 55 kinds,
  *       3 unary, 42 binary, 4 call modes, 3 async sources, 2 parameter
  *       boundary modes, 4 index modes, 2 iteration modes, 6 control
- *       selectors, 3 capture modes, 25 boundary kinds, 24 policies, 20
+ *       selectors, 3 capture modes, 25 boundary kinds, 24 policies, 21
  *       stdlib ids); reserved names marked invalid.</li>
  *   <li>Reflective closedness: the reserved names have no enum member
- *       anywhere in {@code deal.semantic.ir} ({@code TIME_NOW_MILLIS}
- *       absent from every enum; the four reserved policy names absent from
- *       every enum except {@link BoundaryKind}; the three reserved
- *       boundary names absent from every enum), and no constructor path
- *       admits a {@code semanticProfile} other than
+ *       anywhere in {@code deal.semantic.ir} ({@code TIME_NOW_MILLIS} is a
+ *       member of exactly {@link StdlibFunctionId}; the four reserved
+ *       policy names absent from every enum except {@link BoundaryKind};
+ *       the three reserved boundary names absent from every enum), and no
+ *       constructor path admits a {@code semanticProfile} other than
  *       {@code DEAL_V1_2_INT32}.</li>
  *   <li>The closed 23-row source-construct table: verbatim required common
- *       forms for the 22 rows carrying one; the excluded row with no form
- *       and no op-kind set; the excluded row rejected as a
- *       {@code constructCoverage} key.</li>
+ *       forms for all 23 rows (no row is excluded since K7:
+ *       {@code STDLIB_TIME_NOW_MILLIS} carries its form and op-kind set
+ *       and is admitted as a {@code constructCoverage} key).</li>
  *   <li>Payload construction: every {@link SemanticOpKind} maps to exactly
  *       one {@link KindPayload} record shape and a minimal instance is
  *       constructible; missing mandatory payload fields are rejected

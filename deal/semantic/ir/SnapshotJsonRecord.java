@@ -12,8 +12,9 @@ import java.util.Objects;
  * value types into this record; every closed enum position carries a
  * <b>raw string</b> — {@code opKind}, {@code selector}, and
  * {@code failurePolicy} are never converted to enum members, so
- * out-of-set and reserved names (e.g. {@code TIME_NOW_MILLIS}, a reserved
- * policy name, or any open name) survive the parse byte-intact and reach
+ * out-of-set and reserved names (e.g. a reserved policy name such as
+ * {@code EXTERNAL_PARAMETER}, a reserved boundary name, or any open
+ * name) survive the parse byte-intact and reach
  * the validator's rule checks (R-ENUM/R-RESERVED-NAME). The parser performs
  * no closed-enum, reserved-name, policy, boundary-assignment, or profile
  * validation — those are the validator's rules (T6).</p>

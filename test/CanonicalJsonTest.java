@@ -514,11 +514,12 @@ public class CanonicalJsonTest {
             FailurePolicyId.NO_DEAL_FAILURE, List.of(), PLACEHOLDER_DIGEST);
         String text = ContractSnapshotCanonicalizer.serializeText(unary);
 
-        String reservedSelector = text.replace("\"selector\":\"NUMBER_NEG\"",
+        String closedSelectorName = text.replace("\"selector\":\"NUMBER_NEG\"",
             "\"selector\":\"TIME_NOW_MILLIS\"");
-        SnapshotJsonRecord record = ContractSnapshotCanonicalizer.parseSnapshot(reservedSelector);
+        SnapshotJsonRecord record = ContractSnapshotCanonicalizer.parseSnapshot(closedSelectorName);
         check("TIME_NOW_MILLIS".equals(record.selector()),
-            "the reserved selector name TIME_NOW_MILLIS survives the parse byte-intact");
+            "the closed selector name TIME_NOW_MILLIS survives the parse byte-intact as a "
+                + "raw string");
 
         String reservedPolicy = text.replace("\"failurePolicy\":\"NO_DEAL_FAILURE\"",
             "\"failurePolicy\":\"EXTERNAL_PARAMETER\"");

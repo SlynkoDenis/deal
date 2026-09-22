@@ -201,12 +201,12 @@ public final class SharedStdlibSemantics {
     }
 
     // =========================================================================
-    // The closed value view of the 20 operations
+    // The closed value view of the 21 operations
     // =========================================================================
 
     /**
      * The closed value view the executor consumes and produces over the
-     * semantic value model: exactly the values the 20 operations resolve,
+     * semantic value model: exactly the values the 21 operations resolve,
      * compare, store, encode, and publish — language null, boolean,
      * signed32 int, IEEE-754 number, string (carrying the closed
      * {@link UnicodeScalars.ScalarString} classification), table

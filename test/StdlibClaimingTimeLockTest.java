@@ -365,7 +365,7 @@ public class StdlibClaimingTimeLockTest {
             op.operandTypes(), payload, op.selector(), op.canonicalDigest(), op.snapshot());
     }
 
-    /** One raw op re-kindn to UNARY with the reserved selector (snapshot +
+    /** One raw op re-kindn to UNARY with a substituted selector (snapshot +
      *  digest recomputed so the selector position is the only defect). */
     private static RawOp asUnaryWithSelector(RawOp op, String selector) {
         List<CanonicalJson.Entry> entries = new ArrayList<>();
@@ -905,8 +905,8 @@ public class StdlibClaimingTimeLockTest {
                         + conflictClaim.get().message());
             }
 
-            // The capability-claim naming the reserved selector: rejected
-            // in the closed SemanticCapability position.
+            // The capability-claim naming the out-of-set stdlib selector:
+            // rejected in the closed SemanticCapability position.
             Optional<CompilerDiagnostic> reservedCapability = validateText(
                 withCapabilities(raw, "TIME_NOW_MILLIS"), facts);
             check(reservedCapability.isPresent(),
@@ -1012,7 +1012,7 @@ public class StdlibClaimingTimeLockTest {
                         && (unarySelectorFailure.get().message().contains("R-ENUM")
                             || unarySelectorFailure.get().message()
                                 .contains("R-RESERVED-NAME")),
-                    "the rejection names the reserved value in the closed selector "
+                    "the rejection names the substituted value in the closed selector "
                         + "position: " + unarySelectorFailure.get().message());
             }
 

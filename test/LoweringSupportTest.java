@@ -101,8 +101,10 @@ import java.util.stream.Stream;
  *       {@code MANIFEST_INTERNAL_ERROR_SENTINEL}, semanticProfile,
  *       irVersion, origin) — a T8 wrong-index-fact fault fails this
  *       suite; the record guards reject a manifest without
- *       {@code FOUNDATION_VALUES}, a T2-corrupted coverage row, and the
- *       excluded row; a T8 input entry without {@code checks} is
+ *       {@code FOUNDATION_VALUES}, a T2-corrupted coverage row, and a
+ *       coverage row diverging from the closed mapped op kinds (the
+ *       formerly excluded {@code STDLIB_TIME_NOW_MILLIS} row included);
+ *       a T8 input entry without {@code checks} is
  *       rejected at record construction; the T1 capability enum admits
  *       exactly the closed set.</li>
  *   <li>Determinism: two orchestrator compiles of the same fixture
@@ -1334,9 +1336,11 @@ public class LoweringSupportTest {
             new SemanticRequirementManifest(new ModuleId("m"),
                 EnumSet.of(SemanticCapability.FOUNDATION_VALUES),
                 Map.of(ConstructKind.STDLIB_TIME_NOW_MILLIS, List.of()), false);
-            fail("a manifest carrying the excluded row must be rejected");
+            fail("a std/time.nowMillis coverage row diverging from its mapped op kinds "
+                + "must be rejected");
         } catch (IllegalArgumentException expected) {
-            check(true, "the excluded std/time.nowMillis row is rejected at construction");
+            check(true, "the std/time.nowMillis row diverges from the closed mapped op kinds "
+                + "and is rejected at construction");
         }
         // T2 fault: a corrupt construct→op detector row is rejected — the
         // manifest carries the closed table verbatim, never a mutated row.

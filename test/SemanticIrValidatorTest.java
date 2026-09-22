@@ -96,7 +96,7 @@ import java.util.Set;
  *       3 async sources, 2 parameter boundary modes, 4 index modes,
  *       2 iteration modes, 6 control selectors, 3 capture modes,
  *       2 realization forms, 25 boundary kinds, 24 policy names,
- *       20 stdlib ids), and each of the 22 construct rows carrying a
+ *       21 stdlib ids), and each of the 23 construct rows carrying a
  *       required common form recorded in a passing unit's
  *       {@code constructCoverage} with at least one produced op of a
  *       mapped kind.</li>
@@ -1072,7 +1072,7 @@ public class SemanticIrValidatorTest {
         boundaryKinds.addAll(boundaryKindsTest);
         policies.addAll(policiesSweep);
 
-        // Stdlib ids: all 20 with their pinned algorithm policies.
+        // Stdlib ids: all 21 with their pinned algorithm policies.
         for (StdlibFunctionId function : StdlibFunctionId.values()) {
             passingSweep("stdlib " + function.name(), List.of(
                 op(SemanticOpKind.STDLIB_CALL,
