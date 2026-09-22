@@ -439,4 +439,36 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # call-expression origin, the real corpus fixture's production-artifact
   # drive on both targets, and the R-COVERAGE negative seed.
   'fg|=== Running time.nowMillis Coverage Tests (ISSUE-0623) ===|java -ea -cp build deal.test.TimeNowMillisCoverageTest'
+  # ISSUE-0644 registration: the in-project imported-class construction
+  # vertical three-consumer verification
+  # (module-export-reads-and-in-project-class-construction M7 and the
+  # in-project imported-class construction contract;
+  # semantic-ir-construct-coverage-cutover K3;
+  # luajit-jvm-single-lowering-production-cutover C1): the probe project
+  # (the owner exports a class with a defaulted field; the entry imports
+  # the owner and constructs the imported class literals; no cross-module
+  # call exists) lowers through the one project entry with zero
+  # RETAINED_ABI_DEFERRED to exactly one project, the entry unit's
+  # CLASS_NEW(SHARED_FACTORY) payload facts (the owner interface
+  # constructionEntry, the owner unit's layout, an empty local
+  # default-child list, the literal-order provided fields, the
+  # declaration-order boundaries wired to the owner factory result), the
+  # composed validator verdict with the in-project facts (and the
+  # facts-absent rejection proving the D10 producer is load-bearing), the
+  # oracle's owner-module CLASS_FACTORY/CLASS_DEFAULT events parented to
+  # the caller CLASS_NEW with the owner-scope default value observable
+  # and the field reads publishing the constructed values, and the
+  # production artifacts (one LuaJIT chunk; one JVM class) staged with
+  # byte-identical repeated staging. The JVM artifact constructs through
+  # the owner's factory and its field reads observe the constructed
+  # values under javac --release 25 -proc:none + java. The leaf records
+  # two seam findings instead of repairing them (its contract): the
+  # LuaJIT emitter's detached class-default functions are declared after
+  # the factories that reference them (so the executed chunk reaches the
+  # owner factory only through a nil global), and the landed owner
+  # resolution derives the owner module from the class descriptor
+  # namespace, so the conventional root/module layout fails closed (both
+  # findings are printed by the run and are not failures). No production
+  # lowering or emission file is changed.
+  'fg|=== Running In-Project Imported-Class Construction Vertical Tests (ISSUE-0644) ===|java -ea -cp build deal.test.InProjectClassConstructionVerticalTest'
 )
