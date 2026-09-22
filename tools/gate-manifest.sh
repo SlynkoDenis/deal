@@ -305,4 +305,19 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # production source surface (no lowerProject call site), JavaScript,
   # the retained classes, and the gate manifest itself.
   'fg|=== Running Project-Gate Fault Battery / Unchanged-Surface Audit Tests (ISSUE-0637) ===|java -ea -cp build deal.test.ProjectGateFaultBatteryTest'
+  # ISSUE-0639 registration: the module export-surface registry in both
+  # project-mode sessions (the module-identity key)
+  # (production-project-emission-and-atomic-cutover P2 and the module
+  # export-surface contract; luajit-jvm-single-lowering-production-
+  # cutover C2 and the production LuaJIT/JVM emission contracts;
+  # semantic-ir-construct-coverage-cutover K15 item 1): one chunk-global
+  # registry keyed by the dotted module path on LuaJIT (one
+  # JvmRuntime.Table per module on the JVM), created idempotently before
+  # the module walks, the EXPORT_PUBLISH write with the landed entry
+  # shape, the production chunk's entry-surface return, the shared
+  # single-unit shapes, the real-toolchain execution probes (a two-module
+  # project without a cross-module call, the declaration-order entries,
+  # the repeated dealMain()/cross-chunk idempotence), and the
+  # byte-identical repeated emission.
+  'fg|=== Running Module Export Surface Tests (ISSUE-0639) ===|java -ea -cp build deal.test.ModuleExportSurfaceTest'
 )

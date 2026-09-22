@@ -872,19 +872,25 @@ public class ModuleInitDifferentialTest {
         int publicationLineEnd = artifact.indexOf('\n', publicationLineStart);
         String publicationLine = artifact.substring(publicationLineStart,
             publicationLineEnd);
+        // The injection targets the registry surface the artifact really
+        // publishes through (the per-module export surface keyed by the
+        // emitting module's identity), so the injected export is really
+        // published and not a stray global.
+        String surface = "__exportSurfaces[\"" + lowered.unit().moduleId().path()
+            + "\"]";
         // The state-publication defect: the FAILURE path publishes the
         // INITIALIZED state (and an export entry) with a state SUCCESS event.
         String stateInjected = artifact.substring(0, errorAt)
             + successLine + "\n"
-            + "__exports[\"__defect__\"] = true\n"
+            + surface + "[\"__defect__\"] = true\n"
             + artifact.substring(errorAt);
         // The export-publication defect without any state event: the FAILURE
         // path publishes an export with its own EXPORT_PUBLISH trace event —
         // the state-event census alone cannot reject it, so the rule must
         // count the publication events in the artifact's trace.
         String exportInjected = artifact.substring(0, errorAt)
-            + "__exports[\"__defect__\"] = {__kind = \"function\", sig = \"():null\", "
-            + "f = function() return nil end}\n"
+            + surface + "[\"__defect__\"] = {__kind = \"function\", "
+            + "sig = \"():null\", f = function() return nil end}\n"
             + publicationLine + "\n"
             + artifact.substring(errorAt);
         List<String> real = runLuaArtifact(artifact, "module-init-failure-real.lua");

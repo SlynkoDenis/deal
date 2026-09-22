@@ -125,9 +125,11 @@ public final class LuaSemanticEmitter {
      * Emits the production LuaJIT module artifact for the validated unit
      * (ISSUE-0239 E10): the conformance trace protocol is suppressed, a
      * DEAL failure publishes the retained {@code DEAL_ERROR_CODE: <code>}
-     * line on stdout and exits 1, the chunk returns its export table
-     * (the retained-caller ABI surface), and the {@code ENTRY_INVOKE}
-     * delegation executes only for the entry module.
+     * line on stdout and exits 1, the chunk returns its own module's
+     * surface through the chunk-global per-module export-surface registry
+     * (the retained-caller ABI surface, keyed by the module identity), and
+     * the {@code ENTRY_INVOKE} delegation executes only for the entry
+     * module.
      *
      * @param unit        the validated lowered module unit; non-null
      * @param table       the unit's produced block-membership table; non-null
@@ -166,6 +168,13 @@ public final class LuaSemanticEmitter {
         final Map<BlockId, StructuredBodyTable> blockTableOf = new LinkedHashMap<>();
         final Map<OpId, SemanticOp> opsById = new HashMap<>();
         final Map<BindingId, BindingCellKind> cellKinds = new HashMap<>();
+        /**
+         * Each op's owning module (the export-surface key): the module
+         * whose unit carries the op, statically known at emission — the
+         * surface key is the emitting module's identity, never a path
+         * guess.
+         */
+        final Map<OpId, ModuleId> opModule = new HashMap<>();
         final java.util.Set<OpId> ownedChildren = new java.util.HashSet<>();
         /**
          * The payload-owned children only (closure computation excludes
@@ -272,6 +281,7 @@ public final class LuaSemanticEmitter {
             }
             for (SemanticOp op : moduleUnit.ops()) {
                 opsById.put(op.opId(), op);
+                opModule.put(op.opId(), moduleUnit.moduleId());
                 if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
                     KindPayload.BindingAllocPayload payload =
                         (KindPayload.BindingAllocPayload) op.payload();
@@ -502,14 +512,26 @@ public final class LuaSemanticEmitter {
                 out.append("__ev = function() end\n");
                 out.append("__normalizeEvent = function() end\n");
             }
-            // The export-publication helper and the export table are
-            // declared in both modes: every E7-lowered unit with exports
-            // carries EXPORT_PUBLISH ops (SemanticLowerer's emitE7Terminals)
-            // whose publication emission references both names — a
-            // trace-mode session over such a unit must emit valid Lua too
-            // (production-only is the `return __exports` terminal, not the
-            // declaration).
-            out.append("local __exports = {}\n");
+            // The per-module export-surface registry (K15 item 1: the
+            // module's namespace value): one surface per module of the
+            // closure, keyed by the module identity (the dotted module
+            // path), created idempotently before the module walks — the
+            // registry is chunk-global and every surface keeps its
+            // published entries, so a repeated deferred-main drive or a
+            // second chunk of the same process never wipes a surface. It
+            // is declared in both modes: every E7-lowered unit with
+            // exports carries EXPORT_PUBLISH ops (SemanticLowerer's
+            // emitE7Terminals) whose publication emission references the
+            // registry — a trace-mode session over such a unit must emit
+            // valid Lua too (production-only is the entry-surface return
+            // terminal, not the declaration).
+            out.append("__exportSurfaces = __exportSurfaces or {}\n");
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                String moduleKey = luaString(moduleUnit.moduleId().path());
+                out.append("__exportSurfaces[").append(moduleKey)
+                    .append("] = __exportSurfaces[").append(moduleKey)
+                    .append("] or {}\n");
+            }
             // The host-driven callback dispatch table (CALLBACK_INVOKE):
             // a chunk-global in both modes — the per-unit dispatch entries
             // and the two host-seam helpers are the scenario host's
@@ -697,7 +719,11 @@ public final class LuaSemanticEmitter {
                 }
             }
             if (!trace) {
-                out.append("return __exports\n");
+                // The retained-caller ABI: the artifact returns its own
+                // module's export surface (the entry module's surface in
+                // project mode, the single module's surface otherwise).
+                out.append("return __exportSurfaces[")
+                    .append(luaString(unit.moduleId().path())).append("]\n");
             }
             return out.toString();
         }
@@ -3190,12 +3216,29 @@ public final class LuaSemanticEmitter {
                     .append(", ").append(slot(payload.value())).append(")\n");
                 emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
             }
-            out.append("__exports[").append(luaString(payload.name()))
+            out.append("__exportSurfaces[")
+                .append(luaString(emittingModulePath(op)))
+                .append("][").append(luaString(payload.name()))
                 .append("] = {__kind = \"function\", sig = ")
                 .append(luaString(payload.descriptor().canonicalSpecText()))
                 .append(", f = __unfn(").append(slot(payload.value()))
                 .append(")}\n");
             emitPlainSuccess(op);
+        }
+
+        /**
+         * The statically known identity of the module that emits an op:
+         * the export surface's key. An op with no owning module is a
+         * producer defect, never a path guess.
+         */
+        private String emittingModulePath(SemanticOp op) {
+            ModuleId moduleId = opModule.get(op.opId());
+            if (moduleId == null) {
+                throw new IllegalStateException("the op " + op.opId()
+                    + " has no owning module (the export-surface key is the emitting "
+                    + "module's identity — a producer defect, never a path guess)");
+            }
+            return moduleId.path();
         }
 
         /**

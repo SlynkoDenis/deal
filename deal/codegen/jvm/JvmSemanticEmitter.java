@@ -165,6 +165,13 @@ public final class JvmSemanticEmitter {
         final Map<BlockId, StructuredBodyTable> blockTableOf = new LinkedHashMap<>();
         final Map<OpId, SemanticOp> opsById = new HashMap<>();
         final Map<BindingId, BindingCellKind> cellKinds = new HashMap<>();
+        /**
+         * Each op's owning module (the export-surface key): the module
+         * whose unit carries the op, statically known at emission — the
+         * surface key is the emitting module's identity, never a path
+         * guess.
+         */
+        final Map<OpId, ModuleId> opModule = new HashMap<>();
         final java.util.Set<OpId> ownedChildren = new java.util.HashSet<>();
         /**
          * The payload-owned children only (closure computation excludes
@@ -278,6 +285,7 @@ public final class JvmSemanticEmitter {
             }
             for (SemanticOp op : moduleUnit.ops()) {
                 opsById.put(op.opId(), op);
+                opModule.put(op.opId(), moduleUnit.moduleId());
                 if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
                     KindPayload.BindingAllocPayload payload =
                         (KindPayload.BindingAllocPayload) op.payload();
@@ -469,6 +477,21 @@ public final class JvmSemanticEmitter {
             // (each event carries its op's module path).
             out.append("  public static String MODULE = ")
                 .append(javaString(unit.moduleId().path())).append(";\n");
+            // The per-module export-surface registry (K15 item 1: the
+            // module's namespace value): one JvmRuntime.Table per module of
+            // the closure, keyed by the module identity (the dotted module
+            // path), created idempotently before the module walks so a
+            // repeated dealMain() drive never wipes a published surface.
+            out.append("  static final java.util.LinkedHashMap<String, "
+                + "JvmRuntime.Table> EXPORT_SURFACES = new java.util.LinkedHashMap<>();\n");
+            out.append("\n  static JvmRuntime.Table exportSurface(String module) {\n");
+            out.append("    JvmRuntime.Table surface = EXPORT_SURFACES.get(module);\n");
+            out.append("    if (surface == null) {\n");
+            out.append("      surface = new JvmRuntime.Table();\n");
+            out.append("      EXPORT_SURFACES.put(module, surface);\n");
+            out.append("    }\n");
+            out.append("    return surface;\n");
+            out.append("  }\n");
             // Slots and cells (every module; ids are globally unique).
             java.util.LinkedHashSet<String> fields = new java.util.LinkedHashSet<>();
             for (LoweredModuleUnit moduleUnit : units.values()) {
@@ -560,6 +583,13 @@ public final class JvmSemanticEmitter {
             out.append("  public static void dealMain() {\n");
             out.append("    JvmRuntime.setModule(MODULE);\n");
             out.append("    JvmRuntime.setTraceEnabled(").append(trace).append(");\n");
+            // Every closure module's surface exists before any module walk
+            // (the idempotent get-or-create keeps a repeated drive's
+            // published surfaces intact).
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                out.append("    exportSurface(")
+                    .append(javaString(moduleUnit.moduleId().path())).append(");\n");
+            }
             emitProjectWalk(2);
             out.append("  }\n");
             // main.
@@ -3563,11 +3593,13 @@ public final class JvmSemanticEmitter {
 
         /**
          * {@code EXPORT_PUBLISH} — the checked {@code MODULE_EXPORT}
-         * boundary (its owned child) then the publication record. The
-         * production export transport is the retained layout's artifact
-         * ABI; the record itself needs no further runtime action.
+         * boundary (its owned child) then the publication of the callable
+         * function value ({@code JvmRuntime.FunctionValue}) into the
+         * emitting module's export surface.
          */
         private void emitExportPublish(SemanticOp op, int indent) {
+            KindPayload.ExportPublishPayload payload =
+                (KindPayload.ExportPublishPayload) op.payload();
             emitStart(op, indent);
             for (SemanticOp candidate : opsById.values()) {
                 if (candidate.kind() == SemanticOpKind.BOUNDARY
@@ -3587,7 +3619,26 @@ public final class JvmSemanticEmitter {
                         boundaryPayload.descriptor(), indent + 1);
                 }
             }
+            out.append(indent(indent)).append("exportSurface(")
+                .append(javaString(emittingModulePath(op))).append(").write(")
+                .append(javaString(payload.name())).append(", ")
+                .append(slot(payload.value())).append(");\n");
             emitPlainSuccess(op, indent);
+        }
+
+        /**
+         * The statically known identity of the module that emits an op:
+         * the export surface's key. An op with no owning module is a
+         * producer defect, never a path guess.
+         */
+        private String emittingModulePath(SemanticOp op) {
+            ModuleId moduleId = opModule.get(op.opId());
+            if (moduleId == null) {
+                throw new IllegalStateException("the op " + op.opId()
+                    + " has no owning module (the export-surface key is the emitting "
+                    + "module's identity — a producer defect, never a path guess)");
+            }
+            return moduleId.path();
         }
 
         /**

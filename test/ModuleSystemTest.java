@@ -814,9 +814,9 @@ public class ModuleSystemTest {
 
         String luaOutput = Files.readString(outputFile);
         check(luaOutput.contains("greet"), "Output contains greet");
-        check(luaOutput.contains(
-                "__exports[\"greet\"] = {__kind = \"function\", sig = \"()->string\", f = "),
-            "Exports greet (the ISSUE-0239 shared-emitter publication shape, the "
+        check(luaOutput.contains("__exportSurfaces[\"hello\"][\"greet\"] = "
+                + "{__kind = \"function\", sig = \"()->string\", f = "),
+            "Exports greet (the ISSUE-0639 per-module export-surface publication, the "
                 + "retained wrapper ABI)");
     }
 
