@@ -443,7 +443,27 @@ public class LuaProductionProjectEmissionTest {
                 "the module walks run in dependency order under their own __module tag");
 
             // The whole closure is present: every module's factories before the
-            // walks, and every detached class-default function of the closure.
+            // walks, and every detached class-default function of the closure —
+            // a pre-declared chunk-level local assigned in the preamble (the
+            // pre-declaration precedes the factories, so a construction inside a
+            // function body resolves the local instead of a nil global).
+            List<String> defaultNames = new ArrayList<>();
+            for (ModuleId moduleId : project.modules().keySet()) {
+                for (SemanticOp op : project.modules().get(moduleId).ops()) {
+                    if (op.kind() == SemanticOpKind.CLASS_DEFAULT) {
+                        defaultNames.add("D" + op.opId().id());
+                    }
+                }
+            }
+            String predeclaration = "local " + String.join(", ", defaultNames)
+                + "\n";
+            int predeclarationAt = defaultNames.isEmpty() ? -1
+                : lua.indexOf(predeclaration);
+            if (!defaultNames.isEmpty()) {
+                check(predeclarationAt >= 0 && predeclarationAt < walksAt,
+                    "the chunk pre-declares the detached class-default locals before "
+                        + "the walks: " + predeclaration.trim());
+            }
             int classDefaults = 0;
             for (ModuleId moduleId : project.modules().keySet()) {
                 LoweredModuleUnit unit = project.modules().get(moduleId);
@@ -460,11 +480,12 @@ public class LuaProductionProjectEmissionTest {
                         continue;
                     }
                     classDefaults++;
-                    String defaultFn = "local function D" + op.opId().id() + "()";
+                    String defaultFn = "D" + op.opId().id() + " = function()";
                     int defaultAt = lua.indexOf(defaultFn);
-                    check(defaultAt >= 0 && defaultAt < walksAt,
+                    check(defaultAt > predeclarationAt && defaultAt < walksAt,
                         "the closure carries the detached class-default function "
-                            + defaultFn);
+                            + defaultFn + " assigned after its pre-declaration and "
+                            + "before the walks");
                 }
             }
             check(classDefaults > 0,

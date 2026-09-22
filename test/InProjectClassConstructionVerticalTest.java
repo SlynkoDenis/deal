@@ -104,28 +104,30 @@ import java.util.TreeMap;
  *       owner factory's evaluated default, and the entry's field reads
  *       publish the constructed values (the empty literal's defaults and
  *       the provided literal's overlay);</li>
- *   <li>the production artifacts: the JVM class stages as the one project
- *       artifact, compiles with {@code javac --release 25 -proc:none},
- *       executes under {@code java}, constructs the instances through the
- *       owner's factory, and its field reads observe the constructed
- *       values (the entry's construction probe re-invoked through the
- *       published export surface); the LuaJIT chunk stages with the
- *       unchanged deployment copies and repeated staging is byte-identical
- *       per target;</li>
- *   <li><b>a seam gap surfaced by the drive is recorded, not repaired
- *       (the leaf contract).</b> The executed LuaJIT production artifact
- *       cannot reach the owner factory's detached {@code CLASS_DEFAULT}
- *       functions from a function body: the emitter declares the detached
- *       defaults as chunk-level {@code local function D<opId>}
- *       <em>after</em> the function factories whose bodies reference them,
- *       so the reference resolves to a nil global at the call (Lua scoping
- *       — the factory-name locals are pre-declared for exactly this
- *       reason, the detached-default locals are not). The drive records
- *       this finding with its exact emitted-text and runtime evidence and
- *       asserts the remaining outcomes; it makes no production lowering or
- *       emission change, and adds no second fact producer.</li>
- *   <li><b>the owner-resolution namespace boundary is recorded too.</b>
- *       The oracle and both emitters resolve a {@code SHARED_FACTORY}
+ *   <li>the production artifacts: the LuaJIT chunk and the JVM class each
+ *       stage as the one project artifact (the LuaJIT set with the
+ *       unchanged deployment copies and no source-map sidecar), repeated
+ *       staging is byte-identical per target, and both artifacts
+ *       construct the imported instances through the owner's factory and
+ *       observe the constructed values under the real toolchains —
+ *       {@code luajit} executes the chunk (its module walks run the
+ *       constructions and the field-read guards, and the driver
+ *       re-invokes the exported entry through the published surface),
+ *       and {@code javac --release 25 -proc:none} + {@code java} does the
+ *       same for the class;</li>
+ *   <li><b>the drive's seam repair belongs to the emitter.</b> The LuaJIT
+ *       emitter pre-declares the detached class-default locals beside the
+ *       factory names and assigns them instead of re-declaring them with
+ *       {@code local function}: a construction inside a function body (or
+ *       a re-executed thunk body) reaches its {@code CLASS_DEFAULT}
+ *       functions from the sites emitted inside the factories, so the
+ *       earlier declaration form left every such reference a nil global
+ *       at the call. The structural assertions pin the pre-declaration
+ *       before every reference and its assignment; no second fact
+ *       producer and no imported-class-specific emission arm is added;</li>
+ *   <li><b>the owner-resolution namespace boundary is recorded, not
+ *       repaired.</b> The oracle and both emitters resolve a
+ *       {@code SHARED_FACTORY}
  *       owner as {@code new ModuleId(payload.classId().modulePath())} — the
  *       class descriptor namespace. In the conventional root/module layout
  *       (root {@code src}, module {@code owner.deal}) that namespace
@@ -134,8 +136,8 @@ import java.util.TreeMap;
  *       and the production arm's E6005). The probe therefore uses the
  *       identity-coherent layout (root directory {@code owner}, module
  *       {@code owner.deal}) under which the landed chain resolves, and the
- *       conventional-layout boundary is pinned and recorded as a second
- *       finding — never repaired here by a second fact producer.</li>
+ *       conventional-layout boundary is pinned and recorded as a finding —
+ *       never repaired here by a second fact producer.</li>
  * </ol>
  */
 public class InProjectClassConstructionVerticalTest {
@@ -163,7 +165,11 @@ public class InProjectClassConstructionVerticalTest {
             message + " (expected " + expected + ", got " + actual + ")");
     }
 
-    /** Records a seam finding the leaf contract forbids repairing here. */
+    /**
+     * Records a seam finding outside this leaf's repair scope (the
+     * owner-resolution namespace boundary: the consumers' owner-module
+     * resolution, not the imported-class construct).
+     */
     private static void recordFinding(String finding) {
         findings.add(finding);
         System.out.println("FINDING (recorded, not repaired): " + finding);
@@ -753,11 +759,11 @@ public class InProjectClassConstructionVerticalTest {
     // =========================================================================
 
     private static void testProductionArtifacts() throws Exception {
-        System.out.println("-- the production artifacts: the JVM class constructs "
-            + "through the owner's factory and its field reads observe the "
-            + "constructed values under javac/java; the LuaJIT chunk stages with "
-            + "byte-identical repeated staging, and its execution outcome is "
-            + "asserted or the surfaced seam is recorded --");
+        System.out.println("-- the production artifacts: the LuaJIT chunk and the "
+            + "JVM class each construct the imported instances through the "
+            + "owner's factory and their field reads observe the constructed "
+            + "values under the real toolchains (luajit; javac --release 25 "
+            + "-proc:none + java), with byte-identical repeated staging --");
         Fixture fixture = compileFixture();
         Path luaOut = fixture.root().resolve("out-luajit");
         Path luaOutRepeat = fixture.root().resolve("out-luajit-repeat");
@@ -800,62 +806,54 @@ public class InProjectClassConstructionVerticalTest {
 
             String luaArtifact = Files.readString(luaOut.resolve("app.lua"),
                 StandardCharsets.UTF_8);
-            int forwardReferences = 0;
-            List<String> forwardReferenceEvidence = new ArrayList<>();
-            for (SemanticOp op : ofKind(
-                    result.project().modules().get(OWNER),
-                    SemanticOpKind.CLASS_DEFAULT)) {
-                String reference = "pcall(D" + op.opId().id() + ")";
-                String declaration = "local function D" + op.opId().id() + "()";
-                int referenceAt = luaArtifact.indexOf(reference);
-                int declarationAt = luaArtifact.indexOf(declaration);
-                if (referenceAt >= 0 && declarationAt > referenceAt) {
-                    forwardReferences++;
-                    forwardReferenceEvidence.add(op.opId() + " referenced at "
-                        + referenceAt + " before its declaration at " + declarationAt);
-                }
+
+            // The detached class-default functions are chunk-level locals
+            // pre-declared beside the factory names and assigned afterwards:
+            // the construction sites emitted inside the factories reference
+            // the pre-declared local, so no body ever calls a nil global.
+            List<SemanticOp> classDefaults = new ArrayList<>();
+            for (LoweredModuleUnit moduleUnit : result.project().modules().values()) {
+                classDefaults.addAll(ofKind(moduleUnit, SemanticOpKind.CLASS_DEFAULT));
+            }
+            check(!classDefaults.isEmpty(),
+                "the probe closure carries the detached class-default functions");
+            List<String> defaultNames = classDefaults.stream()
+                .map(op -> "D" + op.opId().id()).toList();
+            String predeclaration = "local " + String.join(", ", defaultNames)
+                + "\n";
+            int predeclarationAt = luaArtifact.indexOf(predeclaration);
+            check(predeclarationAt >= 0,
+                "the emitted chunk pre-declares every detached class-default "
+                    + "local: " + predeclaration.trim());
+            int walksAt = luaArtifact.indexOf("__dealMain = function()");
+            check(predeclarationAt >= 0 && walksAt > predeclarationAt,
+                "the module walks follow the class-default pre-declaration");
+            for (SemanticOp defaultOp : classDefaults) {
+                String name = "D" + defaultOp.opId().id();
+                int assignmentAt = luaArtifact.indexOf(name + " = function()");
+                check(assignmentAt > predeclarationAt && assignmentAt < walksAt,
+                    "the detached class-default function " + name + " is "
+                        + "pre-declared and assigned before the module walks");
+                int referenceAt = luaArtifact.indexOf("pcall(" + name + ")");
+                check(referenceAt < 0
+                        || (predeclarationAt >= 0 && predeclarationAt < referenceAt),
+                    "every construction site references " + name + " through its "
+                        + "pre-declared chunk-level local");
             }
 
             writeFileIn(luaOut, "vertical_probe.lua", LUA_DRIVER);
             ProcessOutcome luaRun = runProcess(List.of("luajit", "vertical_probe.lua"),
                 luaOut);
-            if (luaRun.exitCode() == 0 && luaRun.stdout().contains("PROBE-OK")) {
-                check(true,
-                    "the LuaJIT production artifact constructs the imported "
-                        + "instances through the owner's factory and its field-read "
-                        + "guard holds under real luajit");
-                checkEq("", luaRun.stderr(),
-                    "the production LuaJIT chunk publishes no trace protocol");
-                checkEq(0, forwardReferences,
-                    "no function body references a detached class-default function "
-                        + "before its declaration any more");
-            } else if (forwardReferences > 0
-                    && luaRun.stderr().contains("attempt to call a nil value")) {
-                recordFinding("the LuaJIT production artifact cannot execute the "
-                    + "owner-scope default transfer: the emitter declares the "
-                    + "detached class-default functions as chunk-level `local "
-                    + "function D<opId>` AFTER the function factories whose bodies "
-                    + "call `pcall(D<opId>)`, so the reference resolves to a nil "
-                    + "global (the factory-name locals are pre-declared for exactly "
-                    + "this reason; the detached-default locals are not). The "
-                    + "failing seam is the LuaJIT emitter's detached class-default "
-                    + "emission order (deal/codegen/lua/LuaSemanticEmitter.java, the "
-                    + "project preamble: factories, then the detached defaults). "
-                    + "Emitted-text evidence: " + forwardReferenceEvidence
-                    + "; runtime evidence: exit " + luaRun.exitCode() + ", stderr '"
-                    + luaRun.stderr().replace("\n", "\\n") + "'. The landing fix "
-                    + "belongs to the emitter (pre-declare the detached-default "
-                    + "locals beside the factory names and assign them instead of "
-                    + "re-declaring them with `local function`); a landed-fix "
-                    + "candidate was validated against this very drive outside the "
-                    + "leaf's change set and makes the full LuaJIT artifact drive "
-                    + "pass, but this verification leaf records the finding and "
-                    + "changes no production file.");
-            } else {
-                fail("the LuaJIT production artifact failed for a reason other than "
-                    + "the recorded detached-default forward-reference seam: exit="
-                    + luaRun.exitCode() + " " + luaRun.output());
-            }
+            checkEq(0, luaRun.exitCode(),
+                "the LuaJIT production artifact constructs the imported instances "
+                    + "through the owner's factory under real luajit: "
+                    + luaRun.output());
+            check(luaRun.stdout().contains("PROBE-OK"),
+                "the LuaJIT driver's construction probe and its published-surface "
+                    + "re-invocation hold: "
+                    + luaRun.stdout().replace("\n", "\\n"));
+            checkEq("", luaRun.stderr(),
+                "the production LuaJIT chunk publishes no trace protocol");
 
             // (b) JVM: one class source, no deployment copy; the real
             // javac --release 25 -proc:none + java run drives the module

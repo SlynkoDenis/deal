@@ -459,16 +459,17 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the caller CLASS_NEW with the owner-scope default value observable
   # and the field reads publishing the constructed values, and the
   # production artifacts (one LuaJIT chunk; one JVM class) staged with
-  # byte-identical repeated staging. The JVM artifact constructs through
-  # the owner's factory and its field reads observe the constructed
-  # values under javac --release 25 -proc:none + java. The leaf records
-  # two seam findings instead of repairing them (its contract): the
-  # LuaJIT emitter's detached class-default functions are declared after
-  # the factories that reference them (so the executed chunk reaches the
-  # owner factory only through a nil global), and the landed owner
-  # resolution derives the owner module from the class descriptor
-  # namespace, so the conventional root/module layout fails closed (both
-  # findings are printed by the run and are not failures). No production
-  # lowering or emission file is changed.
+  # byte-identical repeated staging. Both artifacts construct through the
+  # owner's factory and their field reads observe the constructed values
+  # under the real toolchains (luajit; javac --release 25 -proc:none +
+  # java). The emitter seam the drive exposed is repaired at its root: the
+  # LuaJIT chunk pre-declares the detached class-default locals beside the
+  # factory names and assigns them (instead of declaring them with
+  # `local function` after the factories that reference them), and no
+  # second fact producer or imported-class-specific emission arm is
+  # added. The landed owner resolution still derives the owner module from
+  # the class descriptor namespace, so the conventional root/module layout
+  # fails closed; that boundary is pinned and recorded as a finding by the
+  # run (printed, not a failure) and is not repaired here.
   'fg|=== Running In-Project Imported-Class Construction Vertical Tests (ISSUE-0644) ===|java -ea -cp build deal.test.InProjectClassConstructionVerticalTest'
 )

@@ -615,15 +615,33 @@ public final class LuaSemanticEmitter {
 
             // Function factories first (capture cells are factory
             // arguments); the local names are pre-declared so bodies can
-            // reference factories declared later in source order.
+            // reference factories declared later in source order. The
+            // detached class-default functions are pre-declared the same
+            // way: a DEAL function body (or a re-executed thunk body)
+            // reaches its CLASS_DEFAULT functions from the construction
+            // sites emitted inside the factories, so a `local function`
+            // declaration placed after the factories would leave every
+            // such reference a nil global.
             List<String> factoryNames = new ArrayList<>();
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (LoweredFunction function : moduleUnit.functions().values()) {
                     factoryNames.add(fnFactory(function.functionId()));
                 }
             }
+            List<String> defaultNames = new ArrayList<>();
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.CLASS_DEFAULT) {
+                        defaultNames.add(defaultFn(op.opId()));
+                    }
+                }
+            }
             if (!factoryNames.isEmpty()) {
                 out.append("local ").append(String.join(", ", factoryNames))
+                    .append("\n");
+            }
+            if (!defaultNames.isEmpty()) {
+                out.append("local ").append(String.join(", ", defaultNames))
                     .append("\n");
             }
             for (LoweredModuleUnit moduleUnit : units.values()) {
@@ -655,7 +673,13 @@ public final class LuaSemanticEmitter {
             // itself skipped) re-execute per invocation, returning the
             // block's final producing value (the op's result slot), so
             // every triggering construction gets a fresh default
-            // (mutable defaults allocate freshly per attempt).
+            // (mutable defaults allocate freshly per attempt). The names
+            // are the chunk-level locals pre-declared with the factory
+            // names above: a construction inside a function body (or a
+            // re-executed thunk body) emits its `pcall(D<opId>)` call into
+            // the factory emitted before this block, so the assignment
+            // form keeps that reference bound to the chunk-level local
+            // instead of a nil global.
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (SemanticOp op : moduleUnit.ops()) {
                     if (op.kind() == SemanticOpKind.CLASS_DEFAULT) {
@@ -773,7 +797,10 @@ public final class LuaSemanticEmitter {
          * Emits one detached class-default function: the default block's
          * ops in order (the CLASS_DEFAULT op itself skipped — its own
          * events are the triggering CLASS_NEW/CLASS_FACTORY arm's) and
-         * the final producing value returned.
+         * the final producing value returned. The name is a pre-declared
+         * chunk-level local (see the preamble): the assignment form keeps
+         * the function reachable from every factory/construction body
+         * emitted before this statement.
          */
         private void emitClassDefaultFunction(SemanticOp defaultOp) {
             KindPayload.ClassDefaultPayload payload =
@@ -789,7 +816,7 @@ public final class LuaSemanticEmitter {
                 throw new IllegalStateException("CLASS_DEFAULT " + defaultOp.opId()
                     + " publishes no ValueId result (producer defect)");
             }
-            out.append("local function ").append(defaultFn(defaultOp.opId())).append("()\n");
+            out.append(defaultFn(defaultOp.opId())).append(" = function()\n");
             for (OpId opId : ops) {
                 if (opId.equals(defaultOp.opId()) || ownedChildren.contains(opId)) {
                     continue;
