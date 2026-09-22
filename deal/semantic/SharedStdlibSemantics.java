@@ -31,7 +31,7 @@ import java.util.Set;
  * The single standard-library algorithm executor of
  * {@code deal.semantic-ir/1} ({@code stdlib-operations-and-time-lock} D4,
  * Contracts §{@code SharedStdlibSemantics} algorithms and §Console
- * effect): the only component that computes the 20 named
+ * effect): the only component that computes the 21 named
  * {@link StdlibFunctionId} operations, as static per-family algorithms
  * over the closed value view ({@link Value} over
  * {@link UnicodeScalars.ScalarString} and {@link SemanticTable})
@@ -44,11 +44,13 @@ import java.util.Set;
  * <p><b>Executor-primitive pattern.</b> Like {@link SharedValueSemantics},
  * {@code ContainerOpsExecutor}, and {@code BoundaryExecutor}, the
  * component is pure, static, deterministic, stateless, and executes no
- * host code. The only non-pure surface is the injected {@link ConsoleSink}
- * (D5): the primitive performs no process I/O — the executor supplies the
- * sink, and a sink failure is {@code INFRASTRUCTURE_ONLY} infrastructure
- * failure: not a DEAL error, no DEAL diagnostic, not catchable, and it
- * aborts the run. The primitive never catches a sink exception; the
+ * host code. The only non-pure surfaces are the injected
+ * {@link ConsoleSink} (D5) and the injected {@link Clock} of
+ * {@code TIME_NOW_MILLIS} (K7): the primitive performs no process I/O —
+ * the executor supplies the sink and the clock reading, and a sink
+ * failure is {@code INFRASTRUCTURE_ONLY} infrastructure failure: not a
+ * DEAL error, no DEAL diagnostic, not catchable, and it aborts the run.
+ * The primitive never catches a sink exception; the
  * exception propagates to the executor, which owns the run abort. The
  * dependency direction is exactly the pinned set: the IR enums,
  * {@link UnicodeScalars}, {@link SemanticTable}, the
@@ -404,6 +406,29 @@ public final class SharedStdlibSemantics {
         void write(byte[] bytes);
     }
 
+    /**
+     * The injected clock seam of {@code STDLIB_CALL(TIME_NOW_MILLIS)}
+     * (K7 item 4): the executor supplies the target-clock reading the
+     * shared algorithm returns, so the primitive stays pure/deterministic
+     * and performs no process I/O — the LuaJIT artifact reads
+     * {@code os.time() * 1000} and the JVM artifact
+     * {@code System.currentTimeMillis()} in their own closed realization
+     * tables, while the oracle injects its pinned deterministic reading.
+     */
+    public interface Clock {
+
+        /** The current epoch-millisecond reading of the target clock. */
+        long nowMillis();
+    }
+
+    /**
+     * The production default clock: the wall clock of the executing
+     * process. The oracle never uses it — the oracle injects its own
+     * deterministic reading through the four-argument
+     * {@code execute} surface.
+     */
+    public static final Clock SYSTEM_CLOCK = System::currentTimeMillis;
+
     // =========================================================================
     // Sealed outcome
     // =========================================================================
@@ -511,6 +536,26 @@ public final class SharedStdlibSemantics {
      */
     public static Outcome<Value> execute(SemanticOp op, List<Value> args,
                                          ConsoleSink sink) {
+        return execute(op, args, sink, SYSTEM_CLOCK);
+    }
+
+    /**
+     * Executes one validated {@code STDLIB_CALL} op with an injected
+     * {@link Clock} (the {@code TIME_NOW_MILLIS} seam, K7 item 4): the
+     * full surface of {@link #execute(SemanticOp, List, ConsoleSink)};
+     * the clock is consulted only by {@code TIME_NOW_MILLIS} and every
+     * other id ignores it.
+     *
+     * @param op    the validated {@code STDLIB_CALL} op; non-null
+     * @param args  the resolved argument values in left-to-right source
+     *              order; non-null, no null elements
+     * @param sink  the injected console sink (may be null for non-console
+     *              ids)
+     * @param clock the injected clock of {@code TIME_NOW_MILLIS}; non-null
+     * @return the sealed per-family outcome
+     */
+    public static Outcome<Value> execute(SemanticOp op, List<Value> args,
+                                         ConsoleSink sink, Clock clock) {
         Objects.requireNonNull(op, "op must not be null");
         Objects.requireNonNull(args, "args must not be null");
         if (op.kind() != SemanticOpKind.STDLIB_CALL) {
@@ -578,12 +623,17 @@ public final class SharedStdlibSemantics {
                 intOf(argv, 1, function));
             case MATH_MAX_INT -> mathMaxInt(op.origin(), intOf(argv, 0, function),
                 intOf(argv, 1, function));
+            case TIME_NOW_MILLIS -> timeNowMillis(op.origin(), clock);
         };
     }
 
-    /** The declared parameter arity of one closed stdlib id (D1 table). */
+    /**
+     * The declared parameter arity of one closed stdlib id (D1 table plus
+     * the K7 {@code std.time} row, arity 0).
+     */
     private static int declaredArity(StdlibFunctionId function) {
         return switch (function) {
+            case TIME_NOW_MILLIS -> 0;
             case CONSOLE_LOG, CONSOLE_ERROR, STRING_LENGTH, STRING_TRIM, TABLE_KEYS,
                  JSON_PARSE, JSON_STRINGIFY, MATH_FLOOR, MATH_CEIL, MATH_SQRT,
                  MATH_ABS_INT, MATH_ABS_NUMBER -> 1;
@@ -1860,6 +1910,28 @@ public final class SharedStdlibSemantics {
     public static Outcome<Value> mathMaxInt(SourceOrigin origin, int a, int b) {
         Objects.requireNonNull(origin, "origin must not be null");
         return new Outcome.Success<>(new Value.Int(Math.max(a, b)));
+    }
+
+    /**
+     * {@code TIME_NOW_MILLIS} — the K7 {@code std.time}/{@code nowMillis}
+     * operation: the target-clock reading returned as a
+     * {@link Value.Number} (epoch milliseconds — an exact double for
+     * contemporary readings). The operation has no parameter boundary and
+     * its single terminal is the declared {@code int} {@code STDLIB_RETURN}
+     * boundary with policy {@code INT32_RESULT}: a reading outside
+     * {@code [-2147483648, 2147483647]} fails E8004
+     * {@code int out of safe range} at the call origin — exactly what
+     * every contemporary epoch-millisecond reading produces. Policy
+     * {@code INT32_RESULT}; the reading itself never fails.
+     *
+     * @param origin the {@code STDLIB_CALL} operation origin; non-null
+     * @param clock  the injected clock seam; non-null
+     * @return {@code Success} with the target-clock reading as a number
+     */
+    public static Outcome<Value> timeNowMillis(SourceOrigin origin, Clock clock) {
+        Objects.requireNonNull(origin, "origin must not be null");
+        Objects.requireNonNull(clock, "clock must not be null");
+        return new Outcome.Success<>(new Value.Number((double) clock.nowMillis()));
     }
 
     // =========================================================================

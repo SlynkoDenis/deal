@@ -97,13 +97,16 @@ import java.util.stream.Stream;
  *   <li>R-CAPABILITY negatives: a claimed {@code STDLIB_SEMANTICS}
  *       without a produced {@code STDLIB_CALL} and the empty-evidence
  *       {@code STDLIB_TIME_CONFLICT} claim both fail the landed rule.</li>
- *   <li>Time-lock validator negatives: {@code TIME_NOW_MILLIS} is
- *       rejected in a selector position, in the {@code StdlibFunctionId}
- *       position, and as a capability claim.</li>
- *   <li>Time-lock routing: a {@code std/time.nowMillis} module claims
- *       {@code STDLIB_TIME_CONFLICT} and routes {@code LEGACY} in every
- *       purpose — including a {@code COMMON_SHADOW} shadow request —
- *       and never produces a common unit.</li>
+ *   <li>Time-lock validator negatives (retargeted by K7):
+ *       {@code TIME_NOW_MILLIS} is a closed member in the selector and
+ *       {@code StdlibFunctionId} positions (an out-of-set name is
+ *       R-ENUM), and a capability claim naming it still fails.</li>
+ *   <li>Time-row routing (K7): a {@code std/time.nowMillis} module claims
+ *       {@code STDLIB_SEMANTICS} (never the inert
+ *       {@code STDLIB_TIME_CONFLICT} marker), common-lowers under a
+ *       {@code COMMON_SHADOW} shadow request, and produces a validated
+ *       unit carrying {@code STDLIB_CALL(TIME_NOW_MILLIS)} with the
+ *       {@code INT32_RESULT} terminal.</li>
  *   <li>Value-read disposition: a stdlib-export read claims no stdlib
  *       capability and adds no route rule; F4 rules 1/3/4/5 route the
  *       module with the D3 disposition and the common unit fails with
@@ -922,11 +925,12 @@ public class StdlibClaimingTimeLockTest {
     }
 
     // =========================================================================
-    // 4. Time-lock validator negatives
+    // 4. Time-row validator negatives (retargeted by K7)
     // =========================================================================
 
-    static void testTimeLockValidatorNegatives() throws Exception {
-        System.out.println("-- Time lock: reserved-name and selector negatives --");
+    static void testTimeRowValidatorNegatives() throws Exception {
+        System.out.println("-- Time row: the closed member in every selector position; "
+            + "out-of-set names stay R-ENUM --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-claim-timeneg");
         try {
@@ -970,21 +974,29 @@ public class StdlibClaimingTimeLockTest {
                 "the untouched stdlib unit passes the text surface"
                     + (untouched.isPresent() ? ": " + untouched.get().message() : ""));
 
-            // (a) TIME_NOW_MILLIS in the STDLIB_CALL selector position
-            // (the selector the stdlib row would carry) → R-RESERVED-NAME.
+            // (a) TIME_NOW_MILLIS in the STDLIB_CALL snapshot selector
+            // position is a closed member since K7 (the position accepts
+            // the member; an out-of-set name is R-ENUM).
             RawUnit selectorNegative = transformOps(raw, op ->
                 op.kind().equals("STDLIB_CALL")
                     ? withSnapshotField(op, "selector", "TIME_NOW_MILLIS") : op);
             Optional<CompilerDiagnostic> selectorFailure =
                 validateText(selectorNegative, facts);
-            check(selectorFailure.isPresent(),
-                "TIME_NOW_MILLIS in the STDLIB_CALL selector position fails validation");
-            if (selectorFailure.isPresent()) {
-                check(selectorFailure.get().message().contains("R-RESERVED-NAME")
-                        && selectorFailure.get().message().contains("TIME_NOW_MILLIS"),
-                    "the failure is R-RESERVED-NAME on the reserved selector name: "
-                        + selectorFailure.get().message());
-            }
+            check(selectorFailure.isEmpty(),
+                "TIME_NOW_MILLIS in the STDLIB_CALL selector position is a closed member "
+                    + "since K7: " + (selectorFailure.isEmpty() ? "accepted"
+                        : selectorFailure.get().message()));
+            RawUnit openSelector = transformOps(raw, op ->
+                op.kind().equals("STDLIB_CALL")
+                    ? withSnapshotField(op, "selector", "NOT_A_SELECTOR") : op);
+            Optional<CompilerDiagnostic> openSelectorFailure =
+                validateText(openSelector, facts);
+            check(openSelectorFailure.isPresent()
+                    && openSelectorFailure.get().message().contains("R-ENUM")
+                    && openSelectorFailure.get().message().contains("NOT_A_SELECTOR"),
+                "an out-of-set selector name in the STDLIB_CALL selector position fails "
+                    + "R-ENUM: " + (openSelectorFailure.isEmpty() ? "no diagnostic"
+                        : openSelectorFailure.get().message()));
 
             // (b) TIME_NOW_MILLIS in a UnarySelector position: the first
             // rejection is the closed-enum rule of that position.
@@ -1005,44 +1017,56 @@ public class StdlibClaimingTimeLockTest {
             }
 
             // (c) TIME_NOW_MILLIS in the StdlibFunctionId position (the
-            // payload function field) → R-RESERVED-NAME.
+            // payload function field) is a closed member whose pinned
+            // policy (INT32_RESULT) matches the STRING_LENGTH op's stamp,
+            // so the substitution validates; an out-of-set name is
+            // R-ENUM.
             RawUnit functionNegative = transformOps(raw, op ->
                 op.kind().equals("STDLIB_CALL")
                     ? withPayloadField(op, "function", "TIME_NOW_MILLIS") : op);
             Optional<CompilerDiagnostic> functionFailure =
                 validateText(functionNegative, facts);
-            check(functionFailure.isPresent(),
-                "TIME_NOW_MILLIS in the StdlibFunctionId position fails validation");
-            if (functionFailure.isPresent()) {
-                check(functionFailure.get().message().contains("R-RESERVED-NAME")
-                        && functionFailure.get().message().contains("TIME_NOW_MILLIS"),
-                    "the failure is R-RESERVED-NAME on the reserved function name: "
-                        + functionFailure.get().message());
-            }
+            check(functionFailure.isEmpty(),
+                "TIME_NOW_MILLIS in the StdlibFunctionId position is a closed member "
+                    + "since K7 (both ids pin INT32_RESULT): "
+                    + (functionFailure.isEmpty() ? "accepted"
+                        : functionFailure.get().message()));
+            RawUnit openFunction = transformOps(raw, op ->
+                op.kind().equals("STDLIB_CALL")
+                    ? withPayloadField(op, "function", "NOT_A_STDLIB_ID") : op);
+            Optional<CompilerDiagnostic> openFunctionFailure =
+                validateText(openFunction, facts);
+            check(openFunctionFailure.isPresent()
+                    && openFunctionFailure.get().message().contains("R-ENUM")
+                    && openFunctionFailure.get().message().contains("NOT_A_STDLIB_ID"),
+                "an out-of-set function name in the StdlibFunctionId position fails "
+                    + "R-ENUM: " + (openFunctionFailure.isEmpty() ? "no diagnostic"
+                        : openFunctionFailure.get().message()));
 
-            // (d) The reserved selector stays absent from the closed sets.
-            check(StdlibFunctionId.RESERVED_NAMES.equals(List.of("TIME_NOW_MILLIS")),
-                "TIME_NOW_MILLIS stays the single reserved selector name");
-            boolean absentFromCatalog = true;
+            // (d) The K7 selector member: RESERVED_NAMES is empty and
+            // TIME_NOW_MILLIS is the 21st closed member.
+            check(StdlibFunctionId.RESERVED_NAMES.isEmpty(),
+                "RESERVED_NAMES is empty (the superseded D8 reservation is retired) while "
+                    + "the reserved-name guard stays");
+            boolean memberPresent = false;
             for (StdlibFunctionId function : StdlibFunctionId.values()) {
                 if ("TIME_NOW_MILLIS".equals(function.name())) {
-                    absentFromCatalog = false;
+                    memberPresent = true;
                 }
             }
-            check(absentFromCatalog && StdlibFunctionId.values().length == 20,
-                "TIME_NOW_MILLIS is absent from the closed 20-value StdlibFunctionId "
-                    + "set");
+            check(memberPresent && StdlibFunctionId.values().length == 21,
+                "TIME_NOW_MILLIS is the 21st member of the closed StdlibFunctionId set");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
     // =========================================================================
-    // 5. Time-lock routing: LEGACY in every purpose, no common unit
+    // 5. Time-row routing: the cataloged call common-lowers, no reroute
     // =========================================================================
 
-    static void testTimeLockRoutingNegatives() throws Exception {
-        System.out.println("-- Time lock: STDLIB_TIME_CONFLICT routes LEGACY in every purpose --");
+    static void testTimeRowRouting() throws Exception {
+        System.out.println("-- Time row: the cataloged std/time call common-lowers (K7) --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-claim-timeroute");
         try {
@@ -1074,8 +1098,9 @@ public class StdlibClaimingTimeLockTest {
             ModuleId libId = moduleOf(checked.input(), "lib").moduleId();
 
             // The manifest arm: the nowMillis module claims
-            // STDLIB_TIME_CONFLICT and its importer claims it by
-            // propagation.
+            // STDLIB_SEMANTICS through the landed cataloged-call arm, and
+            // no manifest claims the inert STDLIB_TIME_CONFLICT marker (no
+            // propagation exists).
             RequirementManifestResult manifests = manifestsOf(checked, invocation());
             if (manifests == null || manifests.hasErrors()) {
                 return;
@@ -1083,21 +1108,26 @@ public class StdlibClaimingTimeLockTest {
             SemanticRequirementManifest libManifest = manifestOf(manifests, libId);
             SemanticRequirementManifest mainManifest = manifestOf(manifests, mainId);
             check(libManifest != null && libManifest.capabilities().contains(
-                    deal.semantic.ir.SemanticCapability.STDLIB_TIME_CONFLICT),
-                "the std/time.nowMillis module claims STDLIB_TIME_CONFLICT: "
+                    deal.semantic.ir.SemanticCapability.STDLIB_SEMANTICS),
+                "the std/time.nowMillis module claims STDLIB_SEMANTICS (the cataloged-call "
+                    + "arm; the produced STDLIB_CALL is the evidence): "
                     + (libManifest == null ? "no manifest" : libManifest.capabilities()));
-            check(mainManifest != null && mainManifest.capabilities().contains(
+            check(libManifest != null && !libManifest.capabilities().contains(
                     deal.semantic.ir.SemanticCapability.STDLIB_TIME_CONFLICT),
-                "the importing module claims STDLIB_TIME_CONFLICT by propagation: "
+                "the time module claims no STDLIB_TIME_CONFLICT (the retired four-part "
+                    + "trigger never fires): " + (libManifest == null ? "no manifest"
+                        : libManifest.capabilities()));
+            check(mainManifest != null && !mainManifest.capabilities().contains(
+                    deal.semantic.ir.SemanticCapability.STDLIB_TIME_CONFLICT),
+                "the importing module claims no STDLIB_TIME_CONFLICT (no propagation "
+                    + "exists): "
                     + (mainManifest == null ? "no manifest"
                         : mainManifest.capabilities()));
-            check(libManifest != null && !libManifest.capabilities().contains(
-                    deal.semantic.ir.SemanticCapability.STDLIB_SEMANTICS),
-                "the time module claims no STDLIB_SEMANTICS (std/time has no catalog "
-                    + "entry): " + (libManifest == null ? "no manifest"
-                        : libManifest.capabilities()));
 
-            // Every purpose routes LEGACY, zero diagnostics, never shadow.
+            // Every purpose plans with zero diagnostics; the retired rule 2
+            // never fires — under the COMMON_SHADOW request the time module
+            // common-lowers (recorded shadow), every other purpose keeps it
+            // LEGACY through the ordinary promotion/legacy rules.
             for (Object[] purpose : List.<Object[]>of(
                     new Object[] {publicPreActivation(), "PUBLIC_BUILD+PRE_ACTIVATION"},
                     new Object[] {publicV12Active(CapabilityRegistry.releaseRegistry()),
@@ -1106,8 +1136,9 @@ public class StdlibClaimingTimeLockTest {
                     new Object[] {legacyRegression(), "LEGACY_REGRESSION"})) {
                 CompilerInvocation planInvocation = (CompilerInvocation) purpose[0];
                 String what = (String) purpose[1];
-                Set<ModuleId> requests = planInvocation.purpose().name().equals("COMMON_SHADOW")
-                    ? Set.of(libId) : Set.of();
+                boolean shadowPurpose =
+                    planInvocation.purpose().name().equals("COMMON_SHADOW");
+                Set<ModuleId> requests = shadowPurpose ? Set.of(libId) : Set.of();
                 RoutePlanResult planned = MigrationPlanner.planRoutes(planInvocation,
                     CapabilityRegistry.releaseRegistry(), checked.input(), checked.index(),
                     manifests.manifests(), Target.LUAJIT, requests);
@@ -1117,25 +1148,38 @@ public class StdlibClaimingTimeLockTest {
                 if (planned == null || planned.hasErrors() || planned.plan() == null) {
                     continue;
                 }
-                check(planned.plan().entries().get(libId) == ModuleRoute.LEGACY
-                        && planned.plan().entries().get(mainId) == ModuleRoute.LEGACY,
-                    what + ": rule 2 keeps the time module and its importer LEGACY");
-                check(!planned.plan().shadowModules().contains(libId),
-                    what + ": the time module is never a shadow module — never "
-                        + "common-lowerable even under an explicit shadow request");
+                if (shadowPurpose) {
+                    check(planned.plan().entries().get(libId) == ModuleRoute.SHARED
+                            && planned.plan().shadowModules().contains(libId),
+                        what + ": the retired rule 2 never fires — the shadow request "
+                            + "common-lowers the time module (recorded shadow) instead "
+                            + "of forcing LEGACY");
+                } else {
+                    check(planned.plan().entries().get(libId) == ModuleRoute.LEGACY,
+                        what + ": the time module stays LEGACY through the ordinary "
+                            + "promotion/legacy rules (never a conflict reroute)");
+                }
             }
 
-            // No common unit is produced for it: the forced lowering
-            // fails with E6005 and the branch is never taken.
+            // The K7 covered behavior: the forced lowering produces a
+            // validated unit carrying STDLIB_CALL(TIME_NOW_MILLIS) with the
+            // INT32_RESULT terminal.
             SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
-            check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                "the forced lowering of the time module produces no unit (E6005)");
-            if (lowering != null && lowering.hasErrors()) {
-                check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                        diagnostic.message().contains("module 'lib'")
-                            && diagnostic.message().contains("CONSTRUCT_UNLOWERED")),
-                    "the failure is the exact E6005 with module lib and validatorRule "
-                        + "CONSTRUCT_UNLOWERED: " + lowering.diagnostics());
+            check(lowering != null && !lowering.hasErrors() && lowering.unit() != null,
+                "the forced lowering of the time module produces a validated unit: "
+                    + (lowering == null ? "null" : lowering.diagnostics()));
+            if (lowering != null && !lowering.hasErrors() && lowering.unit() != null) {
+                boolean timeCall = lowering.unit().ops().stream().anyMatch(op ->
+                    op.kind() == deal.semantic.ir.SemanticOpKind.STDLIB_CALL
+                        && op.payload() instanceof deal.semantic.ir.KindPayload
+                            .StdlibCallPayload payload
+                        && payload.function()
+                            == deal.semantic.ir.StdlibFunctionId.TIME_NOW_MILLIS
+                        && op.failurePolicy()
+                            == deal.semantic.ir.FailurePolicyId.INT32_RESULT);
+                check(timeCall,
+                    "the unit carries STDLIB_CALL(TIME_NOW_MILLIS) with the INT32_RESULT "
+                        + "terminal — the branch is taken, never a reroute");
             }
         } finally {
             deleteRecursively(tmp);
@@ -1740,8 +1784,8 @@ public class StdlibClaimingTimeLockTest {
         testHomeRowsArmAndDerivation();
         testManifestArm();
         testRCapabilityNegatives();
-        testTimeLockValidatorNegatives();
-        testTimeLockRoutingNegatives();
+        testTimeRowValidatorNegatives();
+        testTimeRowRouting();
         testValueReadDisposition();
         testRouteRule4PromotionGateCoversStdlibModules();
         testCombinedT4Behavior();

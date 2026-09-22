@@ -16,16 +16,18 @@ import java.util.Set;
  * The single closed mapping from {@code (resolved stdlib module path,
  * export name)} to {@link StdlibFunctionId}
  * ({@code stdlib-operations-and-time-lock} D1, Contracts
- * §{@code StdlibFunctionCatalog}): exactly the 20 declared exports of
+ * §{@code StdlibFunctionCatalog}): exactly the declared exports of
  * {@code std/console}, {@code std/string}, {@code std/table},
- * {@code std/json}, and {@code std/math}, each carrying its declared
- * parameter and return descriptors. No other stdlib call surface exists:
- * no consumer may interpret a module/name pair as a stdlib algorithm
- * outside this catalog and the closed checked-fact recognition predicate
- * ({@link StdlibCallRecognition}).
+ * {@code std/json}, {@code std/math}, and {@code std/time}, each
+ * carrying its declared parameter and return descriptors. No other
+ * stdlib call surface exists: no consumer may interpret a module/name
+ * pair as a stdlib algorithm outside this catalog and the closed
+ * checked-fact recognition predicate ({@link StdlibCallRecognition}).
  *
- * <p><b>Closed set (D1, exact).</b> The {@link #ENTRIES} list is the
- * pinned declaration order of the D1 table — 20 rows, one per
+ * <p><b>Closed set (D1, exact; 21 rows since K7).</b> The
+ * {@link #ENTRIES} list is the pinned declaration order of the D1 table
+ * extended by the {@code semantic-ir-construct-coverage-cutover} K7
+ * {@code std.time}/{@code nowMillis} row — 21 rows, one per
  * {@code StdlibFunctionId} value, none added, removed, or renamed:</p>
  *
  * <pre>{@code
@@ -45,12 +47,20 @@ import java.util.Set;
  *              sqrt → MATH_SQRT (number) → number;
  *              absInt → MATH_ABS_INT (int) → int; absNumber → MATH_ABS_NUMBER (number) → number;
  *              minInt → MATH_MIN_INT (int,int) → int; maxInt → MATH_MAX_INT (int,int) → int
+ * std.time:    nowMillis → TIME_NOW_MILLIS () → int (the declared ()=>int API;
+ *              the value reads the target clock and fails the declared int
+ *              boundary with the pinned E8004 int out of safe range
+ *              for any contemporary reading)
  * }</pre>
  *
- * <p><b>Time lock (D8).</b> {@code std/time} has no entry for any
- * member: {@code TIME_NOW_MILLIS} stays a reserved selector name, invalid
- * in {@code deal.semantic-ir/1}, and this catalog never names it.
- * {@link StdlibFunctionId#RESERVED_NAMES} is untouched.</p>
+ * <p><b>The std.time group (K7).</b> The {@code std.time} group is the
+ * single row appended after the {@code std.math} rows, so no existing
+ * row moves; its zero parameter descriptors and declared {@code int}
+ * return descriptor are the declared {@code ()->int} API of
+ * {@code docs/spec-v1.2.md}. {@link StdlibFunctionId#RESERVED_NAMES} is
+ * empty (the superseded D8 reservation is retired), and the
+ * reserved-name guard below stays as the closed-set machinery: a
+ * reserved selector name is never a catalog entry.</p>
  *
  * <p><b>Declared descriptors (D1).</b> Every parameter/return descriptor
  * is a canonical structural descriptor in the landed
@@ -67,7 +77,7 @@ import java.util.Set;
  * arguments are absent inputs, never errors.</p>
  *
  * <p><b>Production closed-set guard.</b> Class initialization verifies
- * that the 20 rows cover the closed 20-value {@link StdlibFunctionId}
+ * that the 21 rows cover the closed 21-value {@link StdlibFunctionId}
  * set exactly once and that no {@code (modulePath, exportName)} pair
  * repeats; a drifted catalog fails at class load ({@link
  * IllegalStateException} — a production defect, never a runtime state).</p>
@@ -128,13 +138,14 @@ public final class StdlibFunctionCatalog {
         DescriptorService.describe(new Type.Array(Type.String.INSTANCE));
 
     // =========================================================================
-    // The closed 20-row table (D1 order, verbatim)
+    // The closed 21-row table (D1 order + the K7 std.time row, verbatim)
     // =========================================================================
 
     /**
-     * The closed 20 entries in the pinned D1 declaration order. Immutable
-     * ({@code List.of}); an added, removed, or renamed row fails the
-     * class-load closed-set guard below.
+     * The closed 21 entries in the pinned declaration order: the D1 rows
+     * in order, then the K7 {@code std.time}/{@code nowMillis} row as the
+     * sole {@code std.time} group. Immutable ({@code List.of}); an added,
+     * removed, or renamed row fails the class-load closed-set guard below.
      */
     private static final List<Entry> ENTRIES = List.of(
         // std.console
@@ -181,7 +192,10 @@ public final class StdlibFunctionCatalog {
         new Entry(StdlibFunctionId.MATH_MIN_INT, "std.math", "minInt",
             List.of(INT, INT), INT),
         new Entry(StdlibFunctionId.MATH_MAX_INT, "std.math", "maxInt",
-            List.of(INT, INT), INT)
+            List.of(INT, INT), INT),
+        // std.time (K7)
+        new Entry(StdlibFunctionId.TIME_NOW_MILLIS, "std.time", "nowMillis",
+            List.of(), INT)
     );
 
     /**
@@ -212,14 +226,14 @@ public final class StdlibFunctionCatalog {
             if (StdlibFunctionId.isReservedName(entry.function().name())) {
                 throw new IllegalStateException(
                     "reserved stdlib selector name " + entry.function().name()
-                        + " in the catalog (producer defect: TIME_NOW_MILLIS is reserved "
-                        + "and never a catalog entry)");
+                        + " in the catalog (producer defect: a reserved selector name "
+                        + "is never a catalog entry)");
             }
         }
         if (!functions.equals(EnumSet.allOf(StdlibFunctionId.class))) {
             throw new IllegalStateException(
                 "the stdlib catalog does not cover the closed StdlibFunctionId set "
-                    + "(producer defect: exactly the 20 ids, one entry each)");
+                    + "(producer defect: exactly the 21 ids, one entry each)");
         }
         return Map.copyOf(byModule);
     }
@@ -229,7 +243,7 @@ public final class StdlibFunctionCatalog {
     // =========================================================================
 
     /**
-     * The closed entry table in the pinned D1 declaration order (20 rows).
+     * The closed entry table in the pinned declaration order (21 rows).
      *
      * @return an immutable view of {@link #ENTRIES}
      */
@@ -242,9 +256,8 @@ public final class StdlibFunctionCatalog {
      * module path, export name)}, or {@code Optional.empty()} — "not a
      * stdlib call" — when the module or member is absent. Never an
      * error, never a state change; null inputs are absent inputs. An
-     * absent entry carries no default: a {@code std/time} member, an
-     * unknown member of a known stdlib module, and a user/host module
-     * all return empty.
+     * absent entry carries no default: an unknown member of a known
+     * stdlib module, and a user/host module all return empty.
      *
      * @param resolvedModulePath the resolved stdlib module path — the
      *                           dotted module id of the resolved import

@@ -105,7 +105,7 @@ import java.util.Set;
  *   <li>The negative corpus: each of the 14 rules asserted exactly once
  *       per defect class through T5's E6005 payload — the raw-name
  *       negatives (R-ENUM open policy, R-ENUM reserved boundary name,
- *       R-PRIVATE-STEP op kind, the five R-RESERVED-NAME fixtures,
+ *       R-PRIVATE-STEP op kind, the out-of-set R-ENUM selector fixture,
  *       R-PROFILE's profile-string fixture and the cross-unit
  *       project-level profile fixture) via {@code validateText} over the
  *       text produced by the validator's serializer with exactly one leaf
@@ -113,10 +113,10 @@ import java.util.Set;
  *       the remainder via typed construction.</li>
  *   <li>Deterministic first-failure order (the S6 rule enumeration order
  *       across independent defects) and repeated-run determinism.</li>
- *   <li>Lock pins (ISSUE-0368): the reserved selector
- *       {@code TIME_NOW_MILLIS} (not an enum member, listed in
- *       {@code RESERVED_NAMES}) is rejected with R-RESERVED-NAME through
- *       the text surface, and a unit claiming {@code STDLIB_TIME_CONFLICT}
+ *   <li>Lock pins (ISSUE-0368, retargeted by K7): {@code TIME_NOW_MILLIS}
+ *       is the 21st closed {@link StdlibFunctionId} member
+ *       ({@code RESERVED_NAMES} empty; an out-of-set selector name is
+ *       R-ENUM), and a unit claiming {@code STDLIB_TIME_CONFLICT}
  *       — the empty-evidence routing marker — fails R-CAPABILITY
  *       on both the typed and the text surface, so no common-lowering
  *       path admits it.</li>
@@ -1128,7 +1128,7 @@ public class SemanticIrValidatorTest {
         check(realizations.size() == 2, "both realization forms appear in passing units; got " + realizations);
         check(boundaryKinds.size() == 25, "all 25 boundary kinds appear in passing units; got " + boundaryKinds);
         check(policies.size() == 24, "all 24 policy names appear in passing units; got " + policies);
-        check(stdlibIds.size() == 20, "all 20 stdlib ids appear in passing units; got " + stdlibIds.size());
+        check(stdlibIds.size() == 21, "all 21 stdlib ids appear in passing units; got " + stdlibIds.size());
     }
 
     private static FailurePolicyId binaryPolicy(BinarySelector selector) {
@@ -1143,7 +1143,7 @@ public class SemanticIrValidatorTest {
     private static FailurePolicyId stdlibPolicy(StdlibFunctionId function) {
         return switch (function) {
             case CONSOLE_LOG, CONSOLE_ERROR -> FailurePolicyId.INFRASTRUCTURE_ONLY;
-            case STRING_LENGTH -> FailurePolicyId.INT32_RESULT;
+            case STRING_LENGTH, TIME_NOW_MILLIS -> FailurePolicyId.INT32_RESULT;
             case JSON_PARSE -> FailurePolicyId.JSON_PARSE_SYNTAX;
             case JSON_STRINGIFY -> FailurePolicyId.JSON_TO_ERROR;
             case MATH_SQRT -> FailurePolicyId.SQRT_NEGATIVE;
@@ -1354,11 +1354,11 @@ public class SemanticIrValidatorTest {
     private static final Set<String> policiesSweep = new LinkedHashSet<>();
 
     // =========================================================================
-    // 22 construct rows recorded in passing units with a produced mapped op
+    // 23 construct rows recorded in passing units with a produced mapped op
     // =========================================================================
 
     private static void testConstructRows() {
-        System.out.println("-- 22 construct rows recorded in passing units --");
+        System.out.println("-- 23 construct rows recorded in passing units --");
 
         Map<ConstructKind, SemanticOpKind> producing = new EnumMap<>(ConstructKind.class);
         producing.put(ConstructKind.SCALAR_LITERAL, SemanticOpKind.CONST);
@@ -1383,14 +1383,12 @@ public class SemanticIrValidatorTest {
         producing.put(ConstructKind.TRY_CATCH_THROW, SemanticOpKind.TRY_CATCH);
         producing.put(ConstructKind.CLASS_DECLARATION, SemanticOpKind.CLASS_DEFAULT);
         producing.put(ConstructKind.IMPORT_EXPORT_ENTRY, SemanticOpKind.MODULE_INIT);
+        producing.put(ConstructKind.STDLIB_TIME_NOW_MILLIS, SemanticOpKind.STDLIB_CALL);
 
         int withForm = 0;
         for (ConstructKind kind : ConstructKind.values()) {
-            if (kind.requiredCommonForm() == null) {
-                check(kind == ConstructKind.STDLIB_TIME_NOW_MILLIS,
-                    "the only row without a required common form is the excluded row");
-                continue;
-            }
+            check(kind.requiredCommonForm() != null,
+                "every row carries a required common form (the K7 std.time row included)");
             withForm++;
             Map<ConstructKind, List<SemanticOpKind>> coverage = Map.of(kind,
                 kind.mappedOpKinds());
@@ -1402,7 +1400,7 @@ public class SemanticIrValidatorTest {
             assertPass(SemanticIrValidator.validateText(SemanticIrValidator.toUnitText(unit), FACTS),
                 "construct row " + kind.name() + " through the text surface");
         }
-        check(withForm == 22, "22 rows carry a required common form; got " + withForm);
+        check(withForm == 23, "23 rows carry a required common form; got " + withForm);
 
         // The pinned exemplars: the call, unary/arithmetic/comparison, and
         // function declaration/expression rows prove CALL / UNARY / BINARY /
@@ -1419,19 +1417,24 @@ public class SemanticIrValidatorTest {
                     .contains(SemanticOpKind.CLOSURE_NEW),
             "the pinned detector rows map those producing kinds");
 
-        // The excluded row can never be a constructCoverage key (data level).
-        try {
-            new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
-                SemanticProfile.DEAL_V1_2_INT32, MOD, IFACE, LCH, Set.of(),
-                Map.of(ConstructKind.STDLIB_TIME_NOW_MILLIS, List.of()), Map.of(), Map.of(),
-                new ModuleInitPlan(List.of(), new BlockId(0)), ExportPlan.empty(), Map.of(),
-                List.of());
-            fail("the excluded std/time.nowMillis row must not be constructible as a "
-                + "constructCoverage key");
-        } catch (IllegalArgumentException expected) {
-            check(true, "the excluded std/time.nowMillis row is rejected as a constructCoverage "
-                + "key at construction (data-level constraint)");
-        }
+        // The K7 std.time row is an ordinary constructCoverage key: a unit
+        // that records it with a produced STDLIB_CALL passes, and a unit
+        // that records it with no produced op of a mapped kind fails
+        // R-COVERAGE like every other row.
+        LoweredModuleUnit timeCovered = new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
+            SemanticProfile.DEAL_V1_2_INT32, MOD, IFACE, LCH, Set.of(),
+            Map.of(ConstructKind.STDLIB_TIME_NOW_MILLIS,
+                ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds()),
+            Map.of(), Map.of(),
+            new ModuleInitPlan(List.of(), new BlockId(0)), ExportPlan.empty(), Map.of(),
+            buildProducingOps(SemanticOpKind.STDLIB_CALL));
+        assertPass(SemanticIrValidator.validate(timeCovered, FACTS),
+            "the std/time.nowMillis row with a produced STDLIB_CALL");
+        assertE6005(SemanticIrValidator.validate(
+                unit(Set.of(), Map.of(ConstructKind.STDLIB_TIME_NOW_MILLIS,
+                        ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds()),
+                    Map.of(), List.of(constOp())), FACTS),
+            "R-COVERAGE", "STDLIB_TIME_NOW_MILLIS");
     }
 
     private static List<SemanticOp> buildProducingOps(SemanticOpKind kind) {
@@ -1555,6 +1558,20 @@ public class SemanticIrValidatorTest {
                 new KindPayload.ModuleInitPayload(MOD, List.of(new ModuleId("dep")),
                     new BlockId(1)),
                 null, null, FailurePolicyId.NO_DEAL_FAILURE, null));
+            case STDLIB_CALL -> {
+                OpId callOp = nextOpId();
+                OpId returnBoundary = nextOpId();
+                ValueId result = nextValue();
+                List<SemanticOp> ops = new ArrayList<>();
+                ops.add(boundaryWith(returnBoundary, BoundaryKind.STDLIB_RETURN, INT,
+                    FailurePolicyId.TYPE_DESCRIPTOR, callOp));
+                ops.add(opWith(callOp, SemanticOpKind.STDLIB_CALL,
+                    new KindPayload.StdlibCallPayload(
+                        StdlibFunctionId.TIME_NOW_MILLIS, List.of(),
+                        SemanticCapability.STDLIB_SEMANTICS),
+                    result, INT, FailurePolicyId.INT32_RESULT, null));
+                yield ops;
+            }
             default -> null;
         };
     }
@@ -1768,7 +1785,10 @@ public class SemanticIrValidatorTest {
                 "R-PRIVATE-STEP", "PRIVATE_STEP_X");
         }
 
-        // R-RESERVED-NAME: TIME_NOW_MILLIS in StdlibFunctionId position.
+        // R-ENUM: an open stdlib selector name in the StdlibFunctionId
+        // position (the closed-set rule; TIME_NOW_MILLIS is a member
+        // since K7 and its typed form is validated by the construct-row
+        // battery).
         {
             LoweredModuleUnit base = unit(List.of(
                 op(SemanticOpKind.STDLIB_CALL,
@@ -1778,9 +1798,9 @@ public class SemanticIrValidatorTest {
                     FailurePolicyId.INFRASTRUCTURE_ONLY, null)));
             assertPass(SemanticIrValidator.validate(base, FACTS), "stdlib injection base");
             String text = substituteStdlibFunction(SemanticIrValidator.toUnitText(base),
-                "CONSOLE_LOG", "TIME_NOW_MILLIS");
+                "CONSOLE_LOG", "NOT_A_STDLIB_ID");
             assertE6005(SemanticIrValidator.validateText(text, FACTS),
-                "R-RESERVED-NAME", "TIME_NOW_MILLIS");
+                "R-ENUM", "NOT_A_STDLIB_ID");
         }
 
         // R-RESERVED-NAME: each of the four reserved policy names in
@@ -2013,8 +2033,8 @@ public class SemanticIrValidatorTest {
     }
 
     // =========================================================================
-    // 6. Lock pins (ISSUE-0368): the reserved TIME_NOW_MILLIS selector and
-    //    the STDLIB_TIME_CONFLICT routing marker stay locked
+    // 6. Lock pins (ISSUE-0368, retargeted by K7): TIME_NOW_MILLIS is the
+    //    21st closed member; the STDLIB_TIME_CONFLICT routing marker stays inert
     // =========================================================================
 
     private static boolean enumMember(Class<? extends Enum<?>> closed, String name) {
@@ -2027,22 +2047,25 @@ public class SemanticIrValidatorTest {
     }
 
     private static void testLockPins() {
-        System.out.println("-- Lock pins (ISSUE-0368): TIME_NOW_MILLIS reserved; "
-            + "STDLIB_TIME_CONFLICT never valid IR --");
+        System.out.println("-- Lock pins (ISSUE-0368, K7): TIME_NOW_MILLIS is the 21st "
+            + "member; STDLIB_TIME_CONFLICT never valid IR --");
 
-        // Fact 1 — the reserved-selector lock: TIME_NOW_MILLIS is not an
-        // enum member, stays in RESERVED_NAMES, and isReservedName is true.
-        check(!enumMember(StdlibFunctionId.class, "TIME_NOW_MILLIS"),
-            "TIME_NOW_MILLIS is not a StdlibFunctionId enum member");
-        check(StdlibFunctionId.RESERVED_NAMES.contains("TIME_NOW_MILLIS"),
-            "TIME_NOW_MILLIS stays listed in StdlibFunctionId.RESERVED_NAMES");
-        check(StdlibFunctionId.isReservedName("TIME_NOW_MILLIS"),
-            "isReservedName(\"TIME_NOW_MILLIS\") is true");
+        // Fact 1 — the K7 selector member: TIME_NOW_MILLIS is the 21st enum
+        // member, RESERVED_NAMES is empty, and the reserved-name guard stays
+        // (deny-by-default over the closed set).
+        check(enumMember(StdlibFunctionId.class, "TIME_NOW_MILLIS"),
+            "TIME_NOW_MILLIS is a StdlibFunctionId enum member (the 21st value)");
+        check(StdlibFunctionId.RESERVED_NAMES.isEmpty()
+                && !StdlibFunctionId.RESERVED_NAMES.contains("TIME_NOW_MILLIS"),
+            "RESERVED_NAMES is empty — the superseded D8 reservation is retired");
+        check(!StdlibFunctionId.isReservedName("TIME_NOW_MILLIS")
+                && !StdlibFunctionId.isReservedName("NOT_A_STDLIB_ID"),
+            "neither TIME_NOW_MILLIS nor an unknown name is a reserved selector name");
 
-        // Fact 1 — a unit whose stdlib selector is TIME_NOW_MILLIS is
-        // rejected with R-RESERVED-NAME on the real validator surfaces
-        // (the pinned invalid-IR injection route carries the raw name; the
-        // typed closed-selector family cannot express a reserved name).
+        // Fact 1 — the closed-set surface: an out-of-set stdlib selector
+        // name is R-ENUM (the only remaining selector-family rejection),
+        // while the typed member validates through the construct-row
+        // battery.
         {
             LoweredModuleUnit base = unit(List.of(
                 op(SemanticOpKind.STDLIB_CALL,
@@ -2052,23 +2075,29 @@ public class SemanticIrValidatorTest {
                     FailurePolicyId.INFRASTRUCTURE_ONLY, null)));
             assertPass(SemanticIrValidator.validate(base, FACTS),
                 "stdlib injection base (typed surface)");
-            String reserved = substituteStdlibFunction(SemanticIrValidator.toUnitText(base),
-                "CONSOLE_LOG", "TIME_NOW_MILLIS");
-            Optional<CompilerDiagnostic> diagnostic =
-                SemanticIrValidator.validateText(reserved, FACTS);
-            assertE6005(diagnostic, "R-RESERVED-NAME", "TIME_NOW_MILLIS");
-            check(diagnostic.get().message().contains("TIME_NOW_MILLIS"),
-                "the observed R-RESERVED-NAME rejection names TIME_NOW_MILLIS literally");
-            System.out.println("    observed TIME_NOW_MILLIS rejection: "
-                + diagnostic.get().message());
-
-            // The dispatch contrast: an unknown non-reserved stdlib name
-            // fails R-ENUM — only the RESERVED_NAMES listing selects
-            // R-RESERVED-NAME for TIME_NOW_MILLIS.
             String unknown = substituteStdlibFunction(SemanticIrValidator.toUnitText(base),
                 "CONSOLE_LOG", "NOT_A_STDLIB_ID");
-            assertE6005(SemanticIrValidator.validateText(unknown, FACTS),
-                "R-ENUM", "NOT_A_STDLIB_ID");
+            Optional<CompilerDiagnostic> unknownDiagnostic =
+                SemanticIrValidator.validateText(unknown, FACTS);
+            assertE6005(unknownDiagnostic, "R-ENUM", "NOT_A_STDLIB_ID");
+            System.out.println("    observed out-of-set selector rejection: "
+                + unknownDiagnostic.get().message());
+
+            // The dispatch contrast: the same raw-string route now accepts
+            // the closed TIME_NOW_MILLIS name syntactically, so the
+            // rejection is the closed-set rule for a truly unknown name.
+            String timeName = substituteStdlibFunction(SemanticIrValidator.toUnitText(base),
+                "CONSOLE_LOG", "TIME_NOW_MILLIS");
+            Optional<CompilerDiagnostic> timeDiagnostic =
+                SemanticIrValidator.validateText(timeName, FACTS);
+            check(timeDiagnostic.isPresent()
+                    && timeDiagnostic.get().message().contains("R-POLICY-KIND"),
+                "the raw TIME_NOW_MILLIS name is a closed member: the substitution fails "
+                    + "the algorithm→policy pin (R-POLICY-KIND), never R-RESERVED-NAME: "
+                    + (timeDiagnostic.isEmpty() ? "no diagnostic"
+                        : timeDiagnostic.get().message()));
+            System.out.println("    observed TIME_NOW_MILLIS rejection: "
+                + (timeDiagnostic.isEmpty() ? "none" : timeDiagnostic.get().message()));
         }
 
         // Fact 2 — the routing-marker lock: the S4 evidence set of

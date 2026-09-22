@@ -8,7 +8,7 @@ import java.util.List;
  * S4) — reproduced verbatim, exactly the parent page's 23 rows. The
  * parent section is normative and this set never diverges from it.
  *
- * <p>Each of the 22 rows carrying a required common form records it
+ * <p>Each of the 23 rows carries a required common form recorded
  * verbatim ({@link #requiredCommonForm()}) together with its mapped
  * op-kind set ({@link #mappedOpKinds()}, the kinds named by the pinned
  * detector row) — the data {@code constructCoverage} obligations consume:
@@ -25,14 +25,14 @@ import java.util.List;
  * (the precise per-construct op production within these fixed rows), never
  * this closed {@code ConstructKind} set.</p>
  *
- * <p>The excluded {@code std/time.nowMillis} row carries no required
- * common form and no op-kind set ({@link #requiredCommonForm()} is
- * {@code null}, {@link #mappedOpKinds()} is empty): the selector is
- * reserved, the module requires {@code STDLIB_TIME_CONFLICT} and stays on
- * retained routes, and the row never appears in any
- * {@code constructCoverage} map (a data-level constraint enforced at
- * {@link LoweredModuleUnit} construction). Its verification is its
- * routing consequence, never {@code constructCoverage}.</p>
+ * <p>The {@code std/time.nowMillis} row carries its required common form
+ * and op-kind set since K7: the construct is the recognized cataloged
+ * call through the closed {@code std.time}/{@code nowMillis} row, it
+ * lowers to {@code STDLIB_CALL(TIME_NOW_MILLIS)} with the declared
+ * {@code int} return boundary ({@code STDLIB_RETURN}) as its single
+ * terminal, and it is recorded in {@code constructCoverage} like every
+ * other construct (a data-level constraint enforced at
+ * {@link LoweredModuleUnit} construction).</p>
  */
 public enum ConstructKind {
 
@@ -153,14 +153,14 @@ public enum ConstructKind {
             SemanticOpKind.EXPORT_PUBLISH, SemanticOpKind.ENTRY_INVOKE)),
 
     /**
-     * <b>Excluded:</b> reserved selector; the module requires
-     * {@code STDLIB_TIME_CONFLICT} and stays on retained routes — this row
-     * carries no required common form and no op-kind set, so it never
-     * appears in a {@code constructCoverage} map and is never verified
-     * through {@code constructCoverage}; its exclusion is verified through
-     * its routing consequence.
+     * Required common form: {@code STDLIB_CALL(TIME_NOW_MILLIS)} with the
+     * declared {@code int} return boundary and its {@code INT32_RESULT}
+     * terminal — the recognized cataloged call through the closed
+     * {@code std.time}/{@code nowMillis} row (K7).
      */
-    STDLIB_TIME_NOW_MILLIS(null, List.of());
+    STDLIB_TIME_NOW_MILLIS("STDLIB_CALL(TIME_NOW_MILLIS) with the declared int "
+        + "return boundary and its INT32_RESULT terminal",
+        List.of(SemanticOpKind.STDLIB_CALL, SemanticOpKind.BOUNDARY));
 
     private final String requiredCommonForm;
     private final List<SemanticOpKind> mappedOpKinds;
@@ -172,8 +172,8 @@ public enum ConstructKind {
 
     /**
      * The verbatim required common form of this construct row, or
-     * {@code null} for the excluded {@code std/time.nowMillis} row (which
-     * carries no required common form and no op-kind set).
+     * {@code null} when the row carries none (no row does since K7; the
+     * accessor keeps the closed-table shape).
      */
     public String requiredCommonForm() {
         return requiredCommonForm;
@@ -181,8 +181,7 @@ public enum ConstructKind {
 
     /**
      * The mapped op-kind set of this construct row — the kinds named by
-     * the pinned detector row; empty for the excluded
-     * {@code std/time.nowMillis} row. R-COVERAGE requires at least one
+     * the pinned detector row. R-COVERAGE requires at least one
      * produced op of a mapped kind per recorded construct.
      */
     public List<SemanticOpKind> mappedOpKinds() {

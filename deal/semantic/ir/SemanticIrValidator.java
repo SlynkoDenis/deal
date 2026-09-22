@@ -455,10 +455,8 @@ public final class SemanticIrValidator {
     private static Optional<CompilerDiagnostic> checkCoverage(RawUnit unit, ComparisonFacts facts) {
         for (RawCoverage row : unit.coverage()) {
             ConstructKind construct = enumByName(ConstructKind.class, row.construct());
-            if (construct == null || construct == ConstructKind.STDLIB_TIME_NOW_MILLIS) {
-                // R-ENUM owns an out-of-set construct name; the excluded
-                // std/time.nowMillis row carries no op-kind set and its
-                // obligation is vacuous.
+            if (construct == null) {
+                // R-ENUM owns an out-of-set construct name.
                 continue;
             }
             Set<SemanticOpKind> obligation = new LinkedHashSet<>();
@@ -1219,8 +1217,10 @@ public final class SemanticIrValidator {
      * {@code INT32_RESULT}; {@code JSON_PARSE} →
      * {@code JSON_PARSE_SYNTAX}; {@code JSON_STRINGIFY} →
      * {@code JSON_TO_ERROR}; {@code MATH_SQRT} →
-     * {@code SQRT_NEGATIVE}; {@code MATH_ABS_INT} →
-     * {@code INT32_RESULT}; every other id → {@code NO_DEAL_FAILURE}.
+     * {@code SQRT_NEGATIVE}; {@code MATH_ABS_INT} and
+     * {@code TIME_NOW_MILLIS} → {@code INT32_RESULT} (the declared
+     * {@code int} return boundary is the single terminal of the
+     * target-clock read, K7); every other id → {@code NO_DEAL_FAILURE}.
      * This method is the single source of the assignment: the lowerer's
      * {@code STDLIB_CALL} policy stamping reads this table (never a
      * copy) — exactly like the landed {@code unaryPolicy}/
@@ -1236,7 +1236,7 @@ public final class SemanticIrValidator {
             case JSON_PARSE -> FailurePolicyId.JSON_PARSE_SYNTAX;
             case JSON_STRINGIFY -> FailurePolicyId.JSON_TO_ERROR;
             case MATH_SQRT -> FailurePolicyId.SQRT_NEGATIVE;
-            case MATH_ABS_INT -> FailurePolicyId.INT32_RESULT;
+            case MATH_ABS_INT, TIME_NOW_MILLIS -> FailurePolicyId.INT32_RESULT;
         };
     }
 

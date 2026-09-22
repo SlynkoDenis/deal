@@ -79,10 +79,13 @@ import java.util.Set;
  * <ol>
  *   <li>{@code LEGACY_SAFE_INT} profile → every implementation module
  *       {@code LEGACY}, {@code shadowModules} empty (never lowered).</li>
- *   <li>A module whose manifest requires
- *       {@code STDLIB_TIME_CONFLICT} (directly detected or propagated by
- *       {@link LoweringSupport}) → {@code LEGACY} in every purpose,
- *       including {@code COMMON_SHADOW} — never a shadow entry.</li>
+ *   <li>Rule 2 ({@code STDLIB_TIME_CONFLICT}, inert since K7): a module
+ *       whose manifest requires {@code STDLIB_TIME_CONFLICT} (never
+ *       claimed since the four-part line trigger and its propagation
+ *       are retired) → {@code LEGACY} in every purpose,
+ *       including {@code COMMON_SHADOW} — never a shadow entry. The rule
+ *       stays as the closed-set surface the capability catalog and the
+ *       validator's empty-evidence rule still consume.</li>
  *   <li>Rule 2b (ISSUE-0574 bytes guard, parent S1b): a module whose
  *       manifest carries the plan-time {@code bytesBearing} marker →
  *       {@code LEGACY} in every purpose — {@code PUBLIC_BUILD} pre- and
@@ -302,7 +305,8 @@ public final class MigrationPlanner {
 
     /**
      * The closed routing decision for one implementation module: rule 1
-     * (legacy profile), rule 2 ({@code STDLIB_TIME_CONFLICT}), rule 2b
+     * (legacy profile), rule 2 ({@code STDLIB_TIME_CONFLICT}, an inert
+     * marker no manifest claims since K7), rule 2b
      * (the bytes-bearing marker, ISSUE-0574), rule 3
      * ({@code PUBLIC_BUILD + PRE_ACTIVATION}), rule 4
      * ({@code PUBLIC_BUILD + V1_2_ACTIVE} promotion gate), rule 5

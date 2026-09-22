@@ -34,9 +34,12 @@ import java.util.Set;
  * The capability set is closed: only {@link SemanticCapability} values
  * appear (the enum admits no open member), every manifest claims
  * {@code FOUNDATION_VALUES} by construction (F3: every implementation
- * module claims it), and {@code STDLIB_TIME_CONFLICT} is claimed whenever
- * the closed four-part trigger fires — a routing marker only (parent D8:
- * such a module is never common-lowerable in any purpose). The
+ * module claims it), and {@code STDLIB_TIME_CONFLICT} is the inert
+ * routing marker no manifest claims since K7 (the superseded four-part
+ * line trigger and its planning claim are retired); the closed
+ * capability set, the empty-evidence catalog row, the planner's
+ * time-conflict reroute, and the validator's empty-evidence rule stay
+ * in the tree as inert surfaces. The
  * {@code bytesBearing} marker is the step-1 bytes guard (ISSUE-0574,
  * parent S1b): a fixed per-module boolean set by
  * {@link LoweringSupport} exactly from {@code scan.bytesInContainer ||
@@ -52,9 +55,8 @@ import java.util.Set;
  * reachable constructs from the closed construct→op detector table (S4):
  * each row's op-kind list is exactly {@link ConstructKind#mappedOpKinds()}
  * verbatim — enforced at construction, never reinterpreted — and the
- * excluded {@code std/time.nowMillis} row (no required common form, no
- * op-kind set) never appears in any map (enforced at construction, the
- * same data-level constraint {@code LoweredModuleUnit} carries; S1). At
+ * {@code std/time.nowMillis} row is an ordinary recorded row since K7
+ * (its produced {@code STDLIB_CALL}/boundary ops evidence it; S1). At
  * lowering start the unit producer copies these rows onto the unit's own
  * enum-keyed {@code constructCoverage} field — the validator's pinned
  * R-COVERAGE fact (S1/S6).</p>
@@ -98,11 +100,6 @@ public record SemanticRequirementManifest(
         capabilities = Collections.unmodifiableSet(capabilitiesCopy);
 
         Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        if (constructCoverage.containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS)) {
-            throw new IllegalArgumentException(
-                "the excluded std/time.nowMillis row carries no required common form and no "
-                    + "op-kind set and can never appear as a constructCoverage key (S4)");
-        }
         Map<ConstructKind, List<SemanticOpKind>> coverageCopy = new EnumMap<>(ConstructKind.class);
         for (Map.Entry<ConstructKind, List<SemanticOpKind>> entry : constructCoverage.entrySet()) {
             Objects.requireNonNull(entry.getKey(), "constructCoverage keys must not be null");

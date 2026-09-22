@@ -100,8 +100,11 @@ import java.util.Set;
  * {@code STDLIB_PARAMETER} boundaries in one-based order, then the
  * algorithm (a failure resolves the primitive's registry-row projection
  * with the row's pinned origin and the active frames), then the single
- * {@code STDLIB_RETURN} boundary run by the call op. Console stdlib
- * calls record one ordered {@link SemanticRuntimeModel.EffectEvent}
+ * {@code STDLIB_RETURN} boundary run by the call op. The
+ * {@code TIME_NOW_MILLIS} operation reads the oracle's injected
+ * deterministic clock reading (K7 item 4), never the host clock.
+ * Console stdlib calls record one ordered
+ * {@link SemanticRuntimeModel.EffectEvent}
  * per terminal. A DEAL failure escaping the module-init block is the
  * run's {@link SemanticRuntimeModel.Terminal.DealFailure}; otherwise the
  * run succeeds with the entry result atom.</p>
@@ -4476,19 +4479,19 @@ public final class SemanticOracle {
                 checked.add(value);
             }
             // Step 2 — the shared algorithm: SharedStdlibSemantics is the
-            // single executor of the 20 named operations
-            // (stdlib-operations-and-time-lock D4) over the
-            // boundary-admitted carriers; a failure is the primitive's
-            // registry-row projection resolved with the row's pinned
-            // origin (the STDLIB_CALL call origin) and the active DEAL
-            // frames.
+            // single executor of the 21 named operations
+            // (stdlib-operations-and-time-lock D4 plus the K7 std.time
+            // row) over the boundary-admitted carriers; a failure is the
+            // primitive's registry-row projection resolved with the row's
+            // pinned origin (the STDLIB_CALL call origin) and the active
+            // DEAL frames.
             List<SharedStdlibSemantics.Value> argv = new ArrayList<>();
             for (Value value : checked) {
                 argv.add(stdlibCarrierOf(value));
             }
             SharedStdlibSemantics.ConsoleSink sink = consoleSinkFor(payload.function());
             SharedStdlibSemantics.Outcome<SharedStdlibSemantics.Value> outcome =
-                SharedStdlibSemantics.execute(op, argv, sink);
+                SharedStdlibSemantics.execute(op, argv, sink, ORACLE_CLOCK);
             return switch (outcome) {
                 case SharedStdlibSemantics.Outcome.Success<SharedStdlibSemantics.Value>
                         success -> {
@@ -4718,6 +4721,21 @@ public final class SemanticOracle {
                 }
             };
         }
+
+        /**
+         * The injected deterministic clock reading of the oracle
+         * ({@code TIME_NOW_MILLIS}, K7 item 4): the oracle never reads
+         * the host clock, so its trace stays deterministic. The pinned
+         * reading is a contemporary epoch-millisecond value (outside the
+         * signed32 range), so the declared {@code int} return boundary
+         * fails with the same pinned E8004 projection the real targets
+         * produce for their own clock readings.
+         */
+        private static final long ORACLE_CLOCK_MILLIS = 1_700_000_000_000L;
+
+        /** The oracle's injected clock seam (one constant, never the host clock). */
+        private static final SharedStdlibSemantics.Clock ORACLE_CLOCK =
+            () -> ORACLE_CLOCK_MILLIS;
 
         /** The STDLIB_RETURN child, or null. */
         private SemanticOp returnBoundaryOf(SemanticOp op) {

@@ -32,10 +32,10 @@ import java.util.Set;
  * {@link ExecutableLoweredProject} (validator-checked). The
  * {@code constructCoverage} fact is recorded at lowering start by the unit
  * producer from the module's manifest reachable-construct rows and is
- * consumed by R-COVERAGE; the excluded {@code std/time.nowMillis} row
- * never appears as a key (data-level constraint enforced here), and a
- * module whose manifest claims {@code STDLIB_TIME_CONFLICT} is never
- * lowered at all.</p>
+ * consumed by R-COVERAGE; the {@code std/time.nowMillis} row is an
+ * ordinary key since K7 (its produced {@code STDLIB_CALL}/boundary ops
+ * evidence it), and a module whose manifest claims
+ * {@code STDLIB_TIME_CONFLICT} is never lowered at all.</p>
  *
  * <p>{@code loweringContextHash} is the pinned digest
  * {@code SHA-256(canonical JSON {semanticProfile, capabilityRegistryHash})}
@@ -142,11 +142,6 @@ public record LoweredModuleUnit(
         this.requiredCapabilities = Collections.unmodifiableSet(capabilitiesCopy);
 
         Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        if (constructCoverage.containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS)) {
-            throw new IllegalArgumentException(
-                "the excluded std/time.nowMillis row carries no required common form and no "
-                    + "op-kind set and can never appear as a constructCoverage key");
-        }
         Map<ConstructKind, List<SemanticOpKind>> coverageCopy = new EnumMap<>(ConstructKind.class);
         for (Map.Entry<ConstructKind, List<SemanticOpKind>> entry : constructCoverage.entrySet()) {
             Objects.requireNonNull(entry.getKey(), "constructCoverage keys must not be null");

@@ -16,6 +16,7 @@ import deal.semantic.CheckedProjectBuildResult;
 import deal.semantic.CheckedProjectInput;
 import deal.semantic.CompilerInvocation;
 import deal.semantic.CompilerProfileProvider;
+import deal.semantic.DescriptorService;
 import deal.semantic.LoweringSupport;
 import deal.semantic.ModuleRoute;
 import deal.semantic.MigrationPlanner;
@@ -49,6 +50,7 @@ import deal.semantic.ir.SemanticOpKind;
 import deal.semantic.ir.SemanticProfile;
 import deal.semantic.ir.StdlibFunctionId;
 import deal.semantic.ir.ValueId;
+import deal.types.Type;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,10 +78,12 @@ import java.util.stream.Stream;
  * <p>Tests:
  * <ol>
  *   <li>Single-source policy table: {@link SemanticIrValidator#stdlibPolicy}
- *       equals the pinned 20-id mapping exactly; the closed catalog and
- *       the reserved time selector are untouched.</li>
- *   <li>The 20-id lowering battery: one checked module calling every
- *       cataloged export lowers to exactly one validated
+ *       equals the pinned 21-id mapping exactly; the closed catalog
+ *       carries the K7 {@code std.time}/{@code nowMillis} row and
+ *       {@code StdlibFunctionId.RESERVED_NAMES} is empty.</li>
+ *   <li>The all-id lowering battery: one checked module calling every
+ *       cataloged export (the K7 {@code time.nowMillis()} call included)
+ *       lowers to exactly one validated
  *       {@code STDLIB_CALL} per call with the declared operand/result
  *       descriptors, the ordered {@code args} payload with
  *       {@code effectCapability = STDLIB_SEMANTICS}, the boundary-child
@@ -97,11 +101,14 @@ import java.util.stream.Stream;
  *   <li>Dump determinism: repeated dumps and re-lowering are
  *       byte-identical and carry the stdlib payload fields; the dump
  *       re-validates through the text surface.</li>
- *   <li>The time lock: a {@code std/time} member call never reaches the
- *       stdlib branch, the module's manifest carries
- *       {@code STDLIB_TIME_CONFLICT}, and route rule 2 keeps it
- *       {@code LEGACY} in every purpose even under a shadow request;
- *       {@code TIME_NOW_MILLIS} stays reserved.</li>
+ *   <li>The K7 time slice: a {@code std/time} member call is recognized
+ *       through the closed catalog row and lowers to
+ *       {@code STDLIB_CALL(TIME_NOW_MILLIS)} with zero parameter
+ *       boundaries, one {@code STDLIB_RETURN} on the declared {@code int},
+ *       and the {@code INT32_RESULT} terminal; the module's manifest
+ *       claims {@code STDLIB_SEMANTICS} (never
+ *       {@code STDLIB_TIME_CONFLICT}) and records the
+ *       {@code STDLIB_TIME_NOW_MILLIS} coverage row.</li>
  * </ol>
  */
 public class StdlibCallLoweringTest {
@@ -318,11 +325,11 @@ public class StdlibCallLoweringTest {
     // 1. The single-source policy table
     // =========================================================================
 
-    /** The pinned 20-id algorithm→policy mapping of the task (an expectation mirror). */
+    /** The pinned 21-id algorithm→policy mapping of the task (an expectation mirror). */
     private static FailurePolicyId expectedPolicy(StdlibFunctionId function) {
         return switch (function) {
             case CONSOLE_LOG, CONSOLE_ERROR -> FailurePolicyId.INFRASTRUCTURE_ONLY;
-            case STRING_LENGTH, MATH_ABS_INT -> FailurePolicyId.INT32_RESULT;
+            case STRING_LENGTH, MATH_ABS_INT, TIME_NOW_MILLIS -> FailurePolicyId.INT32_RESULT;
             case JSON_PARSE -> FailurePolicyId.JSON_PARSE_SYNTAX;
             case JSON_STRINGIFY -> FailurePolicyId.JSON_TO_ERROR;
             case MATH_SQRT -> FailurePolicyId.SQRT_NEGATIVE;
@@ -333,8 +340,9 @@ public class StdlibCallLoweringTest {
     static void testPolicyTableSingleSource() {
         System.out.println("-- Single source: SemanticIrValidator.stdlibPolicy --");
 
-        check(StdlibFunctionId.values().length == 20,
-            "the closed StdlibFunctionId enum stays at 20 values");
+        check(StdlibFunctionId.values().length == 21,
+            "the closed StdlibFunctionId enum is exactly 21 values (TIME_NOW_MILLIS is the "
+                + "21st member)");
         for (StdlibFunctionId function : StdlibFunctionId.values()) {
             check(SemanticIrValidator.stdlibPolicy(function) == expectedPolicy(function),
                 "stdlibPolicy(" + function + ") = "
@@ -343,10 +351,18 @@ public class StdlibCallLoweringTest {
             check(!StdlibFunctionId.isReservedName(function.name()),
                 function + " is never a reserved selector name");
         }
-        check(StdlibFunctionId.RESERVED_NAMES.equals(List.of("TIME_NOW_MILLIS")),
-            "TIME_NOW_MILLIS stays the single reserved selector name");
-        check(StdlibFunctionCatalog.lookup("std.time", "nowMillis").isEmpty(),
-            "std/time has no catalog entry — the time lock never reaches the branch");
+        check(StdlibFunctionId.RESERVED_NAMES.isEmpty(),
+            "RESERVED_NAMES is empty (the superseded D8 reservation is retired) while the "
+                + "reserved-name guard stays");
+        check(SemanticIrValidator.stdlibPolicy(StdlibFunctionId.TIME_NOW_MILLIS)
+                == FailurePolicyId.INT32_RESULT,
+            "stdlibPolicy(TIME_NOW_MILLIS) = INT32_RESULT — the declared int boundary is "
+                + "the single terminal");
+        check(StdlibFunctionCatalog.lookup("std.time", "nowMillis")
+                .map(entry -> entry.function() == StdlibFunctionId.TIME_NOW_MILLIS
+                    && entry.parameterDescriptors().isEmpty())
+                .orElse(false),
+            "std/time.nowMillis is the closed zero-parameter catalog row (K7)");
         // The policy table is stable across calls (pure static surface).
         for (StdlibFunctionId function : StdlibFunctionId.values()) {
             check(SemanticIrValidator.stdlibPolicy(function)
@@ -356,11 +372,11 @@ public class StdlibCallLoweringTest {
     }
 
     // =========================================================================
-    // 2. The 20-id lowering battery
+    // 2. The all-id lowering battery
     // =========================================================================
 
-    static void testLoweringBatteryAllTwentyIds() throws Exception {
-        System.out.println("-- Lowering battery: all 20 ids, one validated STDLIB_CALL each --");
+    static void testLoweringBatteryAllIds() throws Exception {
+        System.out.println("-- Lowering battery: all 21 ids, one validated STDLIB_CALL each --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-call-battery");
         try {
@@ -378,6 +394,7 @@ public class StdlibCallLoweringTest {
                     import * as tbl from "std/table"
                     import * as json from "std/json"
                     import * as math from "std/math"
+                    import * as time from "std/time"
 
                     function run(): null {
                       console.log("log")
@@ -401,6 +418,7 @@ public class StdlibCallLoweringTest {
                       let f16: number = math.absNumber(-1.5)
                       let i17: int = math.minInt(2, 3)
                       let i18: int = math.maxInt(2, 3)
+                      let now: int = time.nowMillis()
                       return null
                     }
 
@@ -414,7 +432,7 @@ public class StdlibCallLoweringTest {
             }
             SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
             check(lowering != null && !lowering.hasErrors() && lowering.unit() != null,
-                "the 20-id battery lowers through the validator/chain protocol/"
+                "the all-id battery lowers through the validator/chain protocol/"
                     + "control-flow validator: " + (lowering == null ? "null"
                         : lowering.diagnostics()));
             if (lowering == null || lowering.hasErrors() || lowering.unit() == null) {
@@ -423,15 +441,15 @@ public class StdlibCallLoweringTest {
             LoweredModuleUnit unit = lowering.unit();
 
             List<SemanticOp> stdlibOps = stdlibOps(unit);
-            check(stdlibOps.size() == 20,
-                "exactly one STDLIB_CALL per cataloged call: 20 ops; got "
+            check(stdlibOps.size() == 21,
+                "exactly one STDLIB_CALL per cataloged call: 21 ops; got "
                     + stdlibOps.size());
             EnumSet<StdlibFunctionId> produced = EnumSet.noneOf(StdlibFunctionId.class);
             for (SemanticOp op : stdlibOps) {
                 produced.add(((KindPayload.StdlibCallPayload) op.payload()).function());
             }
             check(produced.equals(EnumSet.allOf(StdlibFunctionId.class)),
-                "the produced STDLIB_CALL function set equals the catalog's closed 20-id "
+                "the produced STDLIB_CALL function set equals the catalog's closed 21-id "
                     + "set (fails if the catalog misses or adds an entry); got " + produced);
 
             Map<StdlibFunctionId, Integer> counts = new LinkedHashMap<>();
@@ -1162,11 +1180,11 @@ public class StdlibCallLoweringTest {
     }
 
     // =========================================================================
-    // 7. The time lock: std/time never reaches the branch
+    // 7. The K7 time slice: std/time.nowMillis reaches the stdlib branch
     // =========================================================================
 
-    static void testTimeLockRouteAndRecognition() throws Exception {
-        System.out.println("-- Time lock: std/time never reaches the stdlib branch --");
+    static void testTimeRowRouteAndRecognition() throws Exception {
+        System.out.println("-- Time row: std/time.nowMillis reaches the stdlib branch (K7) --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-call-time");
         try {
@@ -1204,24 +1222,36 @@ public class StdlibCallLoweringTest {
                 "main calls the std/time member nowMillis");
             if (call != null) {
                 check(StdlibCallRecognition.recognize(call.callee(), scopeAt(main, call),
-                        main.imports()).isEmpty(),
-                    "t.nowMillis is never recognized — std/time has no catalog entry and "
-                        + "TIME_NOW_MILLIS stays reserved");
+                        main.imports())
+                        .map(StdlibFunctionCatalog.Entry::function)
+                        .orElse(null) == StdlibFunctionId.TIME_NOW_MILLIS,
+                    "t.nowMillis is recognized through the closed std.time/nowMillis "
+                        + "catalog row (K7)");
             }
 
-            // The manifest requires STDLIB_TIME_CONFLICT (the landed time
-            // arm), and route rule 2 keeps the module LEGACY in every
-            // purpose — even under an explicit COMMON_SHADOW shadow
-            // request.
+            // The claim slice: the module claims STDLIB_SEMANTICS through the
+            // landed cataloged-call arm and never the inert
+            // STDLIB_TIME_CONFLICT marker; the recognized time construct
+            // records its own coverage row.
             RequirementManifestResult manifests = LoweringSupport.computeManifests(
                 invocation(), checked.input(), checked.index());
             SemanticRequirementManifest manifest = manifestOf(manifests, main.moduleId());
             check(manifest != null
                     && manifest.capabilities().contains(
-                        SemanticCapability.STDLIB_TIME_CONFLICT),
-                "the std/time-importing module's manifest requires STDLIB_TIME_CONFLICT"
+                        SemanticCapability.STDLIB_SEMANTICS),
+                "the std/time-importing module's manifest claims STDLIB_SEMANTICS "
+                    + "(the cataloged-call arm)"
                     + (manifest == null ? " (no manifest)" : ": " + manifest.capabilities()));
-            if (manifest != null) {
+            check(manifest != null
+                    && !manifest.capabilities().contains(
+                        SemanticCapability.STDLIB_TIME_CONFLICT),
+                "no manifest claims STDLIB_TIME_CONFLICT (the superseded four-part "
+                    + "trigger is retired)"
+                    + (manifest == null ? " (no manifest)" : ": " + manifest.capabilities()));
+            check(manifest != null && manifest.constructCoverage()
+                    .containsKey(deal.semantic.ir.ConstructKind.STDLIB_TIME_NOW_MILLIS),
+                "the manifest records the STDLIB_TIME_NOW_MILLIS coverage row");
+            {
                 RoutePlanResult planned = MigrationPlanner.planRoutes(invocation(),
                     CapabilityRegistry.releaseRegistry(), checked.input(), checked.index(),
                     manifests.manifests(), Target.LUAJIT, Set.of(main.moduleId()));
@@ -1230,29 +1260,62 @@ public class StdlibCallLoweringTest {
                     "the route plan computes cleanly for the time module");
                 if (planned != null && planned.plan() != null) {
                     check(planned.plan().entries().get(main.moduleId())
-                            == ModuleRoute.LEGACY,
-                        "route rule 2: a STDLIB_TIME_CONFLICT module is never "
-                            + "common-lowerable, even under a shadow request");
-                    check(!planned.plan().shadowModules().contains(main.moduleId()),
-                        "the time module is never a shadow module");
-                    ModuleId entry = moduleOf(checked.input(), "main").moduleId();
-                    check(planned.plan().entries().get(entry) == ModuleRoute.LEGACY,
-                        "the transitive component closure (main imports the time module) "
-                            + "is never common-lowerable either (rule 2)");
+                            == ModuleRoute.SHARED
+                            && planned.plan().shadowModules().contains(main.moduleId()),
+                        "the time module is no longer forced LEGACY by a conflict claim: "
+                            + "the COMMON_SHADOW request common-lowers it (recorded shadow) — "
+                            + "the retired rule 2 never fires, and the planner's "
+                            + "time-conflict reroute stays in the tree inert");
                 }
             }
 
-            // A direct forced lowering drive (bypassing the route) fails
-            // with the generic non-direct call shape and produces zero
-            // STDLIB_CALL ops — the branch is never taken.
+            // A direct forced lowering drive produces the K7 shape: one
+            // STDLIB_CALL(TIME_NOW_MILLIS) with zero parameter boundaries,
+            // one STDLIB_RETURN on the declared int, and the INT32_RESULT
+            // terminal at the call origin.
             SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
-            check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                "the forced lowering of the time module produces no unit (E6005)");
-            if (lowering != null && lowering.hasErrors()) {
-                check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                        diagnostic.message().contains("call callee shape MemberAccessExpr")),
-                    "the time member call never reaches the stdlib branch (the generic "
-                        + "call shape failure): " + lowering.diagnostics());
+            check(lowering != null && !lowering.hasErrors() && lowering.unit() != null,
+                "the forced lowering of the time module produces a validated unit: "
+                    + (lowering == null ? "null" : lowering.diagnostics()));
+            if (lowering != null && !lowering.hasErrors() && lowering.unit() != null) {
+                SemanticOp timeOp = stdlibOpBy(lowering.unit(),
+                    StdlibFunctionId.TIME_NOW_MILLIS);
+                check(timeOp != null,
+                    "the unit carries exactly one STDLIB_CALL(TIME_NOW_MILLIS)");
+                if (timeOp != null) {
+                    check(timeOp.failurePolicy() == FailurePolicyId.INT32_RESULT,
+                        "the op stamps the INT32_RESULT terminal from the single "
+                            + "stdlibPolicy table; got " + timeOp.failurePolicy());
+                    check(timeOp.operands().isEmpty() && timeOp.operandTypes().isEmpty(),
+                        "the zero-parameter row produces no parameter operands");
+                    List<SemanticOp> children = childrenOf(lowering.unit(), timeOp.opId());
+                    int returns = 0;
+                    int params = 0;
+                    for (SemanticOp child : children) {
+                        if (child.kind() != SemanticOpKind.BOUNDARY) {
+                            continue;
+                        }
+                        KindPayload.BoundaryPayload boundary =
+                            (KindPayload.BoundaryPayload) child.payload();
+                        if (boundary.kind() == BoundaryKind.STDLIB_RETURN) {
+                            returns++;
+                            check(boundary.descriptor().equals(
+                                    DescriptorService.describe(Type.Int.INSTANCE)),
+                                "the STDLIB_RETURN boundary carries the declared int "
+                                    + "descriptor");
+                        } else if (boundary.kind() == BoundaryKind.STDLIB_PARAMETER) {
+                            params++;
+                        }
+                    }
+                    check(returns == 1 && params == 0,
+                        "exactly one STDLIB_RETURN and zero STDLIB_PARAMETER children; got "
+                            + returns + "/" + params);
+                    check(lowering.unit().constructCoverage()
+                            .containsKey(deal.semantic.ir.ConstructKind
+                                .STDLIB_TIME_NOW_MILLIS),
+                        "the lowered unit records the STDLIB_TIME_NOW_MILLIS coverage "
+                            + "row and R-COVERAGE applies to it");
+                }
             }
         } finally {
             deleteRecursively(tmp);
@@ -1265,13 +1328,13 @@ public class StdlibCallLoweringTest {
         System.out.println("=== Stdlib STDLIB_CALL Lowering Tests (ISSUE-0494) ===\n");
 
         testPolicyTableSingleSource();
-        testLoweringBatteryAllTwentyIds();
+        testLoweringBatteryAllIds();
         testArgumentOperandCompletionOrder();
         testNegativeUserModuleMemberCall();
         testNegativeStdlibExportValueRead();
         testWrongPolicyValidatorFailure();
         testDumpDeterminismAndPayloadFields();
-        testTimeLockRouteAndRecognition();
+        testTimeRowRouteAndRecognition();
 
         System.out.println("\nPassed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

@@ -10,10 +10,12 @@ package deal.semantic.ir;
  * capability registry orders its canonical JSON entries by capability in
  * exactly this order ({@code capabilityRegistryHash} = SHA-256 of the
  * canonical JSON over the ordered capability × target cross product).
- * {@link #STDLIB_TIME_CONFLICT} is a routing marker only: a module whose
- * manifest requires it is never common-lowerable in any purpose and stays
- * on retained routes (parent D8; the member-access and import-propagation
- * arms of foundation F3).</p>
+ * {@link #STDLIB_TIME_CONFLICT} is an inert routing marker since K7: the
+ * superseded four-part line trigger and its planning claim are retired
+ * ({@code semantic-ir-construct-coverage-cutover} K7 item 6), no manifest
+ * claims it, and the member stays in the closed set as the closed-set
+ * surface the capability catalog, the planner's reroute, and the
+ * validator's empty-evidence rule consume.</p>
  */
 public enum SemanticCapability {
 
@@ -44,7 +46,7 @@ public enum SemanticCapability {
     /** Standard-library algorithm calls over the closed stdlib table. */
     STDLIB_SEMANTICS,
 
-    /** Routing marker: the module references std/time.nowMillis (never lowered). */
+    /** Inert routing marker (superseded D8 claim): never claimed nor lowered (K7). */
     STDLIB_TIME_CONFLICT,
 
     /** Classes, class factories/defaults, fields, and JSON class conversions. */

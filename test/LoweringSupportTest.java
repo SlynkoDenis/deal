@@ -54,47 +54,44 @@ import java.util.stream.Stream;
  * Verifies the ISSUE-0289 foundation surface: {@link LoweringSupport}
  * computing exactly one {@link SemanticRequirementManifest} per
  * implementation module over T8's checked project — the closed
- * four-part {@code STDLIB_TIME_CONFLICT} detector (Arm A: ModuleSymbol
- * object access plus the alias→module-path join; Arm B: Table-typed
- * object access in a direct {@code std/time} importer; Arm C:
- * Table-typed object access in the transitive import closure; Arm D:
- * claim propagation over the resolved import graph) computed in one
- * dependency-ordered pass, never a fixpoint iteration — plus the
+ * capability claims (every module claims {@code FOUNDATION_VALUES}; the
+ * {@code std/time.nowMillis} reference claims through the landed
+ * cataloged-call arm since K7, and the superseded four-part
+ * {@code STDLIB_TIME_CONFLICT} detector is retired) — plus the
  * reachable-construct coverage rows over T2's closed construct→op
  * detector table, E6005 on inconsistent checked facts via T5/T1, and
  * byte-identical determinism.
  *
  * <p>Tests:
  * <ol>
- *   <li>Arm A: a direct call {@code time.nowMillis()} claims, and a
+ *   <li>The K7 cataloged-call claim: a direct
+ *       {@code time.nowMillis()} call claims {@code STDLIB_SEMANTICS}
+ *       (never {@code STDLIB_TIME_CONFLICT}), and a
  *       value-position access ({@code let f: () => int =
- *       time.nowMillis; f();}) claims — the trigger is the member
- *       access itself, never only a direct call site.</li>
- *   <li>Arm B: {@code let t = time; let g: () => int = t.nowMillis;
- *       g();} claims with no ModuleSymbol-object access anywhere, and a
- *       table-typed parameter passthrough claims.</li>
- *   <li>Arm C: cross-module table escape (A exports the live table and
- *       claims nothing; B reads {@code t.nowMillis} through its only
- *       import "a" and claims) and the table re-export chain (the
- *       non-accessing intermediates claim nothing; the access site
- *       claims).</li>
- *   <li>Arm D: wrapper escape (A claims via Arm A; B invokes the
- *       wrapper with no {@code nowMillis} access and claims via
- *       propagation) and propagation chains through non-accessing
- *       re-exporting intermediates.</li>
+ *       time.nowMillis; f();}) claims nothing from the read.</li>
+ *   <li>The retired table-alias shapes: {@code let t = time;
+ *       let g: () => int = t.nowMillis; g();} and a
+ *       table-typed parameter passthrough carry no conflict claim (the K15
+ *       namespace-value slice owns their lowering).</li>
+ *   <li>The retired closure shapes: the cross-module table escape and
+ *       the table re-export chain carry no conflict claim at any site;
+ *       the wrappers' roots still claim no conflict.</li>
+ *   <li>The retired propagation: wrapper escape and propagation chains
+ *       through re-exporting intermediates carry no conflict claim in
+ *       any module.</li>
  *   <li>Negatives: a {@code std/time} importer without any
- *       {@code nowMillis} access does not claim; the alias join is
- *       exact (an alias bound to {@code std/time} triggers, an
- *       identically-named alias bound to another module does not).</li>
- *   <li>Over-claim direction (safe LEGACY): a direct importer reading an
- *       unrelated table's {@code nowMillis} claims (Arm B), a closure
- *       member reading an unrelated table's {@code nowMillis} claims
- *       (Arm C), and a module importing a claiming module claims even
- *       when it never invokes the wrapper (Arm D).</li>
+ *       {@code nowMillis} access claims exactly FOUNDATION_VALUES +
+ *       MODULES; an alias bound to {@code std/time} claims
+ *       STDLIB_SEMANTICS through the cataloged call, an
+ *       identically-named alias bound to another module does not.</li>
+ *   <li>The retired over-claim direction: a direct importer or a closure
+ *       member reading an unrelated table's {@code nowMillis}, and a
+ *       module importing a nowMillis-using module, all carry no conflict
+ *       claim.</li>
  *   <li>{@code constructCoverage}: one real module exercising every one
- *       of the 22 rows carrying a required common form records exactly
- *       those T2 rows with the verbatim mapped op kinds; the excluded
- *       {@code std/time.nowMillis} row appears in no map; a synthetic
+ *       of the 23 rows carrying a required common form (the
+ *       {@code std/time.nowMillis} row included) records exactly
+ *       those T2 rows with the verbatim mapped op kinds; a synthetic
  *       {@link LoweredModuleUnit} built from the manifest rows carries
  *       them on its own enum-keyed {@code constructCoverage} (the S1
  *       coverage fact).</li>
@@ -195,75 +192,31 @@ public class LoweringSupportTest {
     }
 
     /**
-     * The production-invocation fail-closed probe of this suite's
-     * excluded-construct fixtures (ISSUE-0643 P10 item 2): a fixture the
-     * harness arm above still compiles must fail closed under the
-     * release-owned record with E6005 and the named rule, staging
-     * nothing.
+     * ISSUE-0623 (K7): the {@code time.nowMillis} fixture drives through
+     * the release-owned production invocation to exactly one project
+     * artifact that executes under the real toolchain with the pinned
+     * E8004 {@code int out of safe range} terminal — the declared
+     * {@code int} boundary is the single terminal of the target-clock
+     * read. The value-position export-read shape
+     * ({@code let f: () => int = time.nowMillis}) belongs to the export-read
+     * slice (E10/K2) and is not this slice's fixture.
      */
-    private static void productionProbe(Path tmp, Map<String, String> sources,
-                                        String entryName) throws Exception {
-        Path src = tmp.resolve("prod-src");
-        Files.createDirectories(src);
-        for (Map.Entry<String, String> source : sources.entrySet()) {
-            Files.writeString(src.resolve(source.getKey()), source.getValue());
-        }
-        Path output = tmp.resolve("prod-build");
-        CompilationOrchestrator orchestrator = new CompilationOrchestrator(
-            src.resolve(entryName).toAbsolutePath(), output, false, false,
-            false, false, Backend.LUAJIT, null,
-            List.of(src.toAbsolutePath()),
-            Path.of("std").toAbsolutePath().normalize(), null,
-            productionInvocation());
-        boolean ok = orchestrator.compile();
-        check(!ok, entryName + ": the release-owned production invocation "
-            + "fails the excluded-construct fixture closed");
-        List<CompilerDiagnostic> diagnostics = orchestrator.diagnostics();
-        check(diagnostics != null && diagnostics.stream().anyMatch(
-                diagnostic -> "E6005".equals(diagnostic.code())),
-            entryName + ": the production failure is E6005: " + diagnostics);
-        check(diagnostics != null && diagnostics.stream().anyMatch(
-                diagnostic -> diagnostic.message()
-                    .contains("CONSTRUCT_UNLOWERED")),
-            entryName + ": the production failure names CONSTRUCT_UNLOWERED: "
-                + diagnostics);
-        check(!Files.exists(output),
-            entryName + ": the production failure stages nothing under "
-                + output);
-    }
-
-    /**
-     * ISSUE-0643 P10 item 2: the {@code time.nowMillis} fixtures this
-     * suite compiles through the harness invocation (the manifest
-     * subject is arm-independent) fail closed under the release-owned
-     * production invocation with E6005 {@code CONSTRUCT_UNLOWERED} and
-     * stage nothing.
-     */
-    static void testProductionInvocationFailClosed() throws Exception {
+    static void testProductionInvocationTimeDrive() throws Exception {
         System.out.println("-- The release-owned production invocation of the"
-            + " time.nowMillis fixtures: E6005 CONSTRUCT_UNLOWERED, nothing"
-            + " staged --");
+            + " time.nowMillis fixture: one artifact, the pinned E8004 terminal"
+            + " --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-production-");
         try {
-            productionProbe(tmp.resolve("direct"), Map.of("main.deal", """
+            productionAccept(tmp.resolve("direct"), Map.of("main.deal", """
                 import * as time from "std/time"
 
                 export function main(): null {
                   time.nowMillis()
                   return null
                 }
-                """), "main.deal");
-            productionProbe(tmp.resolve("value-position"), Map.of(
-                "main.deal", """
-                    import * as time from "std/time"
-
-                    export function main(): null {
-                      let f: () => int = time.nowMillis
-                      f()
-                      return null
-                    }
-                    """), "main.deal");
+                """), "main.deal",
+                "the direct time.nowMillis() production drive", "E8004");
         } finally {
             deleteRecursively(tmp);
         }
@@ -367,9 +320,28 @@ public class LoweringSupportTest {
         return null;
     }
 
-    private static boolean claimsConflict(SemanticRequirementManifest manifest) {
+    /**
+     * The K7 retirement pin: no manifest claims the inert
+     * {@code STDLIB_TIME_CONFLICT} routing marker — the superseded
+     * four-part line trigger and its planning claim are retired, and a
+     * {@code std/time.nowMillis} reference claims through the landed
+     * cataloged-call arm instead.
+     */
+    private static boolean noConflictClaim(SemanticRequirementManifest manifest) {
         return manifest != null
-            && manifest.capabilities().contains(SemanticCapability.STDLIB_TIME_CONFLICT);
+            && !manifest.capabilities().contains(SemanticCapability.STDLIB_TIME_CONFLICT);
+    }
+
+    /**
+     * The K7 cataloged-call claim: {@code STDLIB_SEMANTICS} is carried by a
+     * module whose checked source contains a cataloged stdlib call (the
+     * produced {@code STDLIB_CALL} op is its evidence) —
+     * {@code time.nowMillis()} included since the {@code std.time} row is
+     * closed.
+     */
+    private static boolean claimsStdlibSemantics(SemanticRequirementManifest manifest) {
+        return manifest != null
+            && manifest.capabilities().contains(SemanticCapability.STDLIB_SEMANTICS);
     }
 
     private static boolean claimsOnlyFoundation(SemanticRequirementManifest manifest) {
@@ -407,11 +379,12 @@ public class LoweringSupportTest {
     }
 
     // =========================================================================
-    // 1. Arm A: direct call and value-position access
+    // 1. The K7 cataloged call and the retired access trigger
     // =========================================================================
 
-    static void testArmADirectCallClaims() throws Exception {
-        System.out.println("-- Arm A: direct module-object call claims --");
+    static void testDirectCallClaimsStdlibSemantics() throws Exception {
+        System.out.println("-- K7: the direct cataloged call claims STDLIB_SEMANTICS, "
+            + "never the conflict marker --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-a-call");
         try {
@@ -427,8 +400,10 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "a direct time.nowMillis() call claims STDLIB_TIME_CONFLICT (Arm A)");
+            check(noConflictClaim(manifestOf(result, "main"))
+                    && claimsStdlibSemantics(manifestOf(result, "main")),
+                "a direct time.nowMillis() call claims STDLIB_SEMANTICS through the "
+                    + "landed cataloged-call arm and never STDLIB_TIME_CONFLICT (K7)");
             check(!manifestOf(result, "main").capabilities().isEmpty()
                     && manifestOf(result, "main").capabilities()
                         .contains(SemanticCapability.FOUNDATION_VALUES),
@@ -438,8 +413,8 @@ public class LoweringSupportTest {
         }
     }
 
-    static void testArmAValuePositionAccessClaims() throws Exception {
-        System.out.println("-- Arm A: value-position access is the trigger (no call site) --");
+    static void testValuePositionReadClaimsNothing() throws Exception {
+        System.out.println("-- the value-position read claims nothing from the read --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-a-value");
         try {
@@ -456,21 +431,21 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "let f: () => int = time.nowMillis; f(); claims — the value-position "
-                    + "member access is the trigger, so no second call site exists to "
-                    + "detect (Arm A)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "let f: () => int = time.nowMillis; f(); carries no "
+                    + "STDLIB_TIME_CONFLICT claim — the value-position read claims nothing "
+                    + "from the read (D3) and the retired trigger never fires");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
     // =========================================================================
-    // 2. Arm B: table-typed object access in a direct std/time importer
+    // 2. The retired table-alias trigger (the K15 namespace-value slice)
     // =========================================================================
 
-    static void testArmBTableAliasedModuleObject() throws Exception {
-        System.out.println("-- Arm B: table-typed module alias with no ModuleSymbol-object access --");
+    static void testRetiredTriggerTableAlias() throws Exception {
+        System.out.println("-- the retired table-alias shape --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-b-alias");
         try {
@@ -488,17 +463,17 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "const t = time; const g: () => int = t.nowMillis; g(); claims (Arm B): "
-                    + "the object of t.nowMillis is a table-typed variable, no "
-                    + "ModuleSymbol-object access exists anywhere in the program");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "let t = time; let g: () => int = t.nowMillis; g(); carries no "
+                    + "STDLIB_TIME_CONFLICT claim — the table-typed escape is the K15 "
+                    + "namespace-value slice, never a reroute claim");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
-    static void testArmBParameterPassthrough() throws Exception {
-        System.out.println("-- Arm B: table-typed parameter passthrough claims --");
+    static void testRetiredTriggerParameterPassthrough() throws Exception {
+        System.out.println("-- the retired table-parameter passthrough shape --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-b-param");
         try {
@@ -519,19 +494,20 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "a table-typed parameter passthrough returning p.nowMillis claims (Arm B)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "a table-typed parameter passthrough returning p.nowMillis carries no "
+                    + "STDLIB_TIME_CONFLICT claim");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
     // =========================================================================
-    // 3. Arm C: table-typed access in the transitive import closure
+    // 3. The retired closure trigger
     // =========================================================================
 
-    static void testArmCCrossModuleTableEscape() throws Exception {
-        System.out.println("-- Arm C: cross-module table escape claims at the access site --");
+    static void testRetiredTriggerCrossModuleTableEscape() throws Exception {
+        System.out.println("-- the retired cross-module table escape --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-c-escape");
         try {
@@ -559,17 +535,17 @@ public class LoweringSupportTest {
             check(claimsFoundationAndModules(manifestOf(result, "a")),
                 "module A exporting the live stdlib table claims nothing — A contains no "
                     + "nowMillis member access");
-            check(claimsConflict(manifestOf(result, "main")),
-                "module B claims via Arm C: B's import records contain only \"a\", the "
-                    + "object of t.nowMillis is table-typed, and B's transitive closure "
-                    + "contains std/time");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "the cross-module table escape carries no STDLIB_TIME_CONFLICT claim: "
+                    + "the access site's shape is the K15 namespace-value slice and no "
+                    + "closure propagation exists");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
-    static void testArmCTableReExportChain() throws Exception {
-        System.out.println("-- Arm C: table re-export chain claims at the access site only --");
+    static void testRetiredTriggerTableReExportChain() throws Exception {
+        System.out.println("-- the retired table re-export chain --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-c-chain");
         try {
@@ -605,20 +581,20 @@ public class LoweringSupportTest {
                 "the std/time importer A claims nothing (no member access)");
             check(claimsFoundationAndModules(manifestOf(result, "b")),
                 "the non-accessing intermediate B claims nothing (no member access)");
-            check(claimsConflict(manifestOf(result, "main")),
-                "C claims via Arm C through the non-claiming intermediate B: C's closure "
-                    + "contains std/time");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "C carries no STDLIB_TIME_CONFLICT claim through the intermediate B: "
+                    + "the closure propagation is retired (K7)");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
     // =========================================================================
-    // 4. Arm D: claim propagation over the resolved import graph
+    // 4. The retired claim propagation
     // =========================================================================
 
-    static void testArmDWrapperEscape() throws Exception {
-        System.out.println("-- Arm D: cross-module function-wrapper escape propagates --");
+    static void testRetiredTriggerWrapperEscape() throws Exception {
+        System.out.println("-- the retired wrapper escape --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-d-wrapper");
         try {
@@ -642,19 +618,19 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "a")),
-                "module A exporting the locked wrapper claims via Arm A (ModuleSymbol "
-                    + "object plus the alias join)");
-            check(claimsConflict(manifestOf(result, "main")),
-                "module B claims via Arm D: B contains no nowMillis member access at all, "
-                    + "so no access arm can fire and only propagation closes it");
+            check(noConflictClaim(manifestOf(result, "a")),
+                "module A exporting the locked wrapper carries no STDLIB_TIME_CONFLICT "
+                    + "claim (the retired Arm A trigger never fires)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "module B carries no STDLIB_TIME_CONFLICT claim either: B contains no "
+                    + "nowMillis member access, and no cross-module propagation exists");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
-    static void testArmDPropagationChain() throws Exception {
-        System.out.println("-- Arm D: propagation chains claim transitively --");
+    static void testRetiredTriggerPropagationChain() throws Exception {
+        System.out.println("-- the retired propagation chains --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-arm-d-chain");
         try {
@@ -685,12 +661,13 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "a")),
-                "the access origin A claims via Arm A");
-            check(claimsConflict(manifestOf(result, "b")),
-                "the non-accessing re-exporting intermediate B claims via Arm D");
-            check(claimsConflict(manifestOf(result, "main")),
-                "C claims via Arm D through the non-accessing intermediate B");
+            check(noConflictClaim(manifestOf(result, "a")),
+                "the access origin A carries no STDLIB_TIME_CONFLICT claim");
+            check(noConflictClaim(manifestOf(result, "b")),
+                "the re-exporting intermediate B carries no STDLIB_TIME_CONFLICT claim "
+                    + "(the propagation arm is retired)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "C carries no STDLIB_TIME_CONFLICT claim through the intermediate B");
         } finally {
             deleteRecursively(tmp);
         }
@@ -725,7 +702,8 @@ public class LoweringSupportTest {
     }
 
     static void testAliasJoinExactness() throws Exception {
-        System.out.println("-- Alias join exactness: std/time alias triggers, other alias does not --");
+        System.out.println("-- Alias join exactness: the std/time alias claims "
+            + "STDLIB_SEMANTICS, an identically-named other alias does not --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-alias-join");
         try {
@@ -757,8 +735,10 @@ public class LoweringSupportTest {
             if (triggers == null || other == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(triggers, "main")),
-                "an alias bound to std/time triggers the claim");
+            check(noConflictClaim(manifestOf(triggers, "main"))
+                    && claimsStdlibSemantics(manifestOf(triggers, "main")),
+                "an alias bound to std/time claims STDLIB_SEMANTICS through the cataloged "
+                    + "call and never the retired conflict marker");
             check(claimsFoundationAndModules(manifestOf(other, "main")),
                 "an identically-named alias bound to another module does not trigger: the "
                     + "join matches the resolved ModuleSymbol name against the module's "
@@ -775,11 +755,12 @@ public class LoweringSupportTest {
     }
 
     // =========================================================================
-    // 6. Over-claim direction (the safe LEGACY side)
+    // 6. The retired over-claim direction: no claim fires anywhere
     // =========================================================================
 
-    static void testOverClaimDirectImporterUnrelatedTable() throws Exception {
-        System.out.println("-- Over-claim: direct importer reading an unrelated table claims --");
+    static void testRetiredOverClaimDirectImporter() throws Exception {
+        System.out.println("-- Retired over-claim: a direct importer reading an unrelated "
+            + "table carries no claim --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-overclaim-b");
         try {
@@ -801,17 +782,18 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "a std/time importer reading an unrelated table's nowMillis field claims "
-                    + "too (Arm B over-claim — Type.Table erases module identity; only "
-                    + "forces LEGACY, the safe direction)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "a std/time importer reading an unrelated table's nowMillis field carries "
+                    + "no STDLIB_TIME_CONFLICT claim (the retired Arm B over-claim never "
+                    + "fires; the read shape is the K15 namespace-value slice)");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
-    static void testOverClaimClosureMemberUnrelatedTable() throws Exception {
-        System.out.println("-- Over-claim: closure member reading an unrelated table claims --");
+    static void testRetiredOverClaimClosureMember() throws Exception {
+        System.out.println("-- Retired over-claim: a closure member reading an unrelated "
+            + "table carries no claim --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-overclaim-c");
         try {
@@ -838,17 +820,18 @@ public class LoweringSupportTest {
             }
             check(claimsFoundationAndModules(manifestOf(result, "a")),
                 "the std/time importer A exporting an unrelated table claims nothing");
-            check(claimsConflict(manifestOf(result, "main")),
+            check(noConflictClaim(manifestOf(result, "main")),
                 "a module in the transitive closure reading an unrelated table's "
-                    + "nowMillis field claims too (Arm C over-claim — same safe "
-                    + "LEGACY direction)");
+                    + "nowMillis field carries no STDLIB_TIME_CONFLICT claim (the "
+                    + "retired Arm C over-claim never fires)");
         } finally {
             deleteRecursively(tmp);
         }
     }
 
-    static void testOverClaimPropagatedNeverInvokes() throws Exception {
-        System.out.println("-- Over-claim: importing a claiming module claims without invoking --");
+    static void testRetiredOverClaimImporter() throws Exception {
+        System.out.println("-- Retired over-claim: importing a nowMillis module carries no "
+            + "claim --");
 
         Path tmp = Files.createTempDirectory("deal-manifest-overclaim-d");
         try {
@@ -870,9 +853,10 @@ public class LoweringSupportTest {
             if (result == null) {
                 return;
             }
-            check(claimsConflict(manifestOf(result, "main")),
-                "a module importing a claiming module claims even when it never invokes "
-                    + "the wrapper (Arm D over-claim — same safe LEGACY direction)");
+            check(noConflictClaim(manifestOf(result, "main")),
+                "a module importing a nowMillis-using module carries no "
+                    + "STDLIB_TIME_CONFLICT claim even when it never invokes the wrapper "
+                    + "(the retired Arm D propagation never fires)");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1115,7 +1099,7 @@ public class LoweringSupportTest {
     }
 
     // =========================================================================
-    // 7. constructCoverage: the closed 22-row detector table + the S1 copy
+    // 7. constructCoverage: the closed 23-row detector table + the S1 copy
     // =========================================================================
 
     static void testConstructCoverageRows() throws Exception {
@@ -1124,8 +1108,14 @@ public class LoweringSupportTest {
         Path tmp = Files.createTempDirectory("deal-manifest-coverage");
         try {
             RequirementManifestResult result = compileAndCompute(tmp, Map.of(
+                "helper.deal", """
+                    export function helperFn(): int {
+                      return 1
+                    }
+                    """,
                 "main.deal", """
                     import * as time from "std/time"
+                    import * as helper from "./helper"
 
                     export class Point {
                       x: int = 1
@@ -1163,6 +1153,7 @@ public class LoweringSupportTest {
                       g()
                       sum = sum + g()
                       sum = sum + await asyncOne()
+                      sum = sum + helper.helperFn()
                       let now: int = time.nowMillis()
                       try {
                         if (now < 0) { throw { code: "E", message: "x" } }
@@ -1184,15 +1175,17 @@ public class LoweringSupportTest {
             if (manifest == null) {
                 return;
             }
-            // The fixture exercises every one of the 22 rows carrying a
+            // The fixture exercises every one of the 23 rows carrying a
             // required common form (call, cross-module call,
-            // unary/arithmetic/comparison, and function
-            // declaration/expression included) — so the manifest records
-            // exactly those rows, verbatim from T2's closed table.
+            // unary/arithmetic/comparison, function
+            // declaration/expression, and the K7 std.time row included) —
+            // so the manifest records exactly those rows, verbatim from
+            // T2's closed table. The cross-module call is a genuine
+            // implementation-module call: a cataloged stdlib call records
+            // the CALL row's STDLIB_CALL form, never CROSS_MODULE_CALL.
             EnumSet<ConstructKind> expected = EnumSet.allOf(ConstructKind.class);
-            expected.remove(ConstructKind.STDLIB_TIME_NOW_MILLIS);
             check(manifest.constructCoverage().keySet().equals(expected),
-                "the module's reachable constructs produce exactly the 22 rows carrying a "
+                "the module's reachable constructs produce exactly the 23 rows carrying a "
                     + "required common form; got "
                     + manifest.constructCoverage().keySet());
             for (Map.Entry<ConstructKind, List<deal.semantic.ir.SemanticOpKind>> entry
@@ -1201,12 +1194,13 @@ public class LoweringSupportTest {
                     "row " + entry.getKey() + " carries T2's mapped op kinds verbatim; got "
                         + entry.getValue());
             }
-            check(!manifest.constructCoverage()
+            check(manifest.constructCoverage()
                     .containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS),
-                "the excluded std/time.nowMillis row never appears in any map");
-            check(claimsConflict(manifest),
-                "the coverage fixture (time.nowMillis() present) claims the conflict — "
-                    + "its verification is the routing consequence, never coverage");
+                "the std/time.nowMillis coverage row is recorded like every other row");
+            check(noConflictClaim(manifest) && claimsStdlibSemantics(manifest),
+                "the coverage fixture (time.nowMillis() present) claims "
+                    + "STDLIB_SEMANTICS through the cataloged call, never the retired "
+                    + "conflict marker");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1255,9 +1249,9 @@ public class LoweringSupportTest {
                 "the synthetic unit's constructCoverage equals the manifest's rows — the "
                     + "rows are the S1 coverage fact the unit producer records at "
                     + "lowering start");
-            check(!unit.constructCoverage().containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS),
-                "the excluded row stays absent from the unit's coverage (S1 data-level "
-                    + "constraint)");
+            check(unit.constructCoverage().containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS),
+                "the std/time.nowMillis row is carried onto the unit's coverage (S1) like "
+                    + "every other recorded row");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1553,15 +1547,13 @@ public class LoweringSupportTest {
                         && m.capabilities().stream()
                             .allMatch(c -> EnumSet.allOf(SemanticCapability.class).contains(c))
                         && m.constructCoverage().entrySet().stream()
-                            .allMatch(e -> e.getValue().equals(e.getKey().mappedOpKinds()))
-                        && !m.constructCoverage()
-                            .containsKey(ConstructKind.STDLIB_TIME_NOW_MILLIS)),
+                            .allMatch(e -> e.getValue().equals(e.getKey().mappedOpKinds()))),
                 "every manifest carries only closed T1 capabilities (FOUNDATION_VALUES "
-                    + "included) and verbatim T2 coverage rows without the excluded row");
-            check(claimsConflict(manifestOf(manifests, "a"))
-                    && claimsConflict(manifestOf(manifests, "main")),
-                "the wrapper scenario claims in both modules (Arm A origin, Arm D "
-                    + "propagation)");
+                    + "included) and verbatim T2 coverage rows");
+            check(noConflictClaim(manifestOf(manifests, "a"))
+                    && noConflictClaim(manifestOf(manifests, "main")),
+                "the wrapper scenario carries no STDLIB_TIME_CONFLICT claim in either "
+                    + "module (the retired access/propagation arms never fire)");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1973,19 +1965,19 @@ public class LoweringSupportTest {
     public static void main(String[] args) throws Exception {
         System.out.println("=== Lowering Support / Requirement Manifest Test (ISSUE-0289) ===\n");
 
-        testArmADirectCallClaims();
-        testArmAValuePositionAccessClaims();
-        testArmBTableAliasedModuleObject();
-        testArmBParameterPassthrough();
-        testArmCCrossModuleTableEscape();
-        testArmCTableReExportChain();
-        testArmDWrapperEscape();
-        testArmDPropagationChain();
+        testDirectCallClaimsStdlibSemantics();
+        testValuePositionReadClaimsNothing();
+        testRetiredTriggerTableAlias();
+        testRetiredTriggerParameterPassthrough();
+        testRetiredTriggerCrossModuleTableEscape();
+        testRetiredTriggerTableReExportChain();
+        testRetiredTriggerWrapperEscape();
+        testRetiredTriggerPropagationChain();
         testNoAccessImporterDoesNotClaim();
         testAliasJoinExactness();
-        testOverClaimDirectImporterUnrelatedTable();
-        testOverClaimClosureMemberUnrelatedTable();
-        testOverClaimPropagatedNeverInvokes();
+        testRetiredOverClaimDirectImporter();
+        testRetiredOverClaimClosureMember();
+        testRetiredOverClaimImporter();
         testModulesImportClaim();
         testSignedInt32LiteralClaims();
         testSignedInt32UnaryBinaryClaims();
@@ -2005,7 +1997,7 @@ public class LoweringSupportTest {
         testE10UncalledDeclarationArm();
         testE10StoredFunctionExpressionArm();
         testBytesBearingMarkerDeterminism();
-        testProductionInvocationFailClosed();
+        testProductionInvocationTimeDrive();
 
         System.out.println("\nPassed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

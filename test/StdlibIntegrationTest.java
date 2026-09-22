@@ -602,6 +602,7 @@ public final class StdlibIntegrationTest {
                 import * as tbl from "std/table"
                 import * as json from "std/json"
                 import * as math from "std/math"
+                import * as time from "std/time"
 
                 function run(): null {
                   console.log("log")
@@ -625,6 +626,7 @@ public final class StdlibIntegrationTest {
                   let f16: number = math.absNumber(-1.5)
                   let i17: int = math.minInt(2, 2)
                   let i18: int = math.maxInt(-1, -2)
+                  let now: int = time.nowMillis()
                   return null
                 }
 
@@ -664,7 +666,7 @@ public final class StdlibIntegrationTest {
                 """);
     }
 
-    /** The closed 20-id seed table with the named acceptance edge cases. */
+    /** The closed 21-id seed table with the named acceptance edge cases. */
     private static List<Seed> seeds() {
         List<Seed> seeds = new ArrayList<>();
 
@@ -840,6 +842,12 @@ public final class StdlibIntegrationTest {
         seeds.add(seed(StdlibFunctionId.MATH_MAX_INT, List.of(i(2), i(2)), ok(i(2))));
         seeds.add(seed(StdlibFunctionId.MATH_MAX_INT, List.of(i(-1), i(-2)), ok(i(-1))));
 
+        // ---- the K7 time row: the injected clock reading (the declared int
+        //      return boundary is the STDLIB_RETURN terminal, checked in the
+        //      projection phases) ----
+        seeds.add(new Seed(StdlibFunctionId.TIME_NOW_MILLIS, List.of(),
+            ok(n((double) FIXED_CLOCK_MILLIS))));
+
         return List.copyOf(seeds);
     }
 
@@ -896,6 +904,15 @@ public final class StdlibIntegrationTest {
         Outcome<Value> execute(SemanticOp op, List<Value> args, ConsoleSink sink);
     }
 
+    /**
+     * The injected deterministic clock of the integration battery (K7):
+     * the {@code TIME_NOW_MILLIS} algorithm returns exactly this reading,
+     * so every pinned seed outcome is deterministic.
+     */
+    private static final long FIXED_CLOCK_MILLIS = 1_700_000_000_000L;
+    private static final SharedStdlibSemantics.Clock FIXED_CLOCK =
+        () -> FIXED_CLOCK_MILLIS;
+
     private interface ProjectionView {
         BoundaryFailure view(BoundaryFailure failure);
     }
@@ -907,7 +924,7 @@ public final class StdlibIntegrationTest {
     /** The TRIM_TAMPER executor: the production executor with U+00A0 added to the trim set. */
     private static Outcome<Value> tamperedExecute(SemanticOp op, List<Value> args,
                                                   ConsoleSink sink) {
-        Outcome<Value> outcome = SharedStdlibSemantics.execute(op, args, sink);
+        Outcome<Value> outcome = SharedStdlibSemantics.execute(op, args, sink, FIXED_CLOCK);
         if (op.payload() instanceof KindPayload.StdlibCallPayload payload
                 && payload.function() == StdlibFunctionId.STRING_TRIM
                 && outcome instanceof Outcome.Success<Value> success
@@ -970,11 +987,13 @@ public final class StdlibIntegrationTest {
             EnumSet<StdlibFunctionId> missing = EnumSet.allOf(StdlibFunctionId.class);
             missing.removeAll(covered);
             return defect("T1 StdlibFunctionCatalog — the catalog does not cover the "
-                + "closed 20-id set — expected every id, got missing " + missing);
+                + "closed 21-id set — expected every id, got missing " + missing);
         }
-        check(catalog.lookup("std.time", "nowMillis").isEmpty(),
-            "T1: std/time.nowMillis has no catalog entry (the time lock holds at the "
-                + "catalog)");
+        check(catalog.lookup("std.time", "nowMillis")
+                .map(StdlibFunctionCatalog.Entry::function)
+                .orElse(null) == StdlibFunctionId.TIME_NOW_MILLIS,
+            "T1: std/time.nowMillis is the K7 catalog row (zero parameters, the "
+                + "declared int result)");
         check(catalog.lookup("std.string", "unknownMember").isEmpty(),
             "T1: an unknown stdlib member is not a catalog entry");
         check(catalog.lookup("user.module", "length").isEmpty(),
@@ -982,10 +1001,10 @@ public final class StdlibIntegrationTest {
         check(catalog.lookup(null, "x").isEmpty()
                 && catalog.lookup("std.string", null).isEmpty(),
             "T1: absent inputs are absent entries, never errors");
-        check(StdlibFunctionId.RESERVED_NAMES.equals(List.of("TIME_NOW_MILLIS"))
-                && StdlibFunctionId.values().length == 20,
-            "T1: TIME_NOW_MILLIS stays the single reserved name, outside the closed "
-                + "20-value set");
+        check(StdlibFunctionId.RESERVED_NAMES.isEmpty()
+                && StdlibFunctionId.values().length == 21,
+            "T1: RESERVED_NAMES is empty and TIME_NOW_MILLIS is the 21st closed member "
+                + "(the superseded D8 reservation is retired; the guard stays)");
 
         // ---- T2: recognition + STDLIB_CALL lowering ----
         System.out.println("-- T2: recognition and the STDLIB_CALL lowering arm --");
@@ -1043,9 +1062,9 @@ public final class StdlibIntegrationTest {
             }
             LoweredModuleUnit unit = lowering.unit();
             List<SemanticOp> calls = stdlibOps(unit);
-            if (calls.size() != 20) {
+            if (calls.size() != 21) {
                 t2FailureDetail = "T2 STDLIB_CALL lowering — expected exactly one "
-                    + "STDLIB_CALL per cataloged id (20), got " + calls.size();
+                    + "STDLIB_CALL per cataloged id (21), got " + calls.size();
                 return null;
             }
             EnumSet<StdlibFunctionId> produced = EnumSet.noneOf(StdlibFunctionId.class);
@@ -1058,7 +1077,7 @@ public final class StdlibIntegrationTest {
             }
             if (!produced.equals(EnumSet.allOf(StdlibFunctionId.class))) {
                 t2FailureDetail = "T2 STDLIB_CALL lowering — the produced id set "
-                    + "expected the closed 20-id set, got " + produced;
+                    + "expected the closed 21-id set, got " + produced;
                 return null;
             }
             for (SemanticOp op : calls) {
@@ -1276,6 +1295,16 @@ public final class StdlibIntegrationTest {
         RawOp apply(RawOp op);
     }
 
+    /** One payload string field of a raw op, or null when absent. */
+    private static String payloadFieldOf(RawOp op, String key) {
+        for (CanonicalJson.Entry entry : op.payload().entries()) {
+            if (entry.key().equals(key) && entry.value() instanceof CanonicalJson.Str str) {
+                return str.value();
+            }
+        }
+        return null;
+    }
+
     private static RawUnit transformOps(RawUnit raw, OpTransform transform) {
         List<RawOp> ops = new ArrayList<>();
         for (RawOp op : raw.ops()) {
@@ -1302,7 +1331,8 @@ public final class StdlibIntegrationTest {
     private static PipelineReport phaseT3(Fault fault, Corpus corpus) {
         ExecutorView executor = fault == Fault.TRIM_TAMPER
             ? StdlibIntegrationTest::tamperedExecute
-            : SharedStdlibSemantics::execute;
+            : (op, args, sink) -> SharedStdlibSemantics.execute(op, args, sink,
+                FIXED_CLOCK);
         CaptureSink stdout = new CaptureSink(Channel.STDOUT);
         CaptureSink stderr = new CaptureSink(Channel.STDERR);
         for (Seed seed : seeds()) {
@@ -1354,13 +1384,21 @@ public final class StdlibIntegrationTest {
         }
 
         // The end-to-end oracle drive: the validated unit executes through
-        // the production executor with the exact effects and terminal.
+        // the production executor with the exact effects and terminal. The
+        // corpus carries the K7 time call, so the run's terminal is the
+        // pinned E8004 the declared int boundary produces (the same
+        // observable both targets and the conformance sidecar pin).
         SemanticRuntimeModel.ConsumerRun run = SemanticOracle.execute(corpus.unit(),
             corpus.table());
-        check(run.terminal() instanceof SemanticRuntimeModel.Terminal.Success success
-                && "null".equals(success.resultAtom()),
-            "T3: the corpus unit executes through the semantic oracle to the null "
-                + "terminal; got " + run.terminal());
+        SemanticOp timeCall = corpus.ops().get(StdlibFunctionId.TIME_NOW_MILLIS);
+        check(run.terminal() instanceof SemanticRuntimeModel.Terminal.DealFailure failure
+                && "E8004".equals(failure.error().code())
+                && "int out of safe range".equals(failure.error().message())
+                && timeCall != null
+                && failure.error().origin().equals(originAtomOf(timeCall)),
+            "T3: the corpus unit executes through the semantic oracle to the pinned "
+                + "E8004 int out of safe range terminal at the time call origin; got "
+                + run.terminal());
         List<SemanticRuntimeModel.EffectEvent> effects = run.effects();
         check(effects.size() == 2
                 && effects.get(0).kind() == SemanticRuntimeModel.EffectEvent.Kind.CONSOLE_WRITE
@@ -1746,7 +1784,7 @@ public final class StdlibIntegrationTest {
 
         try {
             testClaimAndReservedNameNegatives(corpus);
-            testTimeLockRouteRefusal();
+            testTimeRowCoverage();
             testValueReadDisposition();
             testRetainedTimePins();
         } catch (Exception e) {
@@ -1805,34 +1843,52 @@ public final class StdlibIntegrationTest {
                     ? withSnapshotField(op, "selector", "TIME_NOW_MILLIS") : op);
             Optional<CompilerDiagnostic> selectorFailure =
                 validateText(selectorNegative, facts);
-            check(selectorFailure.isPresent()
-                    && selectorFailure.get().message().contains("R-RESERVED-NAME")
-                    && selectorFailure.get().message().contains("TIME_NOW_MILLIS"),
-                "T5a: TIME_NOW_MILLIS in the STDLIB_CALL selector position fails "
-                    + "R-RESERVED-NAME: "
-                    + (selectorFailure.isPresent() ? selectorFailure.get().message()
-                        : "no rejection"));
+            check(selectorFailure.isEmpty(),
+                "T5a: TIME_NOW_MILLIS in the STDLIB_CALL selector position is a closed "
+                    + "member since K7: " + (selectorFailure.isEmpty() ? "accepted"
+                        : selectorFailure.get().message()));
+            RawUnit openSelector = transformOps(corpusRaw, op ->
+                "STDLIB_CALL".equals(op.kind())
+                    ? withSnapshotField(op, "selector", "NOT_A_SELECTOR") : op);
+            Optional<CompilerDiagnostic> openSelectorFailure =
+                validateText(openSelector, facts);
+            check(openSelectorFailure.isPresent()
+                    && openSelectorFailure.get().message().contains("R-ENUM")
+                    && openSelectorFailure.get().message().contains("NOT_A_SELECTOR"),
+                "T5a: an out-of-set selector name fails R-ENUM: "
+                    + (openSelectorFailure.isPresent()
+                        ? openSelectorFailure.get().message() : "no rejection"));
 
             RawUnit functionNegative = transformOps(corpusRaw, op ->
                 "STDLIB_CALL".equals(op.kind())
+                        && "STRING_LENGTH".equals(payloadFieldOf(op, "function"))
                     ? withPayloadField(op, "function", "TIME_NOW_MILLIS") : op);
             Optional<CompilerDiagnostic> functionFailure =
                 validateText(functionNegative, facts);
-            check(functionFailure.isPresent()
-                    && functionFailure.get().message().contains("R-RESERVED-NAME")
-                    && functionFailure.get().message().contains("TIME_NOW_MILLIS"),
-                "T5a: TIME_NOW_MILLIS in the StdlibFunctionId position fails "
-                    + "R-RESERVED-NAME: "
-                    + (functionFailure.isPresent() ? functionFailure.get().message()
-                        : "no rejection"));
+            check(functionFailure.isEmpty(),
+                "T5a: TIME_NOW_MILLIS in the StdlibFunctionId position is a closed "
+                    + "member since K7 (the corpus op stamps INT32_RESULT): "
+                    + (functionFailure.isEmpty() ? "accepted"
+                        : functionFailure.get().message()));
+            RawUnit openFunction = transformOps(corpusRaw, op ->
+                "STDLIB_CALL".equals(op.kind())
+                    ? withPayloadField(op, "function", "NOT_A_STDLIB_ID") : op);
+            Optional<CompilerDiagnostic> openFunctionFailure =
+                validateText(openFunction, facts);
+            check(openFunctionFailure.isPresent()
+                    && openFunctionFailure.get().message().contains("R-ENUM")
+                    && openFunctionFailure.get().message().contains("NOT_A_STDLIB_ID"),
+                "T5a: an out-of-set function name fails R-ENUM: "
+                    + (openFunctionFailure.isPresent()
+                        ? openFunctionFailure.get().message() : "no rejection"));
         } catch (Exception e) {
             fail("T5a: the claim/reserved-name negatives threw: " + e);
         }
     }
 
-    /** The time lock: STDLIB_TIME_CONFLICT routes LEGACY in every purpose. */
-    private static void testTimeLockRouteRefusal() throws java.io.IOException {
-        System.out.println("-- T5b: the time lock — STDLIB_TIME_CONFLICT never common-lowerable --");
+    /** The K7 time row: the cataloged call claims STDLIB_SEMANTICS and common-lowers. */
+    private static void testTimeRowCoverage() throws java.io.IOException {
+        System.out.println("-- T5b: the K7 time row — the cataloged call common-lowers --");
         Path tmp = Files.createTempDirectory("deal-stdlib-integration-timeroute");
         try {
             CheckedProjectBuildResult checked = compileProject(tmp, Map.of(
@@ -1868,16 +1924,16 @@ public final class StdlibIntegrationTest {
             SemanticRequirementManifest libManifest = manifestOf(manifests, libId);
             SemanticRequirementManifest mainManifest = manifestOf(manifests, mainId);
             check(libManifest != null && libManifest.capabilities().contains(
-                    SemanticCapability.STDLIB_TIME_CONFLICT),
-                "T5b: the std/time.nowMillis module claims STDLIB_TIME_CONFLICT: "
-                    + (libManifest == null ? "no manifest" : libManifest.capabilities()));
-            check(mainManifest != null && mainManifest.capabilities().contains(
-                    SemanticCapability.STDLIB_TIME_CONFLICT),
-                "T5b: the importer claims STDLIB_TIME_CONFLICT by propagation");
-            check(libManifest != null && !libManifest.capabilities().contains(
                     SemanticCapability.STDLIB_SEMANTICS),
-                "T5b: the time module claims no STDLIB_SEMANTICS (std/time has no "
-                    + "catalog entry)");
+                "T5b: the std/time.nowMillis module claims STDLIB_SEMANTICS through the "
+                    + "cataloged-call arm: "
+                    + (libManifest == null ? "no manifest" : libManifest.capabilities()));
+            check(libManifest != null && !libManifest.capabilities().contains(
+                    SemanticCapability.STDLIB_TIME_CONFLICT)
+                    && mainManifest != null && !mainManifest.capabilities().contains(
+                    SemanticCapability.STDLIB_TIME_CONFLICT),
+                "T5b: no manifest claims the inert STDLIB_TIME_CONFLICT marker (the "
+                    + "retired four-part trigger and its propagation never fire)");
             for (Object[] purpose : List.<Object[]>of(
                     new Object[] {publicPreActivation(), "PUBLIC_BUILD+PRE_ACTIVATION"},
                     new Object[] {publicV12Active(CapabilityRegistry.releaseRegistry()),
@@ -1886,29 +1942,42 @@ public final class StdlibIntegrationTest {
                     new Object[] {legacyRegression(), "LEGACY_REGRESSION"})) {
                 CompilerInvocation planInvocation = (CompilerInvocation) purpose[0];
                 String what = (String) purpose[1];
-                Set<ModuleId> requests =
-                    planInvocation.purpose().name().equals("COMMON_SHADOW")
-                        ? Set.of(libId) : Set.of();
+                boolean shadowPurpose =
+                    planInvocation.purpose().name().equals("COMMON_SHADOW");
+                Set<ModuleId> requests = shadowPurpose ? Set.of(libId) : Set.of();
                 RoutePlanResult planned = MigrationPlanner.planRoutes(planInvocation,
                     CapabilityRegistry.releaseRegistry(), checked.input(), checked.index(),
                     manifests.manifests(), Target.LUAJIT, requests);
-                check(planned != null && !planned.hasErrors() && planned.plan() != null
-                        && planned.plan().entries().get(libId) == ModuleRoute.LEGACY
-                        && planned.plan().entries().get(mainId) == ModuleRoute.LEGACY
-                        && !planned.plan().shadowModules().contains(libId),
-                    what + ": rule 2 keeps the time module and its importer LEGACY — "
-                        + "never a shadow module, never common-lowerable: "
+                check(planned != null && !planned.hasErrors() && planned.plan() != null,
+                    what + ": the time module plans with zero diagnostics: "
                         + (planned == null ? "null" : planned.diagnostics()));
+                if (planned == null || planned.hasErrors() || planned.plan() == null) {
+                    continue;
+                }
+                if (shadowPurpose) {
+                    check(planned.plan().entries().get(libId) == ModuleRoute.SHARED
+                            && planned.plan().shadowModules().contains(libId),
+                        what + ": the retired rule 2 never fires — the shadow request "
+                            + "common-lowers the time module");
+                } else {
+                    check(planned.plan().entries().get(libId) == ModuleRoute.LEGACY,
+                        what + ": the time module stays LEGACY through the ordinary "
+                            + "promotion/legacy rules (never a conflict reroute)");
+                }
             }
             SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
-            check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                "T5b: the forced lowering of the time module produces no unit (E6005)");
-            if (lowering != null && lowering.hasErrors()) {
-                check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                        diagnostic.message().contains("module 'lib'")
-                            && diagnostic.message().contains("CONSTRUCT_UNLOWERED")),
-                    "T5b: the failure is the exact E6005 with module lib and "
-                        + "validatorRule CONSTRUCT_UNLOWERED: " + lowering.diagnostics());
+            check(lowering != null && !lowering.hasErrors() && lowering.unit() != null,
+                "T5b: the forced lowering of the time module produces a validated unit: "
+                    + (lowering == null ? "null" : lowering.diagnostics()));
+            if (lowering != null && !lowering.hasErrors() && lowering.unit() != null) {
+                boolean timeCall = lowering.unit().ops().stream().anyMatch(op ->
+                    op.kind() == SemanticOpKind.STDLIB_CALL
+                        && op.payload() instanceof KindPayload.StdlibCallPayload payload
+                        && payload.function() == StdlibFunctionId.TIME_NOW_MILLIS
+                        && op.failurePolicy() == FailurePolicyId.INT32_RESULT);
+                check(timeCall,
+                    "T5b: the unit carries STDLIB_CALL(TIME_NOW_MILLIS) with the "
+                        + "INT32_RESULT terminal");
             }
         } finally {
             deleteRecursively(tmp);

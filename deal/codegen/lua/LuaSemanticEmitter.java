@@ -5727,7 +5727,7 @@ local function __orderRemove(t, k)
     end
   end
 end
--- ==== stdlib realization (the closed 20-operation table) ====
+-- ==== stdlib realization (the closed 21-operation table) ====
 local function __u8next(s, i)
   local b = string.byte(s, i)
   if b == nil then return nil, nil end
@@ -6430,6 +6430,8 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
     return math.min(__args[1], __args[2])
   elseif fn == "MATH_MAX_INT" then
     return math.max(__args[1], __args[2])
+  elseif fn == "TIME_NOW_MILLIS" then
+    return os.time() * 1000
   end
   __sfail("E8001", "unknown stdlib call "..tostring(fn), nil, nil)
 end

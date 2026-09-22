@@ -424,4 +424,19 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # Error corpus fixtures, and the negative seeds (a non-builtin class
   # under BUILTIN_DEFAULTS, the has/delete checker rejections).
   'fg|=== Running Builtin Error Construction Tests (ISSUE-0619) ===|java -ea -cp build deal.test.BuiltinErrorConstructionTest'
+  # ISSUE-0623 registration: time.nowMillis coverage through the closed
+  # std.time/nowMillis catalog row (semantic-ir-construct-coverage-cutover
+  # K7, the time.nowMillis contract, and K9 item 2): the 21st closed
+  # selector member with the empty reservation list, the single zero-arity
+  # std.time catalog row with its declared ()->int descriptors and the
+  # INT32_RESULT terminal, the recognition path, the lowering shape
+  # (STDLIB_CALL(TIME_NOW_MILLIS) with zero parameter boundaries and one
+  # STDLIB_RETURN on int), the recorded STDLIB_TIME_NOW_MILLIS coverage row
+  # with R-COVERAGE applied, the STDLIB_SEMANTICS claim with zero
+  # STDLIB_TIME_CONFLICT claims, the vertical drive through the oracle and
+  # both shared artifacts under the real luajit and javac/java toolchains
+  # with the pinned E8004 int out of safe range terminal at the
+  # call-expression origin, the real corpus fixture's production-artifact
+  # drive on both targets, and the R-COVERAGE negative seed.
+  'fg|=== Running time.nowMillis Coverage Tests (ISSUE-0623) ===|java -ea -cp build deal.test.TimeNowMillisCoverageTest'
 )

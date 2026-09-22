@@ -54,21 +54,18 @@ import deal.semantic.ir.ProjectInterfaceIndex;
 import deal.semantic.ir.ResolvedImport;
 import deal.semantic.ir.SemanticCapability;
 import deal.semantic.ir.SemanticOpKind;
+import deal.semantic.ir.StdlibFunctionId;
 import deal.types.Type;
 import deal.types.Types;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Deque;
 import java.util.EnumMap;
 import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -78,12 +75,15 @@ import java.util.Set;
  * implementation module in {@code CheckedProjectInput} dependency order.
  *
  * <p><b>Closed capability claims.</b> Every implementation module claims
- * {@code FOUNDATION_VALUES}; {@code STDLIB_TIME_CONFLICT} is claimed
- * whenever any part of the closed four-part trigger fires — a sound
- * superset of "the module obtains or invokes {@code std/time.nowMillis}
- * through the checked DEAL module graph" (parent D8: a claiming module is
- * never common-lowerable in any purpose; over-claims only force LEGACY,
- * the safe direction). The I3 derivation rows (signed-int32 foundation,
+ * {@code FOUNDATION_VALUES}. {@code STDLIB_TIME_CONFLICT} is never claimed
+ * since K7: the superseded four-part line trigger
+ * ({@code semantic-ir-construct-coverage-cutover} K7 item 6) is retired,
+ * so a module referencing {@code std/time.nowMillis} claims through the
+ * landed cataloged-call arm below like every other stdlib call, and the
+ * closed capability set, the capability-requirement catalog's empty row,
+ * the planner's time-conflict reroute, and the validator's
+ * empty-evidence rule stay in the tree as inert surfaces. The I3
+ * derivation rows (signed-int32 foundation,
  * ISSUE-0395) add exactly one further claim — {@code SIGNED_INT32} —
  * selected by the construct kind, never the magnitude:</p>
  *
@@ -123,69 +123,25 @@ import java.util.Set;
  *
  * <p><b>The remainder of the closed claims.</b></p>
  * <ul>
- *   <li><b>Arm A — direct module-object access:</b> a
- *       {@code MemberAccessExpr{object: IdentifierExpr, field:
- *       "nowMillis"}} in call position or any other value position whose
- *       object resolves through {@code CheckResult.symbolTable} (the
- *       module-scope chain) to a {@link Symbol.ModuleSymbol} whose name —
- *       the import alias — joins to the resolved imported module
- *       {@code std/time} with STDLIB classification. The trigger is the
- *       member access itself, never only a direct call site
- *       (first-class function values: {@code let f: () => int =
- *       time.nowMillis; f();} has no call-site access to detect).</li>
- *   <li><b>Arm B — table-typed access in a direct {@code std/time}
- *       importer (no exclusivity claim):</b> any {@code nowMillis} member
- *       access whose object expression's checked type in
- *       {@code CheckResult.typeMap} is {@link Type.Table}, in a module
- *       whose resolved import records contain {@code std/time} directly
- *       (alias-independent scan — the direct-import case of Arm C's
- *       closure gate). {@code Type.Table} erases module identity, so the
- *       arm over-claims on unrelated table fields in direct importers.</li>
- *   <li><b>Arm C — table-typed access in the transitive import closure
- *       (no exclusivity claim):</b> the same Table-typed-object access in
- *       a module whose transitive import closure contains {@code std/time}
- *       — {@code closure(M) = {direct std/time imports of M} \u222a \u22c3
- *       closure(D) over M's resolved imports D}. The closure is computed
- *       over the dependency-ordered index in one pass — never a fixpoint
- *       iteration. The orchestrator tolerates declaration-only import
- *       cycles at this phase (cycle members are contiguous in the
- *       dependency order, and every cycle edge is declaration-only), so
- *       the pass first decomposes the import graph into strongly
- *       connected components (one deterministic pass over the index
- *       order) and treats each component atomically: every member's
- *       closure carries the component's union of direct {@code std/time}
- *       imports, a conservative over-claim that only forces LEGACY.</li>
- *   <li><b>Arm D — claim propagation:</b> a module importing any module
- *       whose manifest claims {@code STDLIB_TIME_CONFLICT} also claims
- *       it — transitive by construction, closing cross-module
- *       function-wrapper escape ({@code getNow} wrappers reach dependents
- *       with no member access anywhere in the dependent). Within one
- *       component the propagated claim is the component's union of
- *       access-arm claims, assigned to every member in the same single
- *       pass (never a fixpoint iteration).</li>
+ *   <li><b>The stdlib claim:</b> a module whose checked source contains a
+ *       cataloged stdlib call claims {@code STDLIB_SEMANTICS} — including
+ *       the {@code std.time}/{@code nowMillis} call, whose catalog row is
+ *       closed since K7 and whose produced {@code STDLIB_CALL} op is the
+ *       claim's evidence. A stdlib-export value read (a non-callee
+ *       position) claims no stdlib capability from the read.</li>
  * </ul>
- *
- * <p><b>Alias→module-path join (Arm A's gate).</b> No new
- * name-resolution machinery exists: the identifier resolution is the
- * checker's, and the join is a read-only walk over the module's
- * {@code ImportDeclaration} records — AST facts the checker already
- * consumed during {@code processImports} — matched to the input's
- * resolved {@link ResolvedImport} records (alias + raw specifier) and
- * gated on the resolved target being {@code std.time} with STDLIB
- * classification. {@code Symbol.ModuleSymbol} carries no module path, so
- * the join never re-resolves an import.</p>
  *
  * <p><b>{@code constructCoverage}.</b> One row per reachable construct
  * of the module's AST over the closed construct→op detector table (S4):
  * the row key is the {@link ConstructKind} the detector maps the AST
  * shape to and the row value is exactly
  * {@link ConstructKind#mappedOpKinds()} verbatim (enforced by the
- * manifest record). The excluded {@code std/time.nowMillis} row has no
- * detector trigger and never appears; at lowering start the unit producer
- * copies these rows onto the unit's own enum-keyed
- * {@code constructCoverage} (S1 — the validator's R-COVERAGE fact).
- * ISSUE-0231..0239 extend only the construct→op detector rows, never the
- * closed {@code ConstructKind} set.</p>
+ * manifest record). A recognized {@code std.time.nowMillis} call records
+ * the {@code STDLIB_TIME_NOW_MILLIS} row besides the call row; at
+ * lowering start the unit producer copies these rows onto the unit's own
+ * enum-keyed {@code constructCoverage} (S1 — the validator's R-COVERAGE
+ * fact). ISSUE-0231..0239 extend only the construct→op detector rows,
+ * never the closed {@code ConstructKind} set.</p>
  *
  * <p><b>Errors.</b> E6005 through {@code FailureContractRegistry} (T5)
  * with {@code LoweringFailureDetail {module, capability:
@@ -200,9 +156,9 @@ import java.util.Set;
  * expression; a module symbol without its import declaration). No other
  * new error exists and no SHARED-ineligibility condition is an error
  * here. The computation is strictly read-only — no AST, checker, or
- * symbol-table mutation — and deterministic: dependency-order iteration,
- * the deterministic component decomposition, and the canonical JSON
- * facility make repeated computation byte-identical.</p>
+ * symbol-table mutation — and deterministic: dependency-order iteration
+ * and the canonical JSON facility make repeated computation
+ * byte-identical.</p>
  */
 public final class LoweringSupport {
 
@@ -215,14 +171,6 @@ public final class LoweringSupport {
     public static final String MANIFEST_INTERNAL_ERROR_SENTINEL =
         "MANIFEST_INTERNAL_ERROR_SENTINEL";
 
-    /**
-     * The resolved dotted module path of the spec stdlib time module
-     * (the raw import specifier {@code "std/time"} resolves to the
-     * dotted module path {@code "std.time"} — the same fact the
-     * interface index records, foundation F2).
-     */
-    static final String STD_TIME_RESOLVED_MODULE_PATH = "std.time";
-
     private LoweringSupport() {
         // Static computation surface only; no instances.
     }
@@ -230,10 +178,10 @@ public final class LoweringSupport {
     /**
      * Computes exactly one {@link SemanticRequirementManifest} per
      * implementation module in {@code CheckedProjectInput} dependency
-     * order (foundation F3): the closure gate and the propagated claim
-     * are one dependency-ordered pass — never a fixpoint iteration —
-     * with the tolerated declaration-only import cycles treated as
-     * atomic components (see the class documentation).
+     * order (foundation F3): one deterministic read-only pass per module
+     * over its checked facts, with the index-consistency facts checked
+     * first (a resolution outside the dependency-ordered index fails
+     * closed with E6005, never a silent under-claim).
      *
      * @param invocation the release-owned compiler invocation; non-null
      * @param input      the checked project input (implementation modules
@@ -251,14 +199,7 @@ public final class LoweringSupport {
         Objects.requireNonNull(input, "input must not be null");
         Objects.requireNonNull(index, "index must not be null");
         try {
-            ImportGraph graph = decompose(index, input);
-
-            // One dependency-ordered pass over the index entries: closure(M)
-            // = the component's union of direct std/time imports plus the
-            // closures of the already-processed cross-component imports.
-            // Same-component imports are covered by the component union, so
-            // the pass terminates without ever revisiting an entry.
-            Map<ModuleId, Boolean> closureHasTime = graph.closureHasTime();
+            validateIndexFacts(input, index);
 
             // The ISSUE-0239 E10 imported-by arm's gate: the set of
             // implementation modules imported by another implementation
@@ -278,14 +219,12 @@ public final class LoweringSupport {
                 }
             }
 
-            // One dependency-ordered pass over the input modules, grouped
-            // by component: the access arms plus the cross-component
-            // propagated claims, then the component union assigned to
-            // every member (never a fixpoint iteration).
-            Map<ModuleId, SemanticRequirementManifest> byId = new LinkedHashMap<>();
+            // One dependency-ordered pass over the input modules: each
+            // module's claim set and coverage rows are computed from its
+            // own checked facts (no cross-module claim propagation exists
+            // since K7 — the superseded four-part line detector is
+            // retired).
             List<SemanticRequirementManifest> manifests = new ArrayList<>();
-            List<CheckedModuleInput> currentComponent = new ArrayList<>();
-            long currentComponentId = -1L;
             for (CheckedModuleInput module : input.modules()) {
                 if (module.kind() != CheckedModuleKind.IMPLEMENTATION) {
                     throw new FactDefect(module.moduleId(),
@@ -300,26 +239,7 @@ public final class LoweringSupport {
                             + "every input entry is IMPLEMENTATION and typeCheckAll fills its "
                             + "CheckResult)");
                 }
-                Long componentId = graph.sccOf().get(module.moduleId());
-                if (componentId == null) {
-                    throw new FactDefect(module.moduleId(),
-                        "module is missing from the dependency-ordered closure computation "
-                            + "(the interface index contradicts the checked project)");
-                }
-                if (currentComponent.isEmpty() || componentId == currentComponentId) {
-                    currentComponent.add(module);
-                    currentComponentId = componentId;
-                    continue;
-                }
-                finalizeComponent(currentComponent, graph, closureHasTime, byId,
-                    manifests, implementationDependencies);
-                currentComponent = new ArrayList<>();
-                currentComponent.add(module);
-                currentComponentId = componentId;
-            }
-            if (!currentComponent.isEmpty()) {
-                finalizeComponent(currentComponent, graph, closureHasTime, byId,
-                    manifests, implementationDependencies);
+                manifests.add(manifestFor(module, implementationDependencies));
             }
             return new RequirementManifestResult(manifests, List.of());
         } catch (FactDefect defect) {
@@ -328,193 +248,13 @@ public final class LoweringSupport {
     }
 
     /**
-     * Finalizes one atomic component of the input pass: computes each
-     * member's base claim (access arms plus cross-component propagated
-     * claims — same-component imports are deferred to the union), then
-     * assigns the component's union to every member. One deterministic
-     * step per component, never a fixpoint iteration.
+     * Validates the index/input consistency facts the computation needs:
+     * every index entry's resolved imports must be index entries, and
+     * every implementation input module must appear in the index. Both
+     * are producer-defect guards, never silent under-claims (E6005).
      */
-    private static void finalizeComponent(List<CheckedModuleInput> component,
-                                          ImportGraph graph,
-                                          Map<ModuleId, Boolean> closureHasTime,
-                                          Map<ModuleId, SemanticRequirementManifest> byId,
-                                          List<SemanticRequirementManifest> manifests,
-                                          Set<ModuleId> implementationDependencies)
-            throws FactDefect {
-        Map<ModuleId, Boolean> baseClaims = new LinkedHashMap<>();
-        Map<ModuleId, ModuleScan> scans = new LinkedHashMap<>();
-        for (CheckedModuleInput module : component) {
-            ModuleScan scan = scanModule(module);
-            scans.put(module.moduleId(), scan);
-            boolean directTime = hasDirectStdTimeImport(module.imports());
-            Boolean closureTime = closureHasTime.get(module.moduleId());
-            if (closureTime == null) {
-                throw new FactDefect(module.moduleId(),
-                    "module is missing from the dependency-ordered closure computation "
-                        + "(the interface index contradicts the checked project)");
-            }
-            boolean base = scan.armA
-                || (scan.tableNowMillisAccess && directTime)
-                || (scan.tableNowMillisAccess && closureTime);
-            for (ResolvedImport resolvedImport : module.imports()) {
-                if (resolvedImport.kind() != ExternalModuleKind.IMPLEMENTATION) {
-                    continue;
-                }
-                if (Objects.equals(graph.sccOf().get(resolvedImport.resolvedModuleId()),
-                        graph.sccOf().get(module.moduleId()))) {
-                    continue; // same-component import — the union covers it
-                }
-                SemanticRequirementManifest dependency =
-                    byId.get(resolvedImport.resolvedModuleId());
-                if (dependency == null) {
-                    throw new FactDefect(module.moduleId(),
-                        "import '" + resolvedImport.modulePath() + "' resolves to the "
-                            + "implementation module '" + resolvedImport.resolvedModuleId()
-                            + "' without a manifest in dependency order (inconsistent "
-                            + "checked/index facts)");
-                }
-                if (dependency.capabilities()
-                        .contains(SemanticCapability.STDLIB_TIME_CONFLICT)) {
-                    base = true;
-                }
-            }
-            baseClaims.put(module.moduleId(), base);
-        }
-
-        boolean componentClaim = false;
-        for (Boolean base : baseClaims.values()) {
-            componentClaim |= base;
-        }
-
-        for (CheckedModuleInput module : component) {
-            boolean claimsTimeConflict = baseClaims.get(module.moduleId()) || componentClaim;
-            EnumSet<SemanticCapability> capabilities =
-                EnumSet.of(SemanticCapability.FOUNDATION_VALUES);
-            if (claimsTimeConflict) {
-                capabilities.add(SemanticCapability.STDLIB_TIME_CONFLICT);
-            }
-            // I3 derivation row: int constructs claim SIGNED_INT32 at
-            // the construct kind, never the magnitude (a small literal
-            // claims exactly like 2147483647) — post-activation F4 rule 4
-            // requires SIGNED_INT32 at plan time for every int-using
-            // module.
-            if (scans.get(module.moduleId()).signedInt32) {
-                capabilities.add(SemanticCapability.SIGNED_INT32);
-            }
-            // The plan-time STDLIB_SEMANTICS arm (stdlib epic T5, D9): a
-            // module whose checked source contains a cataloged stdlib call
-            // claims STDLIB_SEMANTICS before lowering; a module without a
-            // cataloged call never claims it, and a stdlib-export value
-            // read claims nothing from the read (D3 — no route rule).
-            if (scans.get(module.moduleId()).stdlibCall) {
-                capabilities.add(SemanticCapability.STDLIB_SEMANTICS);
-            }
-            // The modules epic's plan-time arms (ISSUE-0239, E10): a
-            // module whose shared artifact cannot yet carry a fact
-            // claims the owning capability so F4 rule 4 reroutes it
-            // LEGACY at plan time post-activation (the reserved parent
-            // verification-3 plan-time edge reroute conditions — an
-            // over-claim only forces LEGACY, never E6005 and never a
-            // within-run fallback).
-            ModuleScan scan = scans.get(module.moduleId());
-            if (scan.importsModule
-                    || implementationDependencies.contains(module.moduleId())) {
-                capabilities.add(SemanticCapability.MODULES);
-            }
-            // The canonical plan-time CLASSES arm (class epic,
-            // ISSUE-0516) covers every class-construct claim: a class
-            // declaration, a class-typed object literal (including the
-            // builtin Error literal of a throw — the literal position,
-            // never a declaration), a class member read/write/delete,
-            // and has() — every construct the class epic's arms lower
-            // to a class op.
-            if (scan.classConstruct) {
-                capabilities.add(SemanticCapability.CLASSES);
-            }
-            if (scan.exportedCalledFromSource
-                    || scan.awaitsAsync
-                    || scan.declaresAsyncFunction
-                    || scan.functionContainer
-                    || scan.dynamicCall
-                    || scan.nestedFunctionDeclaration
-                    || scan.adapterCreation
-                    || scan.uncalledDeclaredFunction
-                    || scan.storedFunctionExpression) {
-                capabilities.add(SemanticCapability.CALLS);
-            }
-            if (scan.bytesInContainer || scan.bytesValue) {
-                capabilities.add(SemanticCapability.CONTAINERS_AND_STRINGS);
-            }
-            // The step-1 bytes guard (ISSUE-0574, parent S1b): the
-            // manifest's plan-time bytesBearing marker is set exactly
-            // from the same triggers as the unchanged claim arm above —
-            // the claim stays the construct-ownership fact, the marker
-            // is the routing fact planner rule 2b consumes to keep
-            // bytes-bearing modules on the retained route in every
-            // purpose. A fixed per-module boolean, never a capability,
-            // registry entry, registry hash, or schema member.
-            boolean bytesBearing = scan.bytesInContainer || scan.bytesValue;
-            SemanticRequirementManifest manifest = new SemanticRequirementManifest(
-                module.moduleId(), capabilities, scan.coverage, bytesBearing);
-            byId.put(module.moduleId(), manifest);
-            manifests.add(manifest);
-        }
-    }
-
-    // =========================================================================
-    // Import-graph decomposition + the transitive closure (Arm C gate)
-    // =========================================================================
-
-    /**
-     * The deterministic import-graph facts of one manifest computation:
-     * the index entries in dependency (insertion) order, the strongly
-     * connected component of every index entry (declaration-only cycles
-     * tolerated by the orchestrator are atomic), the component's union of
-     * direct {@code std/time} imports, and the per-entry closure computed
-     * in one dependency-ordered pass.
-     */
-    private static final class ImportGraph {
-        private final Map<ModuleId, Long> sccOf;
-        private final Map<ModuleId, Boolean> closureHasTime;
-
-        ImportGraph(Map<ModuleId, Long> sccOf, Map<ModuleId, Boolean> closureHasTime) {
-            this.sccOf = sccOf;
-            this.closureHasTime = closureHasTime;
-        }
-
-        Map<ModuleId, Long> sccOf() {
-            return sccOf;
-        }
-
-        Map<ModuleId, Boolean> closureHasTime() {
-            return closureHasTime;
-        }
-    }
-
-    /**
-     * Decomposes the index's import graph and computes the per-entry
-     * transitive closure in deterministic passes:
-     * <ol>
-     *   <li>every import of every entry must resolve to an index entry —
-     *       anything else is an inconsistent fact (E6005, fail closed:
-     *       the closure gate can never silently under-claim);</li>
-     *   <li>one deterministic Tarjan pass over the index order assigns
-     *       each entry its strongly connected component;</li>
-     *   <li>one pass groups the components' direct {@code std/time}
-     *       imports;</li>
-     *   <li>one dependency-ordered pass computes
-     *       {@code closureHasTime(M) = componentHasTime(component(M)) \u2228
-     *       \u22c3 closureHasTime(D)} over M's cross-component resolved
-     *       imports D — never a fixpoint iteration.</li>
-     * </ol>
-     */
-    private static ImportGraph decompose(ProjectInterfaceIndex index,
-                                         CheckedProjectInput input) throws FactDefect {
-        List<ModuleId> order = new ArrayList<>(index.modules().keySet());
-        Map<ModuleId, Integer> nodeOf = new HashMap<>();
-        for (int position = 0; position < order.size(); position++) {
-            nodeOf.put(order.get(position), position);
-        }
+    private static void validateIndexFacts(CheckedProjectInput input,
+                                           ProjectInterfaceIndex index) throws FactDefect {
         for (ExternalModuleInterface entry : index.modules().values()) {
             for (ResolvedImport resolvedImport : entry.imports()) {
                 if (!index.modules().containsKey(resolvedImport.resolvedModuleId())) {
@@ -527,212 +267,104 @@ public final class LoweringSupport {
                 }
             }
         }
-
-        Map<ModuleId, Long> sccOf = tarjanComponents(index, order, nodeOf);
-        Map<Long, Boolean> componentHasTime = new LinkedHashMap<>();
-        for (ExternalModuleInterface entry : index.modules().values()) {
-            long componentId = sccOf.get(entry.moduleId());
-            componentHasTime.merge(componentId,
-                hasDirectStdTimeImport(entry.imports()), Boolean::logicalOr);
-        }
-
-        Map<ModuleId, Boolean> closureHasTime = new LinkedHashMap<>();
-        for (ExternalModuleInterface entry : index.modules().values()) {
-            long componentId = sccOf.get(entry.moduleId());
-            boolean hasTime = componentHasTime.get(componentId);
-            for (ResolvedImport resolvedImport : entry.imports()) {
-                Long importedComponentId = sccOf.get(resolvedImport.resolvedModuleId());
-                if (importedComponentId == null) {
-                    throw new FactDefect(entry.moduleId(),
-                        "import '" + resolvedImport.modulePath() + "' of module '"
-                            + entry.moduleId() + "' resolves to '"
-                            + resolvedImport.resolvedModuleId()
-                            + "' which is missing from the dependency-ordered index "
-                            + "(inconsistent resolution facts)");
-                }
-                if (importedComponentId == componentId) {
-                    continue; // same-component import — the union covers it
-                }
-                Boolean importedClosure = closureHasTime.get(resolvedImport.resolvedModuleId());
-                if (importedClosure == null) {
-                    throw new FactDefect(entry.moduleId(),
-                        "cross-component import '" + resolvedImport.modulePath()
-                            + "' of module '" + entry.moduleId()
-                            + "' targets a module not yet processed in the "
-                            + "dependency-ordered index (inconsistent ordering facts)");
-                }
-                hasTime |= importedClosure;
-            }
-            closureHasTime.put(entry.moduleId(), hasTime);
-        }
-
         for (CheckedModuleInput module : input.modules()) {
-            if (!sccOf.containsKey(module.moduleId())) {
+            if (!index.modules().containsKey(module.moduleId())) {
                 throw new FactDefect(module.moduleId(),
                     "implementation module is missing from the interface index (the "
                         + "index contradicts the checked project)");
             }
         }
-        return new ImportGraph(sccOf, closureHasTime);
     }
 
     /**
-     * Deterministic Tarjan strongly-connected-components decomposition
-     * over the index order: nodes are visited in index (dependency)
-     * order and adjacency follows each entry's resolved imports in source
-     * order, so the component ids are fully determined. Declaration-only
-     * import cycles tolerated by the orchestrator become atomic
-     * components — a conservative superset of every acyclic pass, which
-     * only forces LEGACY.
+     * Computes one module's manifest from its own checked facts: the
+     * closed capability claims (FOUNDATION_VALUES always; SIGNED_INT32,
+     * STDLIB_SEMANTICS, MODULES, CLASSES, CALLS, and
+     * CONTAINERS_AND_STRINGS by construct kind) plus the reachable
+     * construct rows. One deterministic step per module, never a fixpoint
+     * iteration.
      */
-    private static Map<ModuleId, Long> tarjanComponents(ProjectInterfaceIndex index,
-                                                        List<ModuleId> order,
-                                                        Map<ModuleId, Integer> nodeOf) {
-        int size = order.size();
-        int[] discovered = new int[size];
-        int[] lowLink = new int[size];
-        Arrays.fill(discovered, -1);
-        boolean[] onStack = new boolean[size];
-        Deque<Integer> stack = new ArrayDeque<>();
-        Map<ModuleId, Long> sccOf = new LinkedHashMap<>();
-        int[] nextIndex = {0};
-        long[] nextComponent = {0L};
-        for (int node = 0; node < size; node++) {
-            if (discovered[node] == -1) {
-                strongConnect(node, index, order, nodeOf, discovered, lowLink, onStack,
-                    stack, sccOf, nextIndex, nextComponent);
-            }
-        }
-        return sccOf;
-    }
-
-    private static void strongConnect(int node, ProjectInterfaceIndex index,
-                                      List<ModuleId> order, Map<ModuleId, Integer> nodeOf,
-                                      int[] discovered, int[] lowLink, boolean[] onStack,
-                                      Deque<Integer> stack, Map<ModuleId, Long> sccOf,
-                                      int[] nextIndex, long[] nextComponent) {
-        discovered[node] = nextIndex[0];
-        lowLink[node] = nextIndex[0];
-        nextIndex[0]++;
-        stack.push(node);
-        onStack[node] = true;
-
-        ExternalModuleInterface entry = index.modules().get(order.get(node));
-        for (ResolvedImport resolvedImport : entry.imports()) {
-            Integer importedNode = nodeOf.get(resolvedImport.resolvedModuleId());
-            if (importedNode == null) {
-                continue; // guarded by decompose's resolution check (E6005)
-            }
-            if (discovered[importedNode] == -1) {
-                strongConnect(importedNode, index, order, nodeOf, discovered, lowLink,
-                    onStack, stack, sccOf, nextIndex, nextComponent);
-                lowLink[node] = Math.min(lowLink[node], lowLink[importedNode]);
-            } else if (onStack[importedNode]) {
-                lowLink[node] = Math.min(lowLink[node], discovered[importedNode]);
-            }
-        }
-
-        if (lowLink[node] == discovered[node]) {
-            long componentId = nextComponent[0];
-            nextComponent[0]++;
-            int member;
-            do {
-                member = stack.pop();
-                onStack[member] = false;
-                sccOf.put(order.get(member), componentId);
-            } while (member != node);
-        }
-    }
-
-    /**
-     * The alias-independent direct-import gate shared by Arm B and the
-     * closure computation: the resolved import records contain the spec
-     * stdlib time module — the resolved imported module has the dotted
-     * module path {@code std.time} (the raw specifier {@code "std/time"}
-     * resolved) and STDLIB classification.
-     */
-    private static boolean hasDirectStdTimeImport(List<ResolvedImport> imports) {
-        for (ResolvedImport resolvedImport : imports) {
-            if (resolvedImport.kind() == ExternalModuleKind.STDLIB
-                    && STD_TIME_RESOLVED_MODULE_PATH
-                        .equals(resolvedImport.resolvedModuleId().path())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // =========================================================================
-    // Arm A alias join — a read-only walk over the module's import records
-    // =========================================================================
-
-    /**
-     * The pinned alias→module-path join (Arm A's gate, F3): the module
-     * symbol's name — the import alias — matches an
-     * {@code ImportDeclaration} of the module's AST, and that
-     * declaration's resolved import (matched by alias + raw specifier in
-     * the input's resolved import records) targets the spec stdlib time
-     * module with STDLIB classification. Never a re-resolution of
-     * imports: the identifier resolution is the checker's, the join is
-     * the read-only walk over the {@code ImportDeclaration} records the
-     * checker already consumed during {@code processImports}.
-     */
-    private static boolean aliasJoinHitsStdTime(CheckedModuleInput module, String alias)
+    private static SemanticRequirementManifest manifestFor(
+            CheckedModuleInput module, Set<ModuleId> implementationDependencies)
             throws FactDefect {
-        boolean foundDeclaration = false;
-        for (StatementNode statement : module.ast().statements()) {
-            if (!(statement instanceof ImportDeclaration declaration)
-                    || !declaration.alias().equals(alias)) {
-                continue;
-            }
-            foundDeclaration = true;
-            ResolvedImport resolved = findResolvedImport(module.imports(),
-                declaration.alias(), declaration.modulePath());
-            if (resolved == null) {
-                throw new FactDefect(module.moduleId(),
-                    "import declaration (alias '" + declaration.alias()
-                        + "', specifier '" + declaration.modulePath()
-                        + "') has no resolved import record (inconsistent import facts)");
-            }
-            if (resolved.kind() == ExternalModuleKind.STDLIB
-                    && STD_TIME_RESOLVED_MODULE_PATH
-                        .equals(resolved.resolvedModuleId().path())) {
-                return true;
-            }
+        ModuleScan scan = scanModule(module);
+        EnumSet<SemanticCapability> capabilities =
+            EnumSet.of(SemanticCapability.FOUNDATION_VALUES);
+        // I3 derivation row: int constructs claim SIGNED_INT32 at
+        // the construct kind, never the magnitude (a small literal
+        // claims exactly like 2147483647) — post-activation F4 rule 4
+        // requires SIGNED_INT32 at plan time for every int-using
+        // module.
+        if (scan.signedInt32) {
+            capabilities.add(SemanticCapability.SIGNED_INT32);
         }
-        if (!foundDeclaration) {
-            throw new FactDefect(module.moduleId(),
-                "module symbol '" + alias + "' has no matching import declaration in the "
-                    + "module AST (inconsistent checked facts)");
+        // The plan-time STDLIB_SEMANTICS arm (stdlib epic T5, D9): a
+        // module whose checked source contains a cataloged stdlib call
+        // claims STDLIB_SEMANTICS before lowering; a module without a
+        // cataloged call never claims it, and a stdlib-export value
+        // read claims nothing from the read (D3 — no route rule).
+        // Since K7 the arm covers the std.time/nowMillis call too.
+        if (scan.stdlibCall) {
+            capabilities.add(SemanticCapability.STDLIB_SEMANTICS);
         }
-        return false;
-    }
-
-    private static ResolvedImport findResolvedImport(List<ResolvedImport> imports,
-                                                     String alias, String modulePath) {
-        for (ResolvedImport resolvedImport : imports) {
-            if (resolvedImport.alias().equals(alias)
-                    && resolvedImport.modulePath().equals(modulePath)) {
-                return resolvedImport;
-            }
+        // The modules epic's plan-time arms (ISSUE-0239, E10): a
+        // module whose shared artifact cannot yet carry a fact
+        // claims the owning capability so F4 rule 4 reroutes it
+        // LEGACY at plan time post-activation (the reserved parent
+        // verification-3 plan-time edge reroute conditions — an
+        // over-claim only forces LEGACY, never E6005 and never a
+        // within-run fallback).
+        if (scan.importsModule
+                || implementationDependencies.contains(module.moduleId())) {
+            capabilities.add(SemanticCapability.MODULES);
         }
-        return null;
+        // The canonical plan-time CLASSES arm (class epic,
+        // ISSUE-0516) covers every class-construct claim: a class
+        // declaration, a class-typed object literal (including the
+        // builtin Error literal of a throw — the literal position,
+        // never a declaration), a class member read/write/delete,
+        // and has() — every construct the class epic's arms lower
+        // to a class op.
+        if (scan.classConstruct) {
+            capabilities.add(SemanticCapability.CLASSES);
+        }
+        if (scan.exportedCalledFromSource
+                || scan.awaitsAsync
+                || scan.declaresAsyncFunction
+                || scan.functionContainer
+                || scan.dynamicCall
+                || scan.nestedFunctionDeclaration
+                || scan.adapterCreation
+                || scan.uncalledDeclaredFunction
+                || scan.storedFunctionExpression) {
+            capabilities.add(SemanticCapability.CALLS);
+        }
+        if (scan.bytesInContainer || scan.bytesValue) {
+            capabilities.add(SemanticCapability.CONTAINERS_AND_STRINGS);
+        }
+        // The step-1 bytes guard (ISSUE-0574, parent S1b): the
+        // manifest's plan-time bytesBearing marker is set exactly
+        // from the same triggers as the unchanged claim arm above —
+        // the claim stays the construct-ownership fact, the marker
+        // is the routing fact planner rule 2b consumes to keep
+        // bytes-bearing modules on the retained route in every
+        // purpose. A fixed per-module boolean, never a capability,
+        // registry entry, registry hash, or schema member.
+        boolean bytesBearing = scan.bytesInContainer || scan.bytesValue;
+        return new SemanticRequirementManifest(module.moduleId(), capabilities,
+            scan.coverage, bytesBearing);
     }
 
     // =========================================================================
-    // Module scan: the four arms + the closed construct→op detector
+    // Module scan: the closed construct→op detector
     // =========================================================================
 
     /**
-     * The per-module scan state: the Arm A trigger, the Table-typed
-     * {@code nowMillis}-access trigger (the Arms B/C candidate), and the
-     * reachable-construct coverage rows (enum-keyed, recorded over the
-     * closed construct→op detector table of S4).
+     * The per-module scan state: the reachable-construct coverage rows
+     * (enum-keyed, recorded over the closed construct→op detector table of
+     * S4) and the claim triggers.
      */
     private static final class ModuleScan {
-        boolean armA;
-        boolean tableNowMillisAccess;
-
         /** The I3 {@code SIGNED_INT32} trigger: any int construct —
          * {@code CONST(Int)} (an int literal of any magnitude),
          * {@code UNARY(INT32_NEG)}, {@code BINARY(INT32_*)}, or
@@ -1157,13 +789,24 @@ public final class LoweringSupport {
                 // therefore never claims (D1's shadowed-binding
                 // negative: the checker resolved the call to the local
                 // binding, not the import).
-                boolean stdlibCall = StdlibCallRecognition.recognize(callExpr.callee(),
-                    checkerScope, module.imports()).isPresent();
+                Optional<StdlibFunctionCatalog.Entry> stdlibEntry =
+                    StdlibCallRecognition.recognize(callExpr.callee(), checkerScope,
+                        module.imports());
+                boolean stdlibCall = stdlibEntry.isPresent();
                 if (stdlibCall) {
                     // The plan-time STDLIB_SEMANTICS arm (D9): a cataloged
                     // stdlib call claims STDLIB_SEMANTICS before lowering,
                     // so route rule 4's promotion gate covers the module.
+                    // Since K7 the arm covers the std.time/nowMillis call
+                    // (the catalog row is closed; the claim's evidence is
+                    // the produced STDLIB_CALL op), and the recognized
+                    // time construct records its own coverage row besides
+                    // the call row.
                     scan.stdlibCall = true;
+                    if (stdlibEntry.get().function()
+                            == StdlibFunctionId.TIME_NOW_MILLIS) {
+                        scan.cover(ConstructKind.STDLIB_TIME_NOW_MILLIS);
+                    }
                 }
                 // The callee classification (I3 + the ISSUE-0239 E10
                 // CALLS arms): a declared function call counts the call
@@ -1233,9 +876,6 @@ public final class LoweringSupport {
                 // FIELD_READ.
                 if (isClassReceiverType(checkedType(module, memberAccessExpr.object()))) {
                     scan.classConstruct = true;
-                }
-                if ("nowMillis".equals(memberAccessExpr.field())) {
-                    checkNowMillisAccess(memberAccessExpr, module, scan, checkerScope);
                 }
             }
             case IndexExpr indexExpr -> {
@@ -1440,33 +1080,6 @@ public final class LoweringSupport {
         return type instanceof Type.Class
             || (type instanceof Type.Nullable nullable
                 && nullable.inner() instanceof Type.Class);
-    }
-
-    /**
-     * The {@code nowMillis} member-access trigger: Arm A (module-object
-     * access plus the alias→module-path join) and the Table-typed-object
-     * candidate for Arms B/C. The trigger is the member access itself in
-     * call or any value position — never only a direct call site. The
-     * module-object resolution uses the checker's site scope (the same
-     * scope the checker resolved the object identifier in): a nested
-     * binding shadowing the import alias is the checker's local
-     * resolution, never a {@code std/time} module-object access.
-     */
-    private static void checkNowMillisAccess(MemberAccessExpr memberAccess,
-                                             CheckedModuleInput module, ModuleScan scan,
-                                             SymbolTable checkerScope)
-            throws FactDefect {
-        if (memberAccess.object() instanceof IdentifierExpr identifier) {
-            Symbol symbol = checkerScope.resolve(identifier.name());
-            if (symbol instanceof Symbol.ModuleSymbol moduleSymbol
-                    && aliasJoinHitsStdTime(module, moduleSymbol.name())) {
-                scan.armA = true;
-            }
-        }
-        Type objectType = checkedType(module, memberAccess.object());
-        if (objectType == Type.Table.INSTANCE) {
-            scan.tableNowMillisAccess = true;
-        }
     }
 
     /**

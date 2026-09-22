@@ -1249,11 +1249,22 @@ public class SharedStdlibSemanticsTest {
     private record Seed(StdlibFunctionId function, List<Value> args, Value expected) {
     }
 
+    /**
+     * The injected deterministic clock of the combined battery (K7): the
+     * {@code TIME_NOW_MILLIS} algorithm returns exactly this reading, so
+     * the seed outcome is pinned; the oracle and each target read their
+     * own clock of the same kind (a contemporary epoch-millisecond
+     * value).
+     */
+    private static final long FIXED_CLOCK_MILLIS = 1_700_000_000_000L;
+    private static final SharedStdlibSemantics.Clock FIXED_CLOCK =
+        () -> FIXED_CLOCK_MILLIS;
+
     private static Seed seed(StdlibFunctionId function, Value arg, Value expected) {
         return new Seed(function, List.of(arg), expected);
     }
 
-    /** The 20-id seed table in the closed enum declaration order. */
+    /** The 21-id seed table in the closed enum declaration order. */
     private static List<Seed> seeds() {
         SemanticTable<Value> table = new SemanticTable<>();
         table.put("k", new Value.Int(1));
@@ -1295,7 +1306,9 @@ public class SharedStdlibSemanticsTest {
             new Seed(StdlibFunctionId.MATH_MIN_INT,
                 List.of(new Value.Int(2), new Value.Int(3)), new Value.Int(2)),
             new Seed(StdlibFunctionId.MATH_MAX_INT,
-                List.of(new Value.Int(2), new Value.Int(3)), new Value.Int(3)));
+                List.of(new Value.Int(2), new Value.Int(3)), new Value.Int(3)),
+            new Seed(StdlibFunctionId.TIME_NOW_MILLIS, List.of(),
+                new Value.Number((double) FIXED_CLOCK_MILLIS)));
     }
 
     /**
@@ -1308,7 +1321,7 @@ public class SharedStdlibSemanticsTest {
      * boundary-precedence and defect batteries.
      */
     static LoweredModuleUnit testCombinedT2T1() throws Exception {
-        System.out.println("-- Combined T2/T1: the 20-id battery through SharedStdlibSemantics --");
+        System.out.println("-- Combined T2/T1: the 21-id battery through SharedStdlibSemantics --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-semantics-battery");
         try {
@@ -1326,6 +1339,7 @@ public class SharedStdlibSemanticsTest {
                     import * as tbl from "std/table"
                     import * as json from "std/json"
                     import * as math from "std/math"
+                    import * as time from "std/time"
 
                     function run(): null {
                       console.log("log")
@@ -1349,6 +1363,7 @@ public class SharedStdlibSemanticsTest {
                       let f16: number = math.absNumber(-1.5)
                       let i17: int = math.minInt(2, 3)
                       let i18: int = math.maxInt(2, 3)
+                      let now: int = time.nowMillis()
                       return null
                     }
 
@@ -1362,7 +1377,7 @@ public class SharedStdlibSemanticsTest {
             }
             SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
             check(lowering != null && !lowering.hasErrors() && lowering.unit() != null,
-                "the 20-id battery lowers through the validator/chain protocol/"
+                "the 21-id battery lowers through the validator/chain protocol/"
                     + "control-flow validator: " + (lowering == null ? "null"
                         : lowering.diagnostics()));
             if (lowering == null || lowering.hasErrors() || lowering.unit() == null) {
@@ -1376,15 +1391,15 @@ public class SharedStdlibSemanticsTest {
                     stdlibOps.add(op);
                 }
             }
-            check(stdlibOps.size() == 20,
-                "exactly one STDLIB_CALL per cataloged call: 20 ops; got "
+            check(stdlibOps.size() == 21,
+                "exactly one STDLIB_CALL per cataloged call: 21 ops; got "
                     + stdlibOps.size());
             EnumSet<StdlibFunctionId> produced = EnumSet.noneOf(StdlibFunctionId.class);
             for (SemanticOp op : stdlibOps) {
                 produced.add(((KindPayload.StdlibCallPayload) op.payload()).function());
             }
             check(produced.equals(EnumSet.allOf(StdlibFunctionId.class)),
-                "the produced function set equals the catalog's closed 20-id set (the step "
+                "the produced function set equals the catalog's closed 21-id set (the step "
                     + "fails if the catalog misses or adds an entry); got " + produced);
 
             Map<StdlibFunctionId, Seed> seedsByFunction = new LinkedHashMap<>();
@@ -1392,7 +1407,7 @@ public class SharedStdlibSemanticsTest {
                 seedsByFunction.put(seed.function(), seed);
             }
             check(seedsByFunction.keySet().equals(EnumSet.allOf(StdlibFunctionId.class)),
-                "the seed table covers the closed 20-id set exactly");
+                "the seed table covers the closed 21-id set exactly");
 
             CaptureSink sink = new CaptureSink(SharedStdlibSemantics.Channel.STDOUT);
             List<byte[]> stderrWrites = new ArrayList<>();
@@ -1462,7 +1477,8 @@ public class SharedStdlibSemanticsTest {
                 ConsoleSink opSink = function == StdlibFunctionId.CONSOLE_ERROR
                     ? stderrRouting
                     : routingSink;
-                Outcome<Value> outcome = SharedStdlibSemantics.execute(op, seed.args(), opSink);
+                Outcome<Value> outcome = SharedStdlibSemantics.execute(op, seed.args(),
+                    opSink, FIXED_CLOCK);
                 expectSuccess(outcome, seed.expected(),
                     "STDLIB_CALL(" + function + ") executes the parent-table outcome");
             }

@@ -694,8 +694,9 @@ public sealed interface KindPayload
      * left-to-right, then {@code STDLIB_PARAMETER} boundaries run in
      * order; the result passes {@code STDLIB_RETURN}; the op's
      * {@code failurePolicy} is the named algorithm policy from the closed
-     * stdlib table. {@code TIME_NOW_MILLIS} is a reserved selector name,
-     * never a member of {@link StdlibFunctionId}.
+     * stdlib table. {@code TIME_NOW_MILLIS} is the 21st member (K7): zero
+     * declared parameters, the declared {@code int} return boundary, and
+     * the {@code INT32_RESULT} terminal.
      */
     record StdlibCallPayload(StdlibFunctionId function, List<ValueId> args,
                              SemanticCapability effectCapability)

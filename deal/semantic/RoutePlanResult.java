@@ -15,7 +15,8 @@ import java.util.Objects;
  * {@code LoweringFailureDetail} payload — never a crash, never a silent
  * reroute for a fact defect. SHARED-ineligibility — {@code
  * LEGACY_SAFE_INT} profile, {@code PUBLIC_BUILD + PRE_ACTIVATION},
- * {@code STDLIB_TIME_CONFLICT} (detected or propagated), or a required
+ * {@code STDLIB_TIME_CONFLICT} (the inert marker no manifest claims
+ * since K7), or a required
  * capability not {@code PROMOTED} for the target — reroutes LEGACY at
  * plan time with zero diagnostics: never an error, never a within-run
  * fallback.

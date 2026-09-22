@@ -692,6 +692,15 @@ public final class StdlibEquivalenceBatteryTest {
         /** The fixed synthetic operation origin of the reference run. */
         static final SourceOrigin ORIGIN = origin();
 
+        /**
+         * The fixed reference clock of {@code TIME_NOW_MILLIS} (K7): a
+         * contemporary epoch-millisecond reading, deterministic for the
+         * battery — its declared int return boundary raises the same
+         * pinned E8004 the retained {@code std/time.lua} lane raises.
+         */
+        static final SharedStdlibSemantics.Clock REFERENCE_CLOCK =
+            () -> 1_700_000_000_000L;
+
         final SourceOrigin origin;
 
         Reference(SourceOrigin origin) {
@@ -775,6 +784,8 @@ public final class StdlibEquivalenceBatteryTest {
                     intOf(args.get(0)), intOf(args.get(1)));
                 case MATH_MAX_INT -> SharedStdlibSemantics.mathMaxInt(origin,
                     intOf(args.get(0)), intOf(args.get(1)));
+                case TIME_NOW_MILLIS -> SharedStdlibSemantics.timeNowMillis(origin,
+                    REFERENCE_CLOCK);
             };
         }
 
@@ -1418,6 +1429,7 @@ public final class StdlibEquivalenceBatteryTest {
             case JSON_PARSE, JSON_STRINGIFY -> "json";
             case MATH_FLOOR, MATH_CEIL, MATH_SQRT, MATH_ABS_INT, MATH_ABS_NUMBER,
                  MATH_MIN_INT, MATH_MAX_INT -> "math";
+            case TIME_NOW_MILLIS -> "time";
         };
     }
 
@@ -2064,6 +2076,7 @@ public final class StdlibEquivalenceBatteryTest {
             case JSON_PARSE, JSON_STRINGIFY -> "json";
             case MATH_FLOOR, MATH_CEIL, MATH_SQRT, MATH_ABS_INT, MATH_ABS_NUMBER,
                  MATH_MIN_INT, MATH_MAX_INT -> "math";
+            case TIME_NOW_MILLIS -> "time";
         };
     }
 

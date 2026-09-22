@@ -543,9 +543,12 @@ public class CanonicalJsonTest {
                         && "NOT_A_SIDE".equals(s.value())),
             "a payload-nested open enum name survives the parse as a raw string");
 
-        // The reserved names are not enum members (no parse-time conversion exists).
-        check(!enumMember(StdlibFunctionId.class, "TIME_NOW_MILLIS"),
-            "TIME_NOW_MILLIS is not a StdlibFunctionId member (parse keeps raw strings)");
+        // The reserved names are not enum members (no parse-time conversion exists);
+        // TIME_NOW_MILLIS is a closed member since K7, so the raw-string example
+        // uses the policy family's still-reserved names.
+        check(enumMember(StdlibFunctionId.class, "TIME_NOW_MILLIS"),
+            "TIME_NOW_MILLIS is a StdlibFunctionId member (the 21st closed selector; "
+                + "the parser keeps raw strings regardless)");
         check(!enumMember(FailurePolicyId.class, "EXTERNAL_PARAMETER"),
             "EXTERNAL_PARAMETER is not a FailurePolicyId member (parse keeps raw strings)");
     }

@@ -219,7 +219,7 @@ public class SemanticIrSchemaTest {
         "STRING_CONTAINS", "STRING_STARTS_WITH", "STRING_ENDS_WITH",
         "STRING_REPLACE", "STRING_SPLIT", "STRING_TRIM", "TABLE_KEYS", "JSON_PARSE",
         "JSON_STRINGIFY", "MATH_FLOOR", "MATH_CEIL", "MATH_SQRT", "MATH_ABS_INT",
-        "MATH_ABS_NUMBER", "MATH_MIN_INT", "MATH_MAX_INT");
+        "MATH_ABS_NUMBER", "MATH_MIN_INT", "MATH_MAX_INT", "TIME_NOW_MILLIS");
 
     static void testClosedEnum(Class<? extends Enum<?>> type, List<String> pinned, String name) {
         System.out.println("-- Closed enum " + name + " --");
@@ -300,7 +300,7 @@ public class SemanticIrSchemaTest {
         check(BINARY_SELECTORS.size() == 42, "BinarySelector has exactly 42 values; got " + BINARY_SELECTORS.size());
         check(BOUNDARY_KINDS.size() == 25, "BoundaryKind has exactly 25 values; got " + BOUNDARY_KINDS.size());
         check(FAILURE_POLICIES.size() == 24, "FailurePolicyId has exactly 24 values; got " + FAILURE_POLICIES.size());
-        check(STDLIB_IDS.size() == 20, "StdlibFunctionId has exactly 20 values; got " + STDLIB_IDS.size());
+        check(STDLIB_IDS.size() == 21, "StdlibFunctionId has exactly 21 values; got " + STDLIB_IDS.size());
     }
 
     // =========================================================================
@@ -342,6 +342,22 @@ public class SemanticIrSchemaTest {
         return false;
     }
 
+    private static Class<? extends Enum<?>> enumMemberOf(List<Class<? extends Enum<?>>> enums,
+                                                         String name) {
+        Class<? extends Enum<?>> found = null;
+        for (Class<? extends Enum<?>> e : enums) {
+            for (Enum<?> c : e.getEnumConstants()) {
+                if (c.name().equals(name)) {
+                    if (found != null && found != e) {
+                        return null; // ambiguous: more than one enum carries the name
+                    }
+                    found = e;
+                }
+            }
+        }
+        return found;
+    }
+
     static void testReservedNames() {
         System.out.println("-- Reserved names marked invalid --");
 
@@ -351,8 +367,9 @@ public class SemanticIrSchemaTest {
         check(FailurePolicyId.RESERVED_NAMES.equals(
                 List.of("EXTERNAL_PARAMETER", "EXTERNAL_RETURN", "STDLIB_PARAMETER", "STDLIB_RETURN")),
             "FailurePolicyId.RESERVED_NAMES is exactly the four reserved policy names");
-        check(StdlibFunctionId.RESERVED_NAMES.equals(List.of("TIME_NOW_MILLIS")),
-            "StdlibFunctionId.RESERVED_NAMES is exactly TIME_NOW_MILLIS");
+        check(StdlibFunctionId.RESERVED_NAMES.isEmpty(),
+            "StdlibFunctionId.RESERVED_NAMES is empty (TIME_NOW_MILLIS is the 21st member "
+                + "since K7; the reserved-name guard stays as the closed-set machinery)");
 
         for (String name : BoundaryKind.RESERVED_NAMES) {
             check(BoundaryKind.isReservedName(name), name + " is marked invalid as a boundary kind");
@@ -360,13 +377,16 @@ public class SemanticIrSchemaTest {
         for (String name : FailurePolicyId.RESERVED_NAMES) {
             check(FailurePolicyId.isReservedName(name), name + " is marked invalid as a failure policy");
         }
-        check(StdlibFunctionId.isReservedName("TIME_NOW_MILLIS"),
-            "TIME_NOW_MILLIS is marked invalid as a stdlib selector");
+        check(!StdlibFunctionId.isReservedName("TIME_NOW_MILLIS")
+                && !StdlibFunctionId.isReservedName("ANY_OTHER_NAME"),
+            "TIME_NOW_MILLIS is a closed stdlib selector member, never a reserved name "
+                + "(the empty reservation list denies every name by default)");
 
         // Reflective closedness over every enum in deal.semantic.ir.
         List<Class<? extends Enum<?>>> enums = allEnumsInPackage();
-        check(!enumHasMember(enums, "TIME_NOW_MILLIS"),
-            "TIME_NOW_MILLIS is not a member of any enum in deal.semantic.ir");
+        check(enumHasMember(enums, "TIME_NOW_MILLIS")
+                && enumMemberOf(enums, "TIME_NOW_MILLIS") == StdlibFunctionId.class,
+            "TIME_NOW_MILLIS is a member of exactly the closed StdlibFunctionId enum");
         for (String name : FailurePolicyId.RESERVED_NAMES) {
             // The four names are valid BoundaryKind values and invalid
             // FailurePolicyId values — and no other enum may carry them.
@@ -445,30 +465,32 @@ public class SemanticIrSchemaTest {
         pinned.put("CLASS_DECLARATION", "layout, defaults, factory, and export metadata");
         pinned.put("IMPORT_EXPORT_ENTRY",
             "module/import/export/entry operations plus interface/ABI records");
+        pinned.put("STDLIB_TIME_NOW_MILLIS",
+            "STDLIB_CALL(TIME_NOW_MILLIS) with the declared int "
+                + "return boundary and its INT32_RESULT terminal");
 
-        check(pinned.size() == 22, "exactly 22 rows carry a required common form; got " + pinned.size());
+        check(pinned.size() == 23, "exactly 23 rows carry a required common form; got " + pinned.size());
         int withForm = 0;
         for (ConstructKind kind : kinds) {
             String name = kind.name();
-            if (pinned.containsKey(name)) {
-                withForm++;
-                check(pinned.get(name).equals(kind.requiredCommonForm()),
-                    name + " required common form is the verbatim parent text; got \""
-                        + kind.requiredCommonForm() + "\"");
-                check(!kind.mappedOpKinds().isEmpty(),
-                    name + " carries a non-empty mapped op-kind set");
-            } else {
-                check(name.equals("STDLIB_TIME_NOW_MILLIS"),
-                    "the only row without a required common form is the excluded std/time.nowMillis row; got " + name);
-            }
+            check(pinned.containsKey(name),
+                name + " carries the pinned required common form");
+            withForm++;
+            check(pinned.get(name).equals(kind.requiredCommonForm()),
+                name + " required common form is the verbatim parent text (plus the K7 "
+                    + "std.time row); got \""
+                    + kind.requiredCommonForm() + "\"");
+            check(!kind.mappedOpKinds().isEmpty(),
+                name + " carries a non-empty mapped op-kind set");
         }
-        check(withForm == 22, "22 rows carry a required common form; got " + withForm);
+        check(withForm == 23, "23 rows carry a required common form; got " + withForm);
 
-        // The excluded row: no required common form, no op-kind set.
-        check(ConstructKind.STDLIB_TIME_NOW_MILLIS.requiredCommonForm() == null,
-            "the excluded row carries no required common form");
-        check(ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds().isEmpty(),
-            "the excluded row carries no op-kind set");
+        // The K7 std.time row: its required common form and mapped kinds.
+        check(ConstructKind.STDLIB_TIME_NOW_MILLIS.requiredCommonForm() != null
+                && ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds()
+                    .equals(List.of(SemanticOpKind.STDLIB_CALL, SemanticOpKind.BOUNDARY)),
+            "the std.time.nowMillis row carries its required common form and the "
+                + "[STDLIB_CALL, BOUNDARY] mapped kinds");
 
         // Pinned mapped op-kind sets for the exemplar rows.
         check(ConstructKind.CALL.mappedOpKinds().equals(List.of(
@@ -1108,7 +1130,8 @@ public class SemanticIrSchemaTest {
         check(unit.semanticProfile() == SemanticProfile.DEAL_V1_2_INT32,
             "the constructed unit carries DEAL_V1_2_INT32");
 
-        // The excluded construct row can never appear as a constructCoverage key.
+        // The K7 std.time.nowMillis row is an ordinary constructCoverage
+        // key carrying the closed mapped op kinds verbatim.
         EnumMap<ConstructKind, List<SemanticOpKind>> coverage = new EnumMap<>(ConstructKind.class);
         coverage.put(ConstructKind.CALL, ConstructKind.CALL.mappedOpKinds());
         LoweredModuleUnit covered = new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
@@ -1118,13 +1141,18 @@ public class SemanticIrSchemaTest {
         check(covered.constructCoverage().get(ConstructKind.CALL)
                 .equals(ConstructKind.CALL.mappedOpKinds()),
             "constructCoverage is enum-keyed and carries the mapped op-kind list");
-        EnumMap<ConstructKind, List<SemanticOpKind>> withExcluded = new EnumMap<>(ConstructKind.class);
-        withExcluded.put(ConstructKind.STDLIB_TIME_NOW_MILLIS, List.of());
-        expectRejected(() -> new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
-                SemanticProfile.DEAL_V1_2_INT32, new ModuleId("m"), "ih", "lch",
-                EnumSet.of(SemanticCapability.CALLS), withExcluded, Map.of(), Map.of(),
-                new ModuleInitPlan(List.of(), new BlockId(0)), ExportPlan.empty(), Map.of()),
-            "the excluded std/time.nowMillis row cannot appear as a constructCoverage key");
+        EnumMap<ConstructKind, List<SemanticOpKind>> withTime = new EnumMap<>(ConstructKind.class);
+        withTime.put(ConstructKind.STDLIB_TIME_NOW_MILLIS,
+            ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds());
+        LoweredModuleUnit timeCovered = new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
+            SemanticProfile.DEAL_V1_2_INT32, new ModuleId("m"), "ih", "lch",
+            EnumSet.of(SemanticCapability.STDLIB_SEMANTICS), withTime, Map.of(), Map.of(),
+            new ModuleInitPlan(List.of(), new BlockId(0)), ExportPlan.empty(), Map.of());
+        check(timeCovered.constructCoverage()
+                .get(ConstructKind.STDLIB_TIME_NOW_MILLIS)
+                .equals(ConstructKind.STDLIB_TIME_NOW_MILLIS.mappedOpKinds()),
+            "the std/time.nowMillis row is an ordinary constructCoverage key carrying the "
+                + "mapped op-kind list (K7)");
 
         // Immutability: the unit defensively copies its maps.
         Map<FunctionId, LoweredFunction> functions = new LinkedHashMap<>();

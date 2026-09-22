@@ -56,10 +56,12 @@ import java.util.stream.Stream;
  *   <li>the fail-closed families: a HOST-kind import
  *       ({@code HOST_MODULE_IMPORT}), a cross-module async call
  *       ({@code EXTERNAL_ASYNC_CALL}), a cross-module sync call, bytes,
- *       {@code time.nowMillis}, and
+ *       and
  *       function-typed materializations each fail with their named E6005
  *       and publish nothing, while a {@code STDLIB}/{@code COMPILED}-only
- *       closure, the builtin Error construction (ISSUE-0619), and a
+ *       closure, the builtin Error construction (ISSUE-0619), the
+ *       {@code time.nowMillis} coverage (ISSUE-0623: the emitted artifacts
+ *       publish the pinned E8004 terminal), and a
  *       same-module async call emit and execute;</li>
  *   <li>the C9 source-map disposition: an explicit {@code --source-map}
  *       LuaJIT and JVM production compile succeeds, publishes the project
@@ -180,7 +182,7 @@ public class ProductionDispatchTest {
         }
         """;
 
-    /** The locked-clock fixture ({@code time.nowMillis}, a later slice). */
+    /** The {@code time.nowMillis} fixture (ISSUE-0623's covered construct). */
     private static final String TIME_SOURCE = """
         import * as time from "std/time"
 
@@ -925,8 +927,7 @@ public class ProductionDispatchTest {
         // executes its production artifact on both targets.
         checkLaterSliceConstruct("bytes", Map.of("src/main.deal", BYTES_SOURCE),
             "CONSTRUCT_UNLOWERED");
-        checkLaterSliceConstruct("time.nowMillis",
-            Map.of("src/main.deal", TIME_SOURCE), "CONSTRUCT_UNLOWERED");
+        checkTimeNowMillisCoverage();
         checkLaterSliceConstruct("function-typed materialization",
             Map.of("src/main.deal", FUNCTION_VALUE_SOURCE),
             "CONSTRUCT_UNLOWERED");
@@ -1007,6 +1008,65 @@ public class ProductionDispatchTest {
                     + compile.stderr());
             check(!Files.exists(project.resolve("out")),
                 name + ": the failure stages no artifact");
+        } finally {
+            deleteRecursively(project);
+        }
+    }
+
+    /**
+     * The K7 {@code time.nowMillis} coverage through the release-owned
+     * production invocation (the fixture this battery pinned fail-closed):
+     * the closure emits exactly one project artifact per target and both
+     * artifacts execute under their real toolchains with the pinned E8004
+     * {@code int out of safe range} terminal — the declared {@code int}
+     * boundary is the single terminal of the target-clock read.
+     */
+    private static void checkTimeNowMillisCoverage() throws Exception {
+        Path project = Files.createTempDirectory("production-dispatch-time-");
+        try {
+            write(project, "deal.json", DEAL_JSON_LUA);
+            write(project, "src/main.deal", TIME_SOURCE);
+            ProjectOutcome luaCompile = productionCompile(project, "src/main.deal",
+                "out");
+            check(luaCompile.exitCode() == 0,
+                "the time.nowMillis closure emits one project artifact: "
+                    + luaCompile.stderr());
+            if (luaCompile.exitCode() == 0) {
+                ProcessOutcome run = runProcess(project.resolve("out"),
+                    "luajit", "main.lua");
+                check(run.exitCode() == 1
+                        && run.output().contains("DEAL_ERROR_CODE: E8004"),
+                    "the LuaJIT artifact publishes the pinned E8004 terminal: exit="
+                        + run.exitCode() + " output=" + run.output());
+            }
+
+            Path jvmOut = project.resolve("out-jvm");
+            ProjectOutcome jvmCompile = runProductionCli("compile",
+                project.resolve("src/main.deal").toAbsolutePath().toString(),
+                "--backend", "jvm", "--output",
+                jvmOut.toAbsolutePath().toString());
+            check(jvmCompile.exitCode() == 0,
+                "the time.nowMillis JVM closure emits one project artifact: "
+                    + jvmCompile.stderr());
+            if (jvmCompile.exitCode() != 0) {
+                return;
+            }
+            String buildCp = Path.of("build").toAbsolutePath().normalize()
+                .toString();
+            ProcessOutcome javac = runProcess(project, "javac", "--release", "25",
+                "-proc:none", "-cp", buildCp, "-d", jvmOut.toString(),
+                jvmOut.resolve("Main.java").toString());
+            check(javac.exitCode() == 0,
+                "the JVM time.nowMillis artifact compiles: " + javac.output());
+            if (javac.exitCode() != 0) {
+                return;
+            }
+            ProcessOutcome javaRun = runProcess(jvmOut, "java", "-cp",
+                buildCp + File.pathSeparator + jvmOut, "Main");
+            check(javaRun.exitCode() == 1
+                    && javaRun.output().contains("DEAL_ERROR_CODE: E8004"),
+                "the JVM artifact publishes the pinned E8004 terminal: exit="
+                    + javaRun.exitCode() + " output=" + javaRun.output());
         } finally {
             deleteRecursively(project);
         }

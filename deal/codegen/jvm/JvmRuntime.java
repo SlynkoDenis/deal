@@ -1389,7 +1389,7 @@ public final class JvmRuntime {
     }
 
     /**
-     * The single in-target realization of the closed 20-operation stdlib
+     * The single in-target realization of the closed 21-operation stdlib
      * table: the parameter boundaries already ran (the emitter emits the
      * {@code STDLIB_PARAMETER} children), so the algorithm receives the
      * boundary-admitted carriers — a string parameter is a valid scalar
@@ -1407,8 +1407,11 @@ public final class JvmRuntime {
      * expected text {@code string, number, boolean, or table} and the
      * canonical actual-kind token —
      * at the {@code STDLIB_CALL} call origin with the active frames.
-     * Console ids are emitted inline by the emitters (the byte-exact
-     * one-effect contract), never through this surface.
+     * {@code TIME_NOW_MILLIS} reads the target clock
+     * ({@link System#currentTimeMillis()}) and its single terminal is the
+     * declared int {@code STDLIB_RETURN} boundary, never an algorithm
+     * failure. Console ids are emitted inline by the emitters (the
+     * byte-exact one-effect contract), never through this surface.
      */
     public static Object stdlib(String fn, String opKey, String digest, String parent,
                                 String origin, Object[] args) {
@@ -1559,6 +1562,15 @@ public final class JvmRuntime {
                 }
                 case "MATH_MAX_INT" -> {
                     return Long.valueOf(Math.max(longOf(args[0]), longOf(args[1])));
+                }
+                case "TIME_NOW_MILLIS" -> {
+                    // The K7 target-clock read: the declared int
+                    // STDLIB_RETURN boundary (INT32_RESULT) is the single
+                    // terminal, so a contemporary epoch-millisecond
+                    // reading fails E8004 int out of safe range at the
+                    // call origin (the same observable the LuaJIT
+                    // artifact and the oracle produce).
+                    return Double.valueOf(System.currentTimeMillis());
                 }
                 default -> throw new StdlibFailure("E8001",
                     "unknown stdlib call " + fn, null, null);

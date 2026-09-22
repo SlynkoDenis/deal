@@ -70,9 +70,10 @@ import java.util.stream.Stream;
 
 /**
  * Verifies the ISSUE-0493 closed stdlib surface: the single closed
- * {@link StdlibFunctionCatalog} — exactly the 20 declared exports of
+ * {@link StdlibFunctionCatalog} — the declared exports of
  * {@code std/console}, {@code std/string}, {@code std/table},
- * {@code std/json}, and {@code std/math} with their declared parameter
+ * {@code std/json}, {@code std/math}, and (since K7) {@code std/time}
+ * with their declared parameter
  * and return descriptors in the {@link DescriptorService} domain — and
  * the closed checked-fact recognition predicate
  * {@link StdlibCallRecognition}, which classifies a call callee as a
@@ -85,31 +86,33 @@ import java.util.stream.Stream;
  * <p>Tests:
  * <ol>
  *   <li>Enumeration battery: the catalog's key set equals exactly the
- *       closed 20-id {@link StdlibFunctionId} set; per entry, the exact
+ *       closed 21-id {@link StdlibFunctionId} set with the K7
+ *       {@code std.time}/{@code nowMillis} row last; per entry, the exact
  *       id, module path, export name, and declared parameter/return
  *       descriptors — an added, removed, or renamed entry fails.</li>
- *   <li>Negative lookups: {@code std/time} (module and members), unknown
- *       members of known stdlib modules, a user module, a host module,
+ *   <li>Negative lookups: unknown members of known stdlib modules, other
+ *       {@code std.time} members, a user module, a host module,
  *       and absent inputs all return "not a stdlib call" — never an
  *       error; the table is immutable and pure.</li>
  *   <li>Recognition over real checked projects: one {@code .deal} module
- *       importing all five cataloged stdlib modules through namespace
+ *       importing all six cataloged stdlib modules through namespace
  *       imports, resolved through {@code TypeChecker}'s
  *       {@code ModuleSymbol} export resolution — positive per id for all
- *       20 call sites plus a value-position export read.</li>
+ *       21 call sites plus a value-position export read.</li>
  *   <li>Recognition negatives over real checked projects: member access
  *       on a shadowing local variable, on a user-module alias, on a
- *       host-module alias, on a non-{@code IdentifierExpr} object, a
- *       non-member callee, and the {@code std/time} lock — none
- *       recognized.</li>
+ *       host-module alias, on a non-{@code IdentifierExpr} object, and a
+ *       non-member callee — none recognized.</li>
  *   <li>Anti-hollow control: an identifier whose spelling equals a
  *       stdlib alias but whose checked resolution is a non-STDLIB module
  *       is never recognized — spelling-based matching is rejected and
  *       the checked-scope resolution path is forced; the same is pinned
  *       synthetically over hand-built checker facts (kind, alias join,
  *       scope shadowing, non-catalog members).</li>
- *   <li>The landed time lock stays untouched: no catalog entry names
- *       {@code TIME_NOW_MILLIS} and no entry carries {@code std/time}.</li>
+ *   <li>The K7 time row: {@code time.nowMillis} is recognized through the
+ *       closed {@code std.time}/{@code nowMillis} catalog row with its
+ *       declared {@code ()->int} descriptors (the superseded D8
+ *       reservation is retired, the catalog row is the closed authority).</li>
  * </ol>
  */
 public class StdlibFunctionCatalogTest {
@@ -362,7 +365,7 @@ public class StdlibFunctionCatalogTest {
     // =========================================================================
 
     static void testCatalogEnumerationBattery() {
-        System.out.println("-- Enumeration battery: closed 20-row table, exact descriptors --");
+        System.out.println("-- Enumeration battery: closed 21-row table, exact descriptors --");
 
         RuntimeDescriptor string = DescriptorService.describe(Type.String.INSTANCE);
         RuntimeDescriptor intD = DescriptorService.describe(Type.Int.INSTANCE);
@@ -413,12 +416,15 @@ public class StdlibFunctionCatalogTest {
             entry(StdlibFunctionId.MATH_MIN_INT, "std.math", "minInt",
                 List.of(intD, intD), intD),
             entry(StdlibFunctionId.MATH_MAX_INT, "std.math", "maxInt",
-                List.of(intD, intD), intD));
+                List.of(intD, intD), intD),
+            entry(StdlibFunctionId.TIME_NOW_MILLIS, "std.time", "nowMillis",
+                List.of(), intD));
 
-        check(StdlibFunctionCatalog.entries().size() == 20,
-            "the catalog has exactly 20 entries; got " + StdlibFunctionCatalog.entries().size());
+        check(StdlibFunctionCatalog.entries().size() == 21,
+            "the catalog has exactly 21 entries; got " + StdlibFunctionCatalog.entries().size());
         check(StdlibFunctionCatalog.entries().equals(expected),
-            "the catalog rows equal the closed D1 table in pinned order (an added, "
+            "the catalog rows equal the closed D1 table plus the K7 std.time row in pinned "
+                + "order (an added, "
                 + "removed, or renamed entry fails): " + StdlibFunctionCatalog.entries());
 
         EnumSet<StdlibFunctionId> ids = EnumSet.noneOf(StdlibFunctionId.class);
@@ -426,11 +432,17 @@ public class StdlibFunctionCatalogTest {
             ids.add(entry.function());
         }
         check(ids.equals(EnumSet.allOf(StdlibFunctionId.class)),
-            "the catalog's key set equals exactly the closed 20-id StdlibFunctionId set; got "
+            "the catalog's key set equals exactly the closed 21-id StdlibFunctionId set; got "
                 + ids);
-        check(ids.size() == 20 && StdlibFunctionId.values().length == 20,
-            "the closed StdlibFunctionId enum stays at 20 values (TIME_NOW_MILLIS stays "
-                + "reserved, never an enum member)");
+        check(ids.size() == 21 && StdlibFunctionId.values().length == 21,
+            "the closed StdlibFunctionId enum is exactly 21 values (TIME_NOW_MILLIS is the "
+                + "21st member; the D8 reservation is retired)");
+        check(StdlibFunctionId.values()[20] == StdlibFunctionId.TIME_NOW_MILLIS
+                && StdlibFunctionId.RESERVED_NAMES.isEmpty(),
+            "TIME_NOW_MILLIS is the 21st member in the pinned order and RESERVED_NAMES is "
+                + "empty while the reserved-name guard stays");
+        check(StdlibFunctionCatalog.entries().get(20).modulePath().equals("std.time"),
+            "the std.time group is the single last row — no existing row moved");
 
         for (StdlibFunctionCatalog.Entry entry : StdlibFunctionCatalog.entries()) {
             Optional<StdlibFunctionCatalog.Entry> lookedUp =
@@ -440,11 +452,16 @@ public class StdlibFunctionCatalogTest {
                     + "exact catalog row");
             check(!StdlibFunctionId.isReservedName(entry.function().name()),
                 "catalog id " + entry.function() + " is not a reserved selector name");
-            check(!entry.modulePath().equals("std.time")
-                    && !StdlibFunctionId.RESERVED_NAMES.contains(entry.exportName()),
-                "catalog row " + entry.modulePath() + "." + entry.exportName()
-                    + " never names std/time or TIME_NOW_MILLIS (D8 lock)");
         }
+        check(StdlibFunctionCatalog.lookup("std.time", "nowMillis")
+                .map(StdlibFunctionCatalog.Entry::function)
+                .orElse(null) == StdlibFunctionId.TIME_NOW_MILLIS,
+            "std.time.nowMillis resolves to TIME_NOW_MILLIS through the closed catalog");
+        check(StdlibFunctionCatalog.lookup("std.time", "nowMillis")
+                .map(entry -> entry.parameterDescriptors().isEmpty()
+                    && entry.returnDescriptor().equals(intD))
+                .orElse(false),
+            "the std.time.nowMillis row carries the declared ()->int descriptors");
 
         // Immutability and purity of the static surface.
         try {
@@ -475,11 +492,14 @@ public class StdlibFunctionCatalogTest {
     static void testNegativeLookups() {
         System.out.println("-- Negative lookups: absent modules/members are never errors --");
 
-        // std/time: no entry for any member (D8 lock).
-        for (String member : List.of("nowMillis", "length", "log", "keys", "time")) {
+        // std/time: exactly the single nowMillis row; every other member is
+        // not a stdlib call.
+        for (String member : List.of("length", "log", "keys", "time")) {
             check(StdlibFunctionCatalog.lookup("std.time", member).isEmpty(),
                 "std.time." + member + " is not a stdlib call (no catalog entry)");
         }
+        check(StdlibFunctionCatalog.lookup("std.time", "nowMillis").isPresent(),
+            "std.time.nowMillis is the K7 catalog row");
         // Unknown members of known stdlib modules.
         check(StdlibFunctionCatalog.lookup("std.string", "nope").isEmpty(),
             "std.string.nope is not a stdlib call");
@@ -532,6 +552,7 @@ public class StdlibFunctionCatalogTest {
                     import * as tbl from "std/table"
                     import * as json from "std/json"
                     import * as math from "std/math"
+                    import * as time from "std/time"
 
                     export function main(): null {
                       console.log("log")
@@ -555,6 +576,7 @@ public class StdlibFunctionCatalogTest {
                       let f16: number = math.absNumber(-1.5)
                       let i17: int = math.minInt(2, 3)
                       let i18: int = math.maxInt(2, 3)
+                      let now: int = time.nowMillis()
                       let g: (x: string) => null = console.log
                       return null
                     }
@@ -588,6 +610,7 @@ public class StdlibFunctionCatalogTest {
             expectedByField.put("absNumber", StdlibFunctionId.MATH_ABS_NUMBER);
             expectedByField.put("minInt", StdlibFunctionId.MATH_MIN_INT);
             expectedByField.put("maxInt", StdlibFunctionId.MATH_MAX_INT);
+            expectedByField.put("nowMillis", StdlibFunctionId.TIME_NOW_MILLIS);
 
             Map<StdlibFunctionId, Integer> seen = new HashMap<>();
             int total = 0;
@@ -616,16 +639,16 @@ public class StdlibFunctionCatalogTest {
                         + "(declared descriptors included)");
                 seen.merge(expectedId, 1, Integer::sum);
             }
-            check(total == 21,
-                "the positive fixture exposes 21 catalog-member accesses (20 call "
+            check(total == 22,
+                "the positive fixture exposes 22 catalog-member accesses (21 call "
                     + "callees + one value-position export read); got " + total);
             check(seen.get(StdlibFunctionId.CONSOLE_LOG) != null
                     && seen.get(StdlibFunctionId.CONSOLE_LOG) == 2,
                 "console.log appears once as a call callee and once as a value-position "
                     + "read; got " + seen.get(StdlibFunctionId.CONSOLE_LOG));
-            check(seen.size() == 20
+            check(seen.size() == 21
                     && seen.keySet().equals(EnumSet.allOf(StdlibFunctionId.class)),
-                "every one of the 20 closed ids is recognized exactly through its cataloged "
+                "every one of the 21 closed ids is recognized exactly through its cataloged "
                     + "member; got " + seen.keySet());
         } finally {
             deleteRecursively(tmp);
@@ -881,8 +904,8 @@ public class StdlibFunctionCatalogTest {
         }
     }
 
-    static void testRecognitionNegativeTimeLock() throws Exception {
-        System.out.println("-- Time lock: std/time members are never stdlib calls --");
+    static void testRecognitionPositiveTimeRow() throws Exception {
+        System.out.println("-- Time row: std/time.nowMillis is a recognized stdlib call (K7) --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-catalog-time");
         try {
@@ -906,13 +929,23 @@ public class StdlibFunctionCatalogTest {
             List<Map.Entry<MemberAccessExpr, SymbolTable>> sites = memberAccessesOf(module);
             check(sites.size() == 1 && sites.get(0).getKey().field().equals("nowMillis"),
                 "exactly one member access (time.nowMillis) exists; got " + sites.size());
-            check(StdlibCallRecognition.recognize(sites.get(0).getKey(),
-                    sites.get(0).getValue(), module.imports()).isEmpty(),
-                "time.nowMillis is not a stdlib call: std/time has no catalog entry and "
-                    + "TIME_NOW_MILLIS stays reserved (D8)");
+            Optional<StdlibFunctionCatalog.Entry> recognized =
+                StdlibCallRecognition.recognize(sites.get(0).getKey(),
+                    sites.get(0).getValue(), module.imports());
+            check(recognized.isPresent()
+                    && recognized.get().function() == StdlibFunctionId.TIME_NOW_MILLIS,
+                "time.nowMillis is recognized through the closed std.time/nowMillis "
+                    + "catalog row (K7); got "
+                    + (recognized.isEmpty() ? "empty"
+                        : recognized.get().function().name()));
+            check(recognized.isPresent()
+                    && recognized.get().parameterDescriptors().isEmpty()
+                    && recognized.get().returnDescriptor()
+                        .equals(DescriptorService.describe(Type.Int.INSTANCE)),
+                "the recognized row carries the declared ()->int descriptors");
             check(module.imports().get(0).kind() == ExternalModuleKind.STDLIB,
-                "std/time is STDLIB-classified by the index — the lock is the catalog's "
-                    + "missing row, never a classification change");
+                "std/time is STDLIB-classified by the index — the recognition runs the "
+                    + "checked-fact predicate over the closed catalog row");
         } finally {
             deleteRecursively(tmp);
         }
@@ -1016,7 +1049,7 @@ public class StdlibFunctionCatalogTest {
         testRecognitionNegativeSpellingAntiHollow();
         testRecognitionNegativeLocalShadowing();
         testRecognitionNegativeNonIdentifierObject();
-        testRecognitionNegativeTimeLock();
+        testRecognitionPositiveTimeRow();
         testRecognitionSyntheticFactBattery();
 
         System.out.println("\nPassed: " + passed + ", Failed: " + failed);

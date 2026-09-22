@@ -50,10 +50,12 @@ import java.util.Optional;
  * bindings, non-member callees, any member chain whose object is not
  * such a module symbol, identifier spellings that merely equal a stdlib
  * alias but resolve to a non-STDLIB module (anti-hollow: spelling-based
- * matching is never used), and {@code std/time} members (the catalog has
- * no entry; {@code TIME_NOW_MILLIS} stays reserved). An absent import
- * fact or a null scope resolves nothing — fail closed to "not a stdlib
- * call", never an error.</p>
+ * matching is never used), and any member the catalog does not carry.
+ * {@code std/time} has been a cataloged module since K7, so
+ * {@code time.nowMillis()} is recognized like every other declared
+ * stdlib call through this predicate and the closed catalog row.
+ * An absent import fact or a null scope resolves nothing — fail closed to
+ * "not a stdlib call", never an error.</p>
  *
  * <p><b>Purity.</b> The predicate is a pure function over its three
  * checked-fact inputs: no state, no retry, no timeout, no AST mutation,
