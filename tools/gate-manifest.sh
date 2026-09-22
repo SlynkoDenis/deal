@@ -337,4 +337,16 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # repeated dealMain() drive), the E8004 terminal, and the
   # byte-identical repeated emission.
   'fg|=== Running JVM Production Project Emission Tests (ISSUE-0641) ===|java -ea -cp build deal.test.JvmProductionProjectEmissionTest'
+  # ISSUE-0640 registration: LuaSemanticEmitter.emitProductionProject —
+  # the production project entry (production-project-emission-and-
+  # atomic-cutover P1/P3 and the production LuaJIT emission contract;
+  # luajit-jvm-single-lowering-production-cutover C2): the entry's
+  # signature and inputs (the validated project, the tables, and the
+  # registries only), one chunk with the trace protocol suppressed and
+  # the DEAL_ERROR_CODE terminal, the observable one-main probe, the
+  # module export-surface registry with the entry-surface return, the
+  # real-luajit execution (the clean run and the E8004 terminal), the
+  # executed surfaces (the T1 dependency), and byte-identical repeated
+  # emission.
+  'fg|=== Running Lua Production Project Emission Tests (ISSUE-0640) ===|java -ea -cp build deal.test.LuaProductionProjectEmissionTest'
 )

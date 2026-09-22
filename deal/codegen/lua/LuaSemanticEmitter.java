@@ -122,6 +122,47 @@ public final class LuaSemanticEmitter {
     }
 
     /**
+     * Emits the production LuaJIT project artifact for the validated
+     * executable closure (ISSUE-0640;
+     * {@code production-project-emission-and-atomic-cutover} P1/P3 and the
+     * production LuaJIT emission contract;
+     * {@code luajit-jvm-single-lowering-production-cutover} C2): the
+     * combined project session of {@link #emitProject} with the
+     * trace/terminal mode switched to production — exactly one Lua chunk
+     * carries the whole closure (the prelude once, every module's function
+     * factories, adapter thunks, detached class-default functions, and
+     * per-class JSON plans, then each module's init walk in dependency
+     * order). The conformance trace protocol is suppressed (no event
+     * output and no {@code R|} terminal), an uncaught DEAL failure
+     * publishes the retained {@code DEAL_ERROR_CODE: <code>} line on
+     * stdout and exits 1, a non-DEAL failure rethrows, and success exits
+     * silently. The chunk carries the module export-surface registry keyed
+     * by module identity and returns the entry module's surface (the
+     * retained-caller ABI); only the entry module's {@code ENTRY_INVOKE}
+     * delegation runs (every non-entry {@code ENTRY_INVOKE} and its
+     * delegated {@code CALL} stay skipped), so the entry {@code main}
+     * executes exactly once per chunk execution.
+     *
+     * <p>The entry consumes only the validated project, the per-module
+     * block-membership tables, and the per-module class-factory registries:
+     * no AST, no checker result, no route input, no host declaration
+     * surface, no extern-C generated-module map, and no identity index.</p>
+     *
+     * @param project    the validated executable closure; non-null
+     * @param tables     each module's block-membership table; non-null
+     * @param registries each module's class-factory registry; non-null
+     * @return the production project artifact source text
+     */
+    public static String emitProductionProject(ExecutableLoweredProject project,
+                                               Map<ModuleId, StructuredBodyTable> tables,
+                                               Map<ModuleId, ClassFactoryRegistry> registries) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(tables, "tables must not be null");
+        Objects.requireNonNull(registries, "registries must not be null");
+        return new Session(project, tables, registries, false).emit();
+    }
+
+    /**
      * Emits the production LuaJIT module artifact for the validated unit
      * (ISSUE-0239 E10): the conformance trace protocol is suppressed, a
      * DEAL failure publishes the retained {@code DEAL_ERROR_CODE: <code>}
