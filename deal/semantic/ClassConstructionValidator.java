@@ -267,6 +267,13 @@ public final class ClassConstructionValidator {
                 opsById.put(op.opId(), op);
             }
             layoutContext.putAll(unit.classLayouts());
+            // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
+            // 1): the builtin class is a compiler-owned layout entry in
+            // every unit's resolution context — the same entry the project
+            // lowering seeds — so the Error literal's CLASS_NEW resolves its
+            // classId exactly like a declared class and the payload's layout
+            // is checkable against the one authority.
+            layoutContext.put(ClassId.ERROR, ClassLayout.BUILTIN_ERROR);
             for (Map.Entry<ClassId, SharedFactoryFacts> entry : this.sharedFactories
                     .entrySet()) {
                 layoutContext.put(entry.getKey(), entry.getValue().layout());
@@ -787,21 +794,73 @@ public final class ClassConstructionValidator {
                         + "transfer is E10's (ISSUE-0239) and is never produced in "
                         + "this epic — the lowerer defers with RETAINED_ABI_DEFERRED");
                 }
-                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS -> {
-                    // The declaration-class and builtin-Error owners are
-                    // the project lowering's class registration seeds
-                    // (ISSUE-0631): a registration fact, never a
-                    // construction shape. Their construction execution is
-                    // the construction children's; until it lands every
-                    // consumer rejects them as a fail-closed producer
-                    // defect — no default evaluation and no emission.
+                case HOST_DEFAULTS, FFI_PLAN -> {
+                    // The declaration-class owners are the project
+                    // lowering's class registration seeds (ISSUE-0631): a
+                    // registration fact, never a construction shape. Their
+                    // construction execution is the construction children's;
+                    // until it lands every consumer rejects them as a
+                    // fail-closed producer defect — no default evaluation and
+                    // no emission.
                     return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class and builtin-Error owners are"
-                        + " class registration seeds (ISSUE-0631) and their"
-                        + " construction is not realized in this slice — a"
-                        + " fail-closed producer defect, never executed or"
-                        + " default-evaluated");
+                        + ": the declaration-class owners are class registration"
+                        + " seeds (ISSUE-0631) and their construction is not"
+                        + " realized in this slice — a fail-closed producer defect,"
+                        + " never executed or default-evaluated");
+                }
+                case BUILTIN_DEFAULTS -> {
+                    // The builtin Error construction (ISSUE-0619; K13 items
+                    // 2-4): the owner is admissible for exactly the builtin
+                    // class identity, over exactly the compiler-owned
+                    // layout, with the null factory ref, the empty
+                    // default-op list, and no CLASS_DEFAULT_FIELD boundary
+                    // (the omitted fields take the compiler constant empty
+                    // string at the construction site).
+                    if (!ClassId.ERROR.equals(payload.classId())) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries defaultOwner BUILTIN_DEFAULTS for class "
+                            + payload.classId() + ": the builtin-defaults owner"
+                            + " is admissible only for the builtin Error class "
+                            + ClassId.ERROR.text() + " (a non-builtin class under"
+                            + " BUILTIN_DEFAULTS is a fail-closed producer defect)");
+                    }
+                    if (!payload.layout().equals(ClassLayout.BUILTIN_ERROR)) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " under BUILTIN_DEFAULTS carries a layout other than"
+                            + " the compiler-owned builtin Error layout (exactly the"
+                            + " two string required-present fields code and"
+                            + " message): a foreign layout is a fail-closed"
+                            + " producer defect");
+                    }
+                    if (payload.classFactoryRef() != null) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries classFactoryRef " + payload.classFactoryRef()
+                            + " under BUILTIN_DEFAULTS: the builtin Error"
+                            + " construction carries a null factory ref (the"
+                            + " builtin defaults are compiler constants, never a"
+                            + " factory transfer)");
+                    }
+                    if (!payload.classDefaultOpIds().isEmpty()) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " (BUILTIN_DEFAULTS) lists "
+                            + payload.classDefaultOpIds()
+                            + ": the builtin Error construction carries an empty"
+                            + " child list (the omitted fields take the compiler"
+                            + " constant empty string at the construction site)");
+                    }
+                    for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                        if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD) {
+                            return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW "
+                                + op.opId() + " field-boundary entry for '"
+                                + entry.field() + "' carries kind " + entry.kind()
+                                + ", not CLASS_LITERAL_FIELD: the builtin Error"
+                                + " construction carries exactly one"
+                                + " CLASS_LITERAL_FIELD boundary per provided field"
+                                + " and no CLASS_DEFAULT_FIELD (the omitted fields"
+                                + " take the compiler constant empty string)");
+                        }
+                    }
                 }
                 default -> {
                     // Defensive: an owner outside the closed set can only
@@ -1052,8 +1111,15 @@ public final class ClassConstructionValidator {
             // The CLASS_FIELD_ASSIGNMENT descriptor is the field's
             // declared descriptor from the unit's local layout (the
             // lowerer produces class-field writes of locally declared
-            // classes only).
+            // classes and of the compiler-owned builtin Error class).
             ClassLayout layout = unit.classLayouts().get(payload.classId());
+            if (layout == null && ClassId.ERROR.equals(payload.classId())) {
+                // The builtin Error field surface (ISSUE-0619; K13 items 3
+                // and 4): the receiver resolves through the compiler-owned
+                // builtin layout exactly like a locally declared class's —
+                // the same layout entry every unit's context carries.
+                layout = ClassLayout.BUILTIN_ERROR;
+            }
             ClassLayout.FieldLayout fieldLayout = layout == null
                 ? null : fieldOf(layout, payload.field());
             if (fieldLayout == null) {

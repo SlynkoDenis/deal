@@ -128,10 +128,13 @@ import java.util.Set;
  *       return the first E6005 and no project, no tables, no registries, no
  *       seeds, and no registrations;</li>
  *   <li>the declaration-class fail-closed acceptance: a checker-valid
- *       literal of a host declaration class, of an extern-C declaration
- *       class, and of the builtin {@code Error} resolves to the seed's
- *       owner member and fails closed at the class-construction validator
- *       — never a silent construction and never an artifact.</li>
+ *       literal of a host declaration class and of an extern-C declaration
+ *       class resolves to the seed's owner member and fails closed at the
+ *       class-construction validator — never a silent construction and
+ *       never an artifact — while the builtin {@code Error} literal
+ *       lowers its {@code CLASS_NEW(BUILTIN_DEFAULTS)} through the one
+ *       project entry (ISSUE-0619; {@code semantic-ir-construct-coverage-
+ *       cutover} K13) and passes the composed chain.</li>
  * </ol>
  */
 public class ProjectLoweringTest {
@@ -235,7 +238,7 @@ public class ProjectLoweringTest {
         }
         """;
 
-    /** The builtin-Error construction (the fail-closed acceptance). */
+    /** The builtin-Error construction (the production-outcome acceptance). */
     private static final String ERROR_APP_SOURCE = """
         import * as cfg from "host/cfg"
 
@@ -589,6 +592,10 @@ public class ProjectLoweringTest {
                         + "own classLayouts map (the seeds are never merged into it)");
             }
             if (errorLayout != null) {
+                checkEq(ClassLayout.BUILTIN_ERROR, errorLayout,
+                    "the seeds' builtin Error registration is exactly the "
+                        + "compiler-owned ClassLayout.BUILTIN_ERROR constant (the "
+                        + "layout is identical in every unit's context)");
                 checkEq(List.of("code", "message"),
                     errorLayout.fields().stream().map(ClassLayout.FieldLayout::name)
                         .toList(),
@@ -1278,11 +1285,89 @@ public class ProjectLoweringTest {
             "the host declaration class literal", ENDPOINT.text());
     }
 
-    private static void testBuiltinErrorFailClosed() throws Exception {
-        System.out.println("-- a builtin Error literal resolves to the seed and "
-            + "fails closed at the class-construction validator --");
-        assertFailsClosed(ERROR_APP_SOURCE, Map.of(), Map.of(),
-            "the builtin Error literal", BUILTIN_ERROR.text());
+    private static void testBuiltinErrorConstruction() throws Exception {
+        System.out.println("-- a builtin Error literal constructs through the one "
+            + "project entry: CLASS_NEW(BUILTIN_DEFAULTS) over the compiler-owned "
+            + "layout --");
+        RealProject project = compileProject(ERROR_APP_SOURCE, Map.of(), Map.of());
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(project, invocation());
+            check(!result.hasErrors() && result.project() != null,
+                "the builtin Error literal lowers through the one project entry "
+                    + "with zero diagnostics: " + result.diagnostics());
+            boolean deferred = false;
+            for (CompilerDiagnostic diagnostic : result.diagnostics()) {
+                if (diagnostic.message().contains("RETAINED_ABI_DEFERRED")) {
+                    deferred = true;
+                }
+            }
+            check(!deferred,
+                "checker-valid builtin Error input reports zero "
+                    + "RETAINED_ABI_DEFERRED");
+            if (result.project() == null) {
+                return;
+            }
+            LoweredModuleUnit app = result.project().modules().get(APP);
+            check(app != null, "the app unit is in the closure");
+            if (app == null) {
+                return;
+            }
+            SemanticOp classNew = null;
+            for (SemanticOp op : app.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_NEW) {
+                    classNew = op;
+                }
+            }
+            check(classNew != null, "the unit carries the Error CLASS_NEW");
+            if (classNew == null) {
+                return;
+            }
+            checkEq(ClassId.ERROR, ((KindPayload.ClassNewPayload) classNew.payload())
+                    .classId(), "the CLASS_NEW classId is the builtin @/Error");
+            KindPayload.ClassNewPayload payload =
+                (KindPayload.ClassNewPayload) classNew.payload();
+            checkEq(DefaultOwner.BUILTIN_DEFAULTS, payload.defaultOwner(),
+                "the CLASS_NEW defaultOwner is BUILTIN_DEFAULTS");
+            check(payload.classFactoryRef() == null,
+                "the builtin Error construction carries the null factory ref");
+            check(payload.classDefaultOpIds().isEmpty(),
+                "the builtin Error construction carries empty classDefaultOpIds");
+            checkEq(ClassLayout.BUILTIN_ERROR, payload.layout(),
+                "the payload's layout is the compiler-owned builtin Error layout");
+            checkEq(List.of("code", "message"),
+                payload.providedFields().stream()
+                    .map(KindPayload.ProvidedField::name).toList(),
+                "the provided fields keep literal order (code, message)");
+            checkEq(List.of("code", "message"),
+                payload.fieldBoundaries().stream()
+                    .map(KindPayload.FieldBoundary::field).toList(),
+                "the field boundaries are the declared order (code, message)");
+            check(payload.fieldBoundaries().stream().allMatch(entry ->
+                    entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD),
+                "every field boundary is a CLASS_LITERAL_FIELD (no "
+                    + "CLASS_DEFAULT_FIELD: the builtin defaults are compiler "
+                    + "constants)");
+
+            // The composed per-unit chain re-run: the unified unit passes
+            // every validator with the project's own factory records and the
+            // in-project facts (the class arm included).
+            Optional<CompilerDiagnostic> failure =
+                SemanticLowerer.validateProjectUnit(app, result.tableOf(APP),
+                    new SemanticIrValidator.ComparisonFacts(
+                        project.index().interfaceIndexDigest(),
+                        SemanticProfile.DEAL_V1_2_INT32,
+                        invocation().capabilityRegistryHash()),
+                    deal.semantic.BindingsProductionValidator.PinnedWriteFacts
+                        .empty(),
+                    result.registryOf(APP),
+                    new JsonDefaultChildTable(Map.of()),
+                    project.index().modules().get(APP), Map.of());
+            check(failure.isEmpty(),
+                "the composed chain accepts the builtin Error unit: "
+                    + failure.map(CompilerDiagnostic::message).orElse(""));
+        } finally {
+            deleteRecursively(project.root());
+        }
     }
 
     private static void testExternCDeclarationClassFailClosed() throws Exception {
@@ -1624,7 +1709,7 @@ public class ProjectLoweringTest {
         testImportedInProjectClassResolution();
         testInconsistentFactSeed();
         testDeclarationClassFailClosed();
-        testBuiltinErrorFailClosed();
+        testBuiltinErrorConstruction();
         testExternCDeclarationClassFailClosed();
         testCorruptedUnitSeed();
         testMissingModuleSeed();

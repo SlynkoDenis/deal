@@ -2029,11 +2029,12 @@ public class EvaluationOrderIntegrationTest {
                     + "value, origin = the THROW origin, and a catch-block failure links "
                     + "cause = the original caught failure");
             SemanticOp load = opById(ops,
-                result.table().blockOps().get(payload.catchBlock()).get(0));
+                result.table().blockOps().get(payload.catchBlock()).get(1));
             check(load.kind() == SemanticOpKind.BINDING_LOAD
                     && ((KindPayload.ThrowPayload) throwOp.payload()).errorValue()
                         .equals(load.result()),
-                "the catch re-throw operand is the catch binding's loaded Error value");
+                "the catch re-throw operand is the catch binding's loaded Error value"
+                    + " (the load follows the catch binding's producing ALLOC)");
         }
 
         // (g) DISCARD audits a completed value.

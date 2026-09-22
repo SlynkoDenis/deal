@@ -192,6 +192,38 @@ public record ClassRegistrationSeeds(
     }
 
     /**
+     * The compiler-owned builtin {@code Error} registration: the
+     * {@link ClassLayout#BUILTIN_ERROR} layout under
+     * {@link DefaultOwner#BUILTIN_DEFAULTS}. It is the one entry derived
+     * from the checker's synthesized builtin declaration by
+     * {@link #produce}, and the same entry every session's layout context
+     * carries by default — the builtin layout is identical in every unit's
+     * context.
+     *
+     * @return the builtin {@code Error} registration; non-null
+     */
+    public static ClassRegistration builtinErrorRegistration() {
+        return new ClassRegistration(ClassLayout.BUILTIN_ERROR,
+            DefaultOwner.BUILTIN_DEFAULTS);
+    }
+
+    /**
+     * The builtin-{@code Error}-only seed set: exactly the
+     * {@link #builtinErrorRegistration()} entry under {@link ClassId#ERROR}.
+     * It is the default layout resolution context of every lowering session
+     * (a unit outside the project entry still resolves the compiler-owned
+     * builtin class) and the pattern of every project seed set's first
+     * entry.
+     *
+     * @return the builtin-only seeds; non-null
+     */
+    public static ClassRegistrationSeeds builtinErrorOnly() {
+        Map<ClassId, ClassRegistration> only = new LinkedHashMap<>();
+        only.put(ClassId.ERROR, builtinErrorRegistration());
+        return new ClassRegistrationSeeds(only);
+    }
+
+    /**
      * The single production path of the class registration seeds: exactly
      * one {@link ClassRegistration} per declared class of every
      * declaration module of the surface (declaration order) plus exactly

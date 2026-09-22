@@ -1103,28 +1103,52 @@ public final class JvmSemanticEmitter {
                         ? "new Object[]{args[" + i + "]}" : "args[" + i + "]")
                     .append(";\n");
             }
+            boolean reachable = true;
+            boolean unreachableReported = false;
             for (int i = paramCount; i < bodyOps.size(); i++) {
-                if (ownedChildren.contains(bodyOps.get(i))) {
+                OpId opId = bodyOps.get(i);
+                if (ownedChildren.contains(opId) || skippedOps.contains(opId)) {
                     continue;
                 }
-                emitOp(opsById.get(bodyOps.get(i)), 3);
+                SemanticOp op = opsById.get(opId);
+                if (!reachable) {
+                    // JLS §14.21: the preceding statement of this body cannot
+                    // complete normally, so every later op would be
+                    // unreachable Java — javac rejects it and no consumer ever
+                    // executes it (the oracle's block walk stops on the same
+                    // non-completing path). The skip emits no event, exactly
+                    // like the never-taken path.
+                    if (!unreachableReported) {
+                        out.append("      // unreachable: the preceding statement"
+                            + " cannot complete normally\n");
+                        unreachableReported = true;
+                    }
+                    continue;
+                }
+                emitOp(op, 3);
+                reachable = completesNormally(op);
             }
             // A body whose last emitted op is not a RETURN (the
             // group-core window's member bodies carry no E7 RETURN
             // production) must still terminate the lambda: the
             // unconditional null return is reachable-safe after any
             // try-catch tail and never follows a directly emitted
-            // `return` (tail RETURN emits one).
+            // `return` (tail RETURN emits one). A body whose emitted
+            // statements cannot complete normally needs no terminating
+            // return (javac admits a non-completing lambda body).
             SemanticOp tail = null;
-            for (int i = bodyOps.size() - 1; i >= 0; i--) {
-                OpId candidate = bodyOps.get(i);
-                if (ownedChildren.contains(candidate)) {
-                    continue;
+            if (reachable) {
+                for (int i = bodyOps.size() - 1; i >= 0; i--) {
+                    OpId candidate = bodyOps.get(i);
+                    if (ownedChildren.contains(candidate)
+                            || skippedOps.contains(candidate)) {
+                        continue;
+                    }
+                    tail = opsById.get(candidate);
+                    break;
                 }
-                tail = opsById.get(candidate);
-                break;
             }
-            if (tail == null || tail.kind() != SemanticOpKind.RETURN) {
+            if (reachable && (tail == null || tail.kind() != SemanticOpKind.RETURN)) {
                 out.append("      return null;\n");
             }
             out.append("    }, ")
@@ -1142,6 +1166,8 @@ public final class JvmSemanticEmitter {
             if (ownerTable == null) {
                 ownerTable = table;
             }
+            boolean reachable = true;
+            boolean reported = false;
             for (OpId opId : ownerTable.blockOps().get(block)) {
                 if (ownedChildren.contains(opId)) {
                     continue;
@@ -1149,8 +1175,74 @@ public final class JvmSemanticEmitter {
                 if (skippedOps.contains(opId)) {
                     continue;
                 }
-                emitOp(opsById.get(opId), indent);
+                SemanticOp op = opsById.get(opId);
+                if (!reachable) {
+                    // JLS §14.21: the preceding statement of this block
+                    // cannot complete normally, so every later op of the
+                    // block would be unreachable Java — javac rejects it, no
+                    // consumer ever executes it (the oracle's block walk
+                    // stops on the same non-completing path), and the
+                    // retained emitter applies the same skip rule. The skip
+                    // emits no event, exactly like the never-taken path.
+                    if (!reported) {
+                        out.append(indent(indent)).append("// unreachable: the"
+                            + " preceding statement cannot complete normally\n");
+                        reported = true;
+                    }
+                    continue;
+                }
+                emitOp(op, indent);
+                reachable = completesNormally(op);
             }
+        }
+
+        /**
+         * Whether the emitted Java of one op's statement can complete
+         * normally (the JLS §14.21 mirror the retained emitter also
+         * applies): {@code THROW}/{@code BREAK}/{@code CONTINUE} /
+         * {@code RETURN} transfer unconditionally, a {@code BRANCH} can
+         * only when one of its branches can, and a {@code TRY_CATCH} only
+         * when its try block or its catch block can (its emitted
+         * {@code Transfer} clause always rethrows). Every other op emits a
+         * completing statement — the emitted loops carry their own break
+         * test.
+         */
+        private boolean completesNormally(SemanticOp op) {
+            return switch (op.kind()) {
+                case THROW, BREAK, CONTINUE, RETURN -> false;
+                case TRY_CATCH -> {
+                    KindPayload.TryCatchPayload payload =
+                        (KindPayload.TryCatchPayload) op.payload();
+                    yield blockCompletesNormally(payload.tryBlock())
+                        || blockCompletesNormally(payload.catchBlock());
+                }
+                case BRANCH -> {
+                    KindPayload.BranchPayload payload =
+                        (KindPayload.BranchPayload) op.payload();
+                    // An if without an else clause always has the
+                    // fall-through path (the emitter emits a plain if), so it
+                    // completes; with both branches emitted the statement
+                    // completes iff one of them does.
+                    yield payload.alternateBlock() == null
+                        || blockCompletesNormally(payload.selectedBlock())
+                        || blockCompletesNormally(payload.alternateBlock());
+                }
+                default -> true;
+            };
+        }
+
+        /** Whether the emitted Java of one block's last op can complete normally. */
+        private boolean blockCompletesNormally(BlockId block) {
+            StructuredBodyTable ownerTable = blockTableOf.get(block);
+            if (ownerTable == null) {
+                ownerTable = table;
+            }
+            java.util.List<OpId> ops = ownerTable.blockOps().get(block);
+            if (ops == null || ops.isEmpty()) {
+                return true;
+            }
+            SemanticOp last = opsById.get(ops.get(ops.size() - 1));
+            return last == null || completesNormally(last);
         }
 
         /** The membership table of the unit owning one lowered function. */
@@ -2152,6 +2244,16 @@ public final class JvmSemanticEmitter {
             KindPayload.BindingAllocPayload payload =
                 (KindPayload.BindingAllocPayload) op.payload();
             emitStart(op, indent);
+            if (isCatchBinding(payload.binding())) {
+                // The catch binding's ALLOC sits at the catch block's entry
+                // and its pinned initializing write is the TRY_CATCH arm's
+                // catch-entry assignment, which runs before the catch block's
+                // ops (the catch binding's cell carries the reified Error
+                // value — ISSUE-0619's catch reification). A cell reset here
+                // would clobber the caught value.
+                emitPlainSuccess(op, indent);
+                return;
+            }
             switch (payload.cellKind()) {
                 case DIRECT -> out.append(indent(indent))
                     .append(cell(payload.binding(), payload.generation())).append(" = null;\n");
@@ -2159,6 +2261,25 @@ public final class JvmSemanticEmitter {
                     .append(cell(payload.binding(), payload.generation())).append(" = new Object[1];\n");
             }
             emitPlainSuccess(op, indent);
+        }
+
+        /**
+         * True iff the binding is a {@code TRY_CATCH} op's catch binding in
+         * the closure: its cell is created and initialized by the
+         * {@code TRY_CATCH} arm's catch-entry write, so the catch binding's
+         * {@code BINDING_ALLOC} (the catch block's first op) must not reset
+         * it.
+         */
+        private boolean isCatchBinding(deal.semantic.ir.BindingId binding) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp candidate : moduleUnit.ops()) {
+                    if (candidate.payload() instanceof KindPayload.TryCatchPayload tryCatch
+                            && tryCatch.catchBinding().equals(binding)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private void emitBindingInit(SemanticOp op, int indent) {
@@ -2680,6 +2801,14 @@ public final class JvmSemanticEmitter {
                 (KindPayload.ClassNewPayload) op.payload();
             emitStart(op, indent);
             ClassLayout layout = classLayouts.get(payload.classId());
+            if (layout == null && payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
+                // The compiler-owned builtin Error layout (ISSUE-0619; K13
+                // item 1): the builtin class resolves through the same
+                // compiler constant every consumer resolves — the layout is
+                // a resolution-only entry (the class is excluded from the
+                // generated class carriers and the JSON plans).
+                layout = ClassLayout.BUILTIN_ERROR;
+            }
             if (layout == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId() + " classId "
                     + payload.classId() + " has no layout in the resolution context "
@@ -2693,13 +2822,20 @@ public final class JvmSemanticEmitter {
                 case LOCAL -> emitClassNewLocalDefaults(op, payload, provided, indent);
                 case SHARED_FACTORY -> emitClassNewFactoryTransfer(op, payload, provided,
                     indent);
-                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS ->
+                case HOST_DEFAULTS, FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class and builtin-Error owners are the"
-                        + " project lowering's class registration seeds (ISSUE-0631)"
-                        + " and their construction is not emitted in this slice — a"
-                        + " fail-closed producer defect, never emitted");
+                        + ": the declaration-class owners are the project lowering's"
+                        + " class registration seeds (ISSUE-0631) and their construction"
+                        + " is not emitted in this slice — a fail-closed producer"
+                        + " defect, never emitted");
+                case BUILTIN_DEFAULTS -> {
+                    // The builtin Error construction (K13 items 2-4): the
+                    // builtin defaults are compiler constants, so no default
+                    // child runs — provided fields only, and the omitted
+                    // fields take the constant empty string at the
+                    // construction site.
+                }
                 default -> throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " carries defaultOwner " + payload.defaultOwner()
                     + " outside the emitted owners (producer defect)");
@@ -2732,6 +2868,10 @@ public final class JvmSemanticEmitter {
                         .append(";\n");
                     out.append(indent(indent)).append("}\n");
                 }
+            }
+            if (payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
+                emitClassNewBuiltinDefaults(op, payload, layout, indent);
+                return;
             }
             // K-D4 steps 4-5: instance building plus field validation in
             // declaration order; the tag and the publication come last
@@ -2799,6 +2939,90 @@ public final class JvmSemanticEmitter {
             // K-D4 step 6: the tag is the carrier's class identity (the
             // generated class carries it by construction), then the
             // publication.
+            out.append(indent(indent)).append(slot((ValueId) op.result()))
+                .append(" = ").append(instName).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The builtin {@code Error} construction (ISSUE-0619;
+         * {@code semantic-ir-construct-coverage-cutover} K13 items 4/7):
+         * the provided fields run their pinned {@code CLASS_LITERAL_FIELD}
+         * boundary children in payload order (the descriptor-kind rule, the
+         * field's declared {@code string} descriptor), the omitted fields
+         * take the compiler constant empty string, and the publication is
+         * {@code new JvmRuntime.ErrorValue(&lt;code&gt;, &lt;message&gt;)} —
+         * the canonical carrier {@code THROW}, the catch reification,
+         * {@code bcheck("@/Error")}, and {@code actualOf} already speak.
+         * No default child, no factory transfer, and no extra-key
+         * projection (the checker's E4002 rejects an extra literal field
+         * before lowering).
+         */
+        private void emitClassNewBuiltinDefaults(SemanticOp op,
+                KindPayload.ClassNewPayload payload, ClassLayout layout, int indent) {
+            if (!ClassId.ERROR.equals(payload.classId())
+                    || !layout.equals(ClassLayout.BUILTIN_ERROR)) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner BUILTIN_DEFAULTS for " + payload.classId()
+                    + " over " + layout.classId() + ": the builtin-defaults owner is"
+                    + " admissible only for the compiler-owned builtin Error class"
+                    + " (producer defect)");
+            }
+            String code = null;
+            String message = null;
+            for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                SemanticOp boundary = opsById.get(entry.boundaryOpId());
+                if (boundary == null) {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " field boundary " + entry.boundaryOpId() + " does not "
+                        + "resolve (producer defect)");
+                }
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String inputExpr = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor(), indent);
+                String checked = "__ec_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(checked)
+                    .append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(checked)
+                    .append(" = JvmRuntime.bcheck(")
+                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(javaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", ").append(inputExpr).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                out.append(indent(indent))
+                    .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                        + "__be.code, __be.msg, ")
+                    .append(javaString(originOf(boundary)))
+                    .append(", __be.expected, __be.actual, __be.frames, null);\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+                out.append(indent(indent)).append("  throw __bre;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor(), indent);
+                if ("code".equals(entry.field())) {
+                    code = checked;
+                } else if ("message".equals(entry.field())) {
+                    message = checked;
+                } else {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " names the builtin Error field '" + entry.field() + "':"
+                        + " the builtin class declares exactly code and message —"
+                        + " a fail-closed producer defect, never emitted");
+                }
+            }
+            String instName = "__inst_" + op.opId().id();
+            out.append(indent(indent)).append("JvmRuntime.ErrorValue ")
+                .append(instName).append(" = new JvmRuntime.ErrorValue(")
+                .append(code == null ? javaString("") : "(String) " + code)
+                .append(", ")
+                .append(message == null ? javaString("") : "(String) " + message)
+                .append(");\n");
             out.append(indent(indent)).append(slot((ValueId) op.result()))
                 .append(" = ").append(instName).append(";\n");
             emitResultSuccess(op, slot((ValueId) op.result()),
@@ -3401,36 +3625,69 @@ public final class JvmSemanticEmitter {
             return RuntimeDescriptor.String.INSTANCE;
         }
 
+        /**
+         * The TRY_CATCH arm: the try block runs under a {@code DealError}
+         * catch clause that reifies the caught failure as the builtin Error
+         * carrier in the catch binding's cell, then the catch block runs
+         * under its own {@code DealError} wrapper (a failure of the catch
+         * block re-projects the wrapped carrier with {@code cause} = the
+         * original). The transfer dispatch (a {@code RETURN}/{@code BREAK}/
+         * {@code CONTINUE} inside the try block or the catch block signals
+         * through {@code JvmRuntime.Transfer}) wraps the WHOLE try/catch: an
+         * exception raised inside a catch clause is never handled by the
+         * sibling clauses of its own try statement, so the dispatch cannot
+         * live beside the {@code DealError} clause (ISSUE-0619's catch
+         * rethrow/return surface).
+         */
         private void emitTryCatch(SemanticOp op, int indent) {
-            KindPayload.TryCatchPayload payload = (KindPayload.TryCatchPayload) op.payload();
+            KindPayload.TryCatchPayload payload =
+                (KindPayload.TryCatchPayload) op.payload();
             emitStart(op, indent);
             String cellName = cell(payload.catchBinding(), 0);
-            tryDepth++;
             out.append(indent(indent)).append("try {\n");
-            emitBlockOps(payload.tryBlock(), indent + 1);
-            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __terr) {\n");
-            tryDepth--;
-            out.append(indent(indent)).append("  ").append(cellName)
-                .append(" = new JvmRuntime.ErrorValue(__terr.code, __terr.msg);\n");
             tryDepth++;
-            out.append(indent(indent)).append("  try {\n");
-            emitBlockOps(payload.catchBlock(), indent + 2);
-            out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __cerr) {\n");
-            tryDepth--;
-            out.append(indent(indent)).append("    JvmRuntime.DealError __wrapped = new "
-                + "JvmRuntime.DealError(__cerr.code, __cerr.msg, __cerr.origin, "
-                + "__cerr.expected, __cerr.actual, __cerr.frames, __terr);\n");
-            emitFailureEvent(op.opId(), op.kind().name(), op,
-                "JvmRuntime.errtext(__wrapped)", indent + 2);
-            out.append(indent(indent)).append("    throw __wrapped;\n");
-            out.append(indent(indent)).append("  }\n");
-            out.append(indent(indent)).append("} catch (JvmRuntime.Transfer __tr) {\n");
-            tryDepth--;
+            try {
+                out.append(indent(indent)).append("  try {\n");
+                emitBlockOps(payload.tryBlock(), indent + 2);
+                out.append(indent(indent))
+                    .append("  } catch (JvmRuntime.DealError __terr) {\n");
+                out.append(indent(indent)).append("    ").append(cellName)
+                    .append(" = new JvmRuntime.ErrorValue(__terr.code, __terr.msg);\n");
+                out.append(indent(indent)).append("    try {\n");
+                emitBlockOps(payload.catchBlock(), indent + 3);
+                out.append(indent(indent))
+                    .append("    } catch (JvmRuntime.DealError __cerr) {\n");
+                out.append(indent(indent))
+                    .append("      JvmRuntime.DealError __wrapped = new "
+                        + "JvmRuntime.DealError(__cerr.code, __cerr.msg, "
+                        + "__cerr.origin, __cerr.expected, __cerr.actual, "
+                        + "__cerr.frames, __terr);\n");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__wrapped)", indent + 3);
+                out.append(indent(indent)).append("      throw __wrapped;\n");
+                out.append(indent(indent)).append("    }\n");
+                out.append(indent(indent)).append("  }\n");
+            } finally {
+                tryDepth--;
+            }
+            out.append(indent(indent))
+                .append("} catch (JvmRuntime.Transfer __tr) {\n");
             emitJvmTransferDispatch(op, payload.tryBlock(), indent + 1);
             emitJvmTransferDispatch(op, payload.catchBlock(), indent + 1);
             out.append(indent(indent)).append("  throw __tr;\n");
             out.append(indent(indent)).append("}\n");
-            emitPlainSuccess(op, indent);
+            if (blockCompletesNormally(payload.tryBlock())
+                    || blockCompletesNormally(payload.catchBlock())) {
+                emitPlainSuccess(op, indent);
+            } else {
+                // JLS §14.21: the emitted try/catch cannot complete normally
+                // (both clauses end in a transfer), so its
+                // normal-completion SUCCESS event is unreachable — javac
+                // rejects a plain statement here, and the oracle's
+                // normal-completion path is unreachable on the same traces.
+                out.append(indent(indent)).append("// unreachable: the preceding"
+                    + " statement cannot complete normally\n");
+            }
         }
 
         /** The transfer dispatch: each distinct BREAK/CONTINUE/RETURN of the
@@ -4218,16 +4475,26 @@ public final class JvmSemanticEmitter {
 
         /**
          * ENTRY_INVOKE — delegates exactly one CALL(DIRECT) to main
-         * (its owned child) and exits after the terminal.
+         * (its owned child) and exits after the terminal. A delegated
+         * failure publishes the ENTRY_INVOKE FAILURE terminal (the oracle's
+         * own projection) before the error propagates to the module-init
+         * wrapper's terminal.
          */
         private void emitEntryInvoke(SemanticOp op, int indent) {
             emitStart(op, indent);
+            out.append(indent(indent)).append("try {\n");
             for (SemanticOp candidate : opsById.values()) {
                 if (candidate.kind() == SemanticOpKind.CALL
                         && op.opId().equals(candidate.origin().parentOpId())) {
-                    emitCall(candidate, indent);
+                    emitCall(candidate, indent + 1);
                 }
             }
+            out.append(indent(indent))
+                .append("} catch (JvmRuntime.DealError __entryErr) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__entryErr)", indent + 1);
+            out.append(indent(indent)).append("  throw __entryErr;\n");
+            out.append(indent(indent)).append("}\n");
             emitPlainSuccess(op, indent);
         }
 

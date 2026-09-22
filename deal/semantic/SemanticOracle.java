@@ -523,8 +523,51 @@ public final class SemanticOracle {
         record AdapterValue(RuntimeDescriptor.Func signature) implements Value {
         }
 
-        /** The caught/reified DEAL {@code Error} value {@code {code, message}}. */
-        record ErrorValue(String code, String message) implements Value {
+        /**
+         * The caught/reified DEAL {@code Error} value — the builtin
+         * {@code Error} class's runtime carrier {@code {code, message}}
+         * (ISSUE-0619; {@code semantic-ir-construct-coverage-cutover}
+         * K13). The value is mutable with reference identity: a class-field
+         * write commits in place, so every alias of the instance observes
+         * the written field exactly like the target carriers. Both fields
+         * are always present (the declared layout is two required-present
+         * strings; an omitted field carries the compiler constant empty
+         * string), and the value converts to and from the closed executor
+         * class view {@code Class(@/Error, [Present(code),
+         * Present(message)])} — never to a generic class value.
+         */
+        final class ErrorValue implements Value {
+
+            private String code;
+            private String message;
+
+            ErrorValue(String code, String message) {
+                Objects.requireNonNull(code, "code must not be null");
+                Objects.requireNonNull(message, "message must not be null");
+                this.code = code;
+                this.message = message;
+            }
+
+            /** The error code field. */
+            String code() {
+                return code;
+            }
+
+            /** The error message field. */
+            String message() {
+                return message;
+            }
+
+            /** Commits one checked field write in place (K13's field surface). */
+            void writeField(String field, String value) {
+                Objects.requireNonNull(value, "value must not be null");
+                switch (field) {
+                    case "code" -> this.code = value;
+                    case "message" -> this.message = value;
+                    default -> throw new IllegalStateException("the builtin Error"
+                        + " carrier has no field '" + field + "' (producer defect)");
+                }
+            }
         }
 
         /** The normalize-computed slot (internal; never a language value). */
@@ -776,6 +819,12 @@ public final class SemanticOracle {
                 ownedChildren.addAll(state.ownedChildren);
                 classLayouts.putAll(state.unit.classLayouts());
             }
+            // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
+            // 1): the builtin class resolves in every execution's layout
+            // context through the same entry the project lowering seeds, so
+            // the builtin Error construction and its field ops run through
+            // the closed executor views exactly like a declared class's.
+            classLayouts.put(ClassId.ERROR, ClassLayout.BUILTIN_ERROR);
         }
 
         Execution(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
@@ -825,6 +874,9 @@ public final class SemanticOracle {
                 ownedChildren.addAll(state.ownedChildren);
                 classLayouts.putAll(state.unit.classLayouts());
             }
+            // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
+            // 1): identical in every execution's layout context.
+            classLayouts.put(ClassId.ERROR, ClassLayout.BUILTIN_ERROR);
         }
 
         /** One module's validated execution state (ops, children, ownership). */
@@ -2025,14 +2077,30 @@ public final class SemanticOracle {
                         classLayouts, checkRunner(op, payload, boundaryOps,
                             (ValueId) factoryOp.result()), replayRunner);
                 }
-                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS ->
+                case HOST_DEFAULTS, FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class and builtin-Error owners are the"
-                        + " project lowering's class registration seeds (ISSUE-0631)"
-                        + " and their construction is not executed in this slice — a"
-                        + " fail-closed producer defect, never executed and never"
-                        + " default-evaluated");
+                        + ": the declaration-class owners are the project lowering's"
+                        + " class registration seeds (ISSUE-0631) and their construction"
+                        + " is not executed in this slice — a fail-closed producer"
+                        + " defect, never executed and never default-evaluated");
+                case BUILTIN_DEFAULTS -> {
+                    if (!ClassId.ERROR.equals(payload.classId())) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " carries defaultOwner BUILTIN_DEFAULTS for class "
+                            + payload.classId() + ": the builtin-defaults owner is"
+                            + " admissible only for the builtin Error class"
+                            + " (producer defect)");
+                    }
+                    // The builtin Error construction (ISSUE-0619; K13 items
+                    // 2-4): the provided values complete in payload order
+                    // through the existing check runner, the omitted fields
+                    // take the compiler constant empty string, and the
+                    // published value is the canonical Error value.
+                    outcome = ClassOpsExecutor.executeClassNewBuiltinDefaults(op,
+                        priorValues, boundaryOps, classLayouts,
+                        checkRunner(op, payload, boundaryOps, null));
+                }
                 default -> throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " carries defaultOwner " + payload.defaultOwner()
                     + " outside the executable owners (producer defect)");
@@ -2170,7 +2238,6 @@ public final class SemanticOracle {
             if (value instanceof Value.NullValue || value instanceof Value.MissingValue
                     || value instanceof Value.BoolValue || value instanceof Value.IntValue
                     || value instanceof Value.NumValue || value instanceof Value.StrValue
-                    || value instanceof Value.ErrorValue
                     || value instanceof Value.IntrinsicValue
                     || value instanceof Value.SlotValue) {
                 return convertExecutorView(value);
@@ -2198,6 +2265,13 @@ public final class SemanticOracle {
             if (cached == null) {
                 cached = convertOracleView(value);
                 oracleOriginals.put(value, cached);
+                if (cached instanceof Value.ErrorValue errorValue) {
+                    // The builtin Error carrier's closed class view: the
+                    // conversion caches stay symmetric (the field ops and the
+                    // commit observe the same view), exactly like the class
+                    // instance caches.
+                    executorViews.put(errorValue, value);
+                }
             }
             return cached;
         }
@@ -2244,8 +2318,16 @@ public final class SemanticOracle {
                                         executorValueOf(present.value()))
                                     : ClassOpsExecutor.FieldState.Missing.INSTANCE)
                             .toList());
-                case Value.ErrorValue error -> new ClassOpsExecutor.Value.Class(
-                    ClassId.ERROR, List.of());
+                case Value.ErrorValue error ->
+                    // The builtin Error carrier's closed class view (K13 item
+                    // 5): both declared fields present in declaration order —
+                    // the field ops read and write them through the same
+                    // closed view as any declared class.
+                    new ClassOpsExecutor.Value.Class(ClassId.ERROR, List.of(
+                        new ClassOpsExecutor.FieldState.Present(
+                            ClassOpsExecutor.Value.string(error.code())),
+                        new ClassOpsExecutor.FieldState.Present(
+                            ClassOpsExecutor.Value.string(error.message()))));
                 case Value.IntrinsicValue ignored ->
                     new ClassOpsExecutor.Value.Function(new RuntimeDescriptor.Func(
                         List.of(), RuntimeDescriptor.Number.INSTANCE, false));
@@ -2304,8 +2386,13 @@ public final class SemanticOracle {
                 }
                 case ClassOpsExecutor.Value.Function function ->
                     new Value.FuncValue(null, function.signature(), Map.of());
-                case ClassOpsExecutor.Value.Class classValue ->
-                    new Value.ClassValue(classValue.classId(),
+                case ClassOpsExecutor.Value.Class classValue -> {
+                    if (ClassId.ERROR.equals(classValue.classId())) {
+                        // The builtin Error view converts back to the Error
+                        // value — never to a generic class value (K13 item 5).
+                        yield errorValueOf(classValue);
+                    }
+                    yield new Value.ClassValue(classValue.classId(),
                         classValue.fields().stream()
                             .<Value.ClassFieldState>map(field ->
                                 field instanceof ClassOpsExecutor.FieldState.Present present
@@ -2313,7 +2400,36 @@ public final class SemanticOracle {
                                         oracleValueOf(present.value()))
                                     : Value.ClassFieldState.Missing.INSTANCE)
                             .toList());
+                }
             };
+        }
+
+        /**
+         * The builtin Error value of one closed executor class view (K13
+         * item 5): exactly two present string fields in declaration order;
+         * any other shape is a producer defect.
+         */
+        private Value.ErrorValue errorValueOf(ClassOpsExecutor.Value.Class classValue) {
+            if (classValue.fields().size() != 2
+                    || !(classValue.fields().get(0)
+                        instanceof ClassOpsExecutor.FieldState.Present codeState)
+                    || !(classValue.fields().get(1)
+                        instanceof ClassOpsExecutor.FieldState.Present messageState)
+                    || !(codeState.value() instanceof ClassOpsExecutor.Value.String code)
+                    || !(messageState.value()
+                        instanceof ClassOpsExecutor.Value.String message)) {
+                throw new IllegalStateException("the builtin Error class view "
+                    + "carries " + classValue.fields() + ": the closed view is"
+                    + " exactly two present string fields (code, message) — a"
+                    + " producer defect");
+            }
+            if (!(code.scalar() instanceof UnicodeScalars.Valid codeScalar)
+                    || !(message.scalar()
+                        instanceof UnicodeScalars.Valid messageScalar)) {
+                throw new IllegalStateException("the builtin Error class view"
+                    + " carries an invalid-unicode scalar (producer defect)");
+            }
+            return new Value.ErrorValue(codeScalar.carrier(), messageScalar.carrier());
         }
 
         /** The single child op parented to {@code op}, or null. */
@@ -2426,24 +2542,70 @@ public final class SemanticOracle {
          * receiver instance's named declaration-order field state in
          * place (the fresh updated instance the executor publishes is
          * applied to the same oracle instance every reference observes),
-         * FAILURE rethrows the boundary's failure at the op origin.
+         * FAILURE rethrows the boundary's failure at the op origin. The
+         * builtin Error receiver commits its own carrier's field in place
+         * and rebinds the conversion caches to the updated view (K13's
+         * field surface).
          */
         private void applyFieldCommit(SemanticOp op, ValueId receiverId,
                 ClassOpsExecutor.Outcome<ClassOpsExecutor.Value> outcome) {
             Value receiver = valueOf(receiverId);
-            if (!(receiver instanceof Value.ClassValue classValue)) {
-                throw new IllegalStateException(op.kind() + " " + op.opId()
+            switch (receiver) {
+                case Value.ClassValue classValue -> {
+                    switch (outcome) {
+                        case ClassOpsExecutor.Outcome.Success
+                                <ClassOpsExecutor.Value> success ->
+                            applyInstanceState(classValue, success.value());
+                        case ClassOpsExecutor.Outcome.Failure
+                                <ClassOpsExecutor.Value> failure ->
+                            throw DealFailure.of(failure.failure().failure(),
+                                failure.failure().origin(), List.copyOf(frames));
+                    }
+                }
+                case Value.ErrorValue errorValue -> {
+                    switch (outcome) {
+                        case ClassOpsExecutor.Outcome.Success
+                                <ClassOpsExecutor.Value> success ->
+                            applyErrorState(errorValue, success.value());
+                        case ClassOpsExecutor.Outcome.Failure
+                                <ClassOpsExecutor.Value> failure ->
+                            throw DealFailure.of(failure.failure().failure(),
+                                failure.failure().origin(), List.copyOf(frames));
+                    }
+                }
+                default -> throw new IllegalStateException(op.kind() + " " + op.opId()
                     + " receiver " + receiverId + " resolves to " + atomOf(receiver)
                     + ": the class field commit consumes a resolved class instance "
                     + "(producer defect)");
             }
-            switch (outcome) {
-                case ClassOpsExecutor.Outcome.Success<ClassOpsExecutor.Value> success ->
-                    applyInstanceState(classValue, success.value());
-                case ClassOpsExecutor.Outcome.Failure<ClassOpsExecutor.Value> failure ->
-                    throw DealFailure.of(failure.failure().failure(),
-                        failure.failure().origin(), List.copyOf(frames));
+        }
+
+        /**
+         * The builtin Error field commit (K13's field surface): the
+         * published updated view's named field value is written into the
+         * carrier in place — every alias of the instance observes the
+         * commit — and the conversion caches are rebound to the updated
+         * view, so the next delegation converts the committed state (never
+         * a stale pre-commit view). The field payload's name selects the
+         * carrier field; the receiver boundary already proved the
+         * @/Error identity and the field boundary the declared string
+         * descriptor.
+         */
+        private void applyErrorState(Value.ErrorValue receiver,
+                                     ClassOpsExecutor.Value updated) {
+            if (!(updated instanceof ClassOpsExecutor.Value.Class updatedClass)
+                    || !ClassId.ERROR.equals(updatedClass.classId())
+                    || updatedClass.fields().size() != 2) {
+                throw new IllegalStateException("a builtin Error field commit"
+                    + " produced " + updated + ": the pinned outcome is the updated"
+                    + " @/Error instance with its two declaration-order fields"
+                    + " (producer defect)");
             }
+            Value.ErrorValue state = errorValueOf(updatedClass);
+            receiver.writeField("code", state.code());
+            receiver.writeField("message", state.message());
+            executorViews.put(receiver, updated);
+            oracleOriginals.put(updated, receiver);
         }
 
         /**
@@ -2743,7 +2905,15 @@ public final class SemanticOracle {
                         : BoundaryValueView.of(ActualKind.INVALID_UNICODE);
                 }
                 case Value.TableValue table -> BoundaryValueView.of(ActualKind.TABLE);
-                case Value.ErrorValue error -> BoundaryValueView.ofClass("@builtin/Error");
+                case Value.ErrorValue error ->
+                    // The builtin Error carrier's closed boundary view
+                    // (ISSUE-0619; K13 item 5): the canonical @/Error class
+                    // atom, so the descriptor-atom check of an @/Error
+                    // boundary matches and the class value crosses it
+                    // unchanged. The value's own atom stays the closed
+                    // err:<code>:<message> form and its actual kind stays
+                    // class:@builtin/Error.
+                    BoundaryValueView.ofClass(ClassId.ERROR.text());
                 case Value.FuncValue func -> BoundaryValueView.ofFunction(func.signature());
                 case Value.AdapterValue adapter ->
                     BoundaryValueView.ofFunction(adapter.signature());

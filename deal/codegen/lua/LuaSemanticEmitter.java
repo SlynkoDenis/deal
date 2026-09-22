@@ -1541,15 +1541,24 @@ public final class LuaSemanticEmitter {
                 boundaryChildOfKind(op, BoundaryKind.UNTYPED_CLASS_INPUT);
             emitFieldBoundaryCheck(op, receiverBoundary, slot(payload.classValue()));
             out.append("__instT = __chkB\n");
-            // The presence-aware read: missing → nil before the boundary;
-            // present (present null included) → the stored value.
-            out.append("__rvT = nil\n");
-            out.append("if __instT.__p[").append(luaString(payload.field()))
-                .append("] then\n");
-            out.append("  __rvT = __instT.__f[").append(luaString(payload.field()))
-                .append("]\n");
-            out.append("  if __rvT == __NULL then __rvT = nil end\n");
-            out.append("end\n");
+            if (ClassId.ERROR.equals(payload.classId())) {
+                // The builtin Error carrier (ISSUE-0619; K13 item 6): both
+                // declared fields are always present, and the carrier names
+                // them {@code code} and {@code m} — the read maps the
+                // declared field to the carrier's own field.
+                out.append("__rvT = __instT.")
+                    .append(errorCarrierField(op, payload.field())).append("\n");
+            } else {
+                // The presence-aware read: missing → nil before the boundary;
+                // present (present null included) → the stored value.
+                out.append("__rvT = nil\n");
+                out.append("if __instT.__p[").append(luaString(payload.field()))
+                    .append("] then\n");
+                out.append("  __rvT = __instT.__f[").append(luaString(payload.field()))
+                    .append("]\n");
+                out.append("  if __rvT == __NULL then __rvT = nil end\n");
+                out.append("end\n");
+            }
             SemanticOp fieldBoundary =
                 boundaryChildOfKind(op, BoundaryKind.OPTIONAL_FIELD_READ);
             emitFieldBoundaryCheck(op, fieldBoundary, "__rvT");
@@ -1577,10 +1586,20 @@ public final class LuaSemanticEmitter {
             SemanticOp fieldBoundary =
                 boundaryChildOfKind(op, BoundaryKind.CLASS_FIELD_ASSIGNMENT);
             emitFieldBoundaryCheck(op, fieldBoundary, slot(payload.value()));
-            out.append("__instT.__f[").append(luaString(payload.field()))
-                .append("] = (__chkB == nil) and __NULL or __chkB\n");
-            out.append("__instT.__p[").append(luaString(payload.field()))
-                .append("] = true\n");
+            if (ClassId.ERROR.equals(payload.classId())) {
+                // The builtin Error field write commits into the carrier's
+                // own field (K13 item 6): the field boundary already ran the
+                // declared string descriptor, so the committed value is the
+                // written string.
+                out.append("__instT.")
+                    .append(errorCarrierField(op, payload.field()))
+                    .append(" = __chkB\n");
+            } else {
+                out.append("__instT.__f[").append(luaString(payload.field()))
+                    .append("] = (__chkB == nil) and __NULL or __chkB\n");
+                out.append("__instT.__p[").append(luaString(payload.field()))
+                    .append("] = true\n");
+            }
             emitPlainSuccess(op);
         }
 
@@ -1595,6 +1614,17 @@ public final class LuaSemanticEmitter {
             KindPayload.FieldDeletePayload payload =
                 (KindPayload.FieldDeletePayload) op.payload();
             emitStart(op);
+            if (ClassId.ERROR.equals(payload.classId())) {
+                // A builtin Error field delete never reaches the IR: every
+                // builtin Error field is required-present, and the checker
+                // rejects {@code delete e.f} with E4004 — the arm stays a
+                // fail-closed producer defect (K13 item 8).
+                throw new IllegalStateException("FIELD_DELETE " + op.opId()
+                    + " targets the builtin Error field '" + payload.field()
+                    + "': every builtin Error field is required-present and the"
+                    + " checker rejects the delete with E4004 — a fail-closed"
+                    + " producer defect, never emitted");
+            }
             SemanticOp receiverBoundary =
                 boundaryChildOfKind(op, BoundaryKind.UNTYPED_CLASS_INPUT);
             emitFieldBoundaryCheck(op, receiverBoundary, slot(payload.classValue()));
@@ -1603,6 +1633,24 @@ public final class LuaSemanticEmitter {
             out.append("__chkB.__f[").append(luaString(payload.field()))
                 .append("] = nil\n");
             emitPlainSuccess(op);
+        }
+
+        /**
+         * The builtin Error carrier's field name for one declared field
+         * (K13 item 6): {@code code} maps to the carrier's {@code code}
+         * slot and {@code message} to its {@code m} slot; any other name is
+         * a fail-closed producer defect (the declared field set is exactly
+         * those two).
+         */
+        private static String errorCarrierField(SemanticOp op, String field) {
+            return switch (field) {
+                case "code" -> "code";
+                case "message" -> "m";
+                default -> throw new IllegalStateException(op.kind() + " " + op.opId()
+                    + " names the builtin Error field '" + field + "': the builtin"
+                    + " class declares exactly code and message — a fail-closed"
+                    + " producer defect, never emitted");
+            };
         }
 
         /**
@@ -1822,11 +1870,40 @@ public final class LuaSemanticEmitter {
             KindPayload.BindingAllocPayload payload =
                 (KindPayload.BindingAllocPayload) op.payload();
             emitStart(op);
+            if (isCatchBinding(payload.binding())) {
+                // The catch binding's ALLOC sits at the catch block's entry
+                // and its pinned initializing write is the TRY_CATCH arm's
+                // catch-entry assignment, which runs before the catch block's
+                // ops (the catch binding's cell carries the reified Error
+                // value — ISSUE-0619's catch reification). A cell reset here
+                // would clobber the caught value.
+                emitPlainSuccess(op);
+                return;
+            }
             switch (payload.cellKind()) {
                 case DIRECT -> out.append(cell(payload.binding(), payload.generation())).append(" = nil\n");
                 case SHARED_CELL -> out.append(cell(payload.binding(), payload.generation())).append(" = {}\n");
             }
             emitPlainSuccess(op);
+        }
+
+        /**
+         * True iff the binding is a {@code TRY_CATCH} op's catch binding in
+         * the closure: its cell is created and initialized by the
+         * {@code TRY_CATCH} arm's catch-entry write, so the catch binding's
+         * {@code BINDING_ALLOC} (the catch block's first op) must not reset
+         * it.
+         */
+        private boolean isCatchBinding(BindingId binding) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp candidate : moduleUnit.ops()) {
+                    if (candidate.payload() instanceof KindPayload.TryCatchPayload tryCatch
+                            && tryCatch.catchBinding().equals(binding)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private void emitBindingInit(SemanticOp op) {
@@ -2523,6 +2600,14 @@ public final class LuaSemanticEmitter {
                 (KindPayload.ClassNewPayload) op.payload();
             emitStart(op);
             ClassLayout layout = classLayouts.get(payload.classId());
+            if (layout == null && payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
+                // The compiler-owned builtin Error layout (ISSUE-0619; K13
+                // item 1): the builtin class resolves through the same
+                // compiler constant every consumer resolves — the layout is
+                // a resolution-only entry (the class is excluded from the
+                // generated class carriers and the JSON plans).
+                layout = ClassLayout.BUILTIN_ERROR;
+            }
             if (layout == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId() + " classId "
                     + payload.classId() + " has no layout in the resolution context "
@@ -2535,13 +2620,20 @@ public final class LuaSemanticEmitter {
             switch (payload.defaultOwner()) {
                 case LOCAL -> emitClassNewLocalDefaults(op, payload, provided);
                 case SHARED_FACTORY -> emitClassNewFactoryTransfer(op, payload, provided);
-                case HOST_DEFAULTS, FFI_PLAN, BUILTIN_DEFAULTS ->
+                case HOST_DEFAULTS, FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class and builtin-Error owners are the"
-                        + " project lowering's class registration seeds (ISSUE-0631)"
-                        + " and their construction is not emitted in this slice — a"
-                        + " fail-closed producer defect, never emitted");
+                        + ": the declaration-class owners are the project lowering's"
+                        + " class registration seeds (ISSUE-0631) and their construction"
+                        + " is not emitted in this slice — a fail-closed producer"
+                        + " defect, never emitted");
+                case BUILTIN_DEFAULTS -> {
+                    // The builtin Error construction (K13 items 2-4): the
+                    // builtin defaults are compiler constants, so no default
+                    // child runs — provided fields only, and the omitted
+                    // fields take the constant empty string at the
+                    // construction site.
+                }
                 default -> throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " carries defaultOwner " + payload.defaultOwner()
                     + " outside the emitted owners (producer defect)");
@@ -2561,6 +2653,10 @@ public final class LuaSemanticEmitter {
                         "__errtext(__eT)");
                     out.append("error(__eT, 0)\n");
                 }
+            }
+            if (payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
+                emitClassNewBuiltinDefaults(op, payload, layout);
+                return;
             }
             // K-D4 steps 4-5: instance building plus field validation in
             // declaration order; the tag and the publication come last
@@ -2618,6 +2714,72 @@ public final class LuaSemanticEmitter {
             out.append(slot((ValueId) op.result())).append(" = __instT\n");
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The builtin {@code Error} construction (ISSUE-0619;
+         * {@code semantic-ir-construct-coverage-cutover} K13 items 3/4):
+         * the provided fields run their pinned
+         * {@code CLASS_LITERAL_FIELD} boundary children in payload order
+         * (the descriptor-kind rule, the field's declared {@code string}
+         * descriptor), the omitted fields take the compiler constant empty
+         * string, and the publication is the canonical err carrier
+         * {@code {__d = true, code = &lt;code&gt;, m = &lt;message&gt;}} —
+         * the same carrier {@code THROW}, the async failure path,
+         * {@code __bcheck("@/Error")}, and {@code __actualOf} already
+         * speak. No default child, no factory transfer, and no extra-key
+         * projection (the checker's E4002 rejects an extra literal field
+         * before lowering).
+         */
+        private void emitClassNewBuiltinDefaults(SemanticOp op,
+                KindPayload.ClassNewPayload payload, ClassLayout layout) {
+            if (!ClassId.ERROR.equals(payload.classId())
+                    || !layout.equals(ClassLayout.BUILTIN_ERROR)) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner BUILTIN_DEFAULTS for " + payload.classId()
+                    + " over " + layout.classId() + ": the builtin-defaults owner is"
+                    + " admissible only for the compiler-owned builtin Error class"
+                    + " (producer defect)");
+            }
+            java.util.Map<String, String> values = new java.util.LinkedHashMap<>();
+            for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                SemanticOp boundary = opsById.get(entry.boundaryOpId());
+                if (boundary == null) {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " field boundary " + entry.boundaryOpId() + " does not "
+                        + "resolve (producer defect)");
+                }
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String inputExpr = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                String checked = "__ecT" + boundary.opId().id();
+                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
+                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(luaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", ").append(inputExpr).append(")\n");
+                out.append("if not __okB then\n");
+                out.append("  ").append(checked).append(".o = ")
+                    .append(luaString(originOf(boundary))).append("\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(" + checked + ")");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(" + checked + ")");
+                out.append("  error(").append(checked).append(", 0)\n");
+                out.append("end\n");
+                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                values.put(entry.field(), checked);
+            }
+            String target = slot((ValueId) op.result());
+            String code = values.get("code");
+            String message = values.get("message");
+            out.append("__instT = {__d = true, code = ")
+                .append(code == null ? luaString("") : code)
+                .append(", m = ")
+                .append(message == null ? luaString("") : message).append("}\n");
+            out.append(target).append(" = __instT\n");
+            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
         }
 
         /**
@@ -3028,17 +3190,25 @@ public final class LuaSemanticEmitter {
             out.append("end)\n");
             tryDepth--;
             out.append("if not __okT then\n");
-            emitTransferDispatch(op, payload.tryBlock(), "  ");
+            emitTransferDispatch(op, payload.tryBlock(), "  ", "__resT");
             out.append("  if type(__resT) == \"table\" and __resT.__d then\n");
-            out.append("    ").append(cellName).append(" = {__e = true, code = __resT.code, "
-                + "m = __resT.m}\n");
+            // The caught value is the canonical Error value itself (ISSUE-0619;
+            // K13 item 6): the distinct caught-marker carrier is retired, so
+            // the caught binding crosses an @/Error boundary and reads its
+            // fields exactly like any other builtin Error value.
+            out.append("    ").append(cellName).append(" = __resT\n");
             tryDepth++;
             out.append("    __okT, __terrT = pcall(function()\n");
             emitBlockOps(payload.catchBlock());
             out.append("    end)\n");
             tryDepth--;
             out.append("    if not __okT then\n");
-            emitTransferDispatch(op, payload.catchBlock(), "      ");
+            // The catch block's own pcall result is __terrT (ISSUE-0619: a
+            // RETURN/ BREAK/CONTINUE inside the catch block signals through
+            // that pcall, so its transfer dispatch reads __terrT — reading
+            // the try block's __resT would wrap the transfer signal into a
+            // code-less carrier).
+            emitTransferDispatch(op, payload.catchBlock(), "      ", "__terrT");
             out.append("      __wrappedT = {__d = true, code = __terrT.code, "
                 + "m = __terrT.m, o = __terrT.o, e = __terrT.e, a = __terrT.a, "
                 + "f = __terrT.f, cause = __resT}\n");
@@ -3056,21 +3226,28 @@ public final class LuaSemanticEmitter {
         /**
          * The transfer dispatch after a pcall-wrapped block: the block's
          * BREAK/CONTINUE/RETURN ops (recursively) signalled through the
-         * pcall boundary re-apply their static transfers here.
+         * pcall boundary re-apply their static transfers here. The
+         * {@code errorVar} names the pcall result the dispatch reads —
+         * {@code __resT} for the try block, {@code __terrT} for the catch
+         * block (its own pcall).
          */
-        private void emitTransferDispatch(SemanticOp tryOp, BlockId block, String pad) {
+        private void emitTransferDispatch(SemanticOp tryOp, BlockId block, String pad,
+                                          String errorVar) {
             List<SemanticOp> transfers = new ArrayList<>();
             collectTransfers(block, transfers);
             if (transfers.isEmpty()) {
                 return;
             }
-            out.append(pad).append("if type(__resT) == \"table\" and __resT.__tr then\n");
+            out.append(pad).append("if type(").append(errorVar)
+                .append(") == \"table\" and ").append(errorVar).append(".__tr then\n");
             for (SemanticOp transfer : transfers) {
                 switch (transfer.kind()) {
                     case BREAK -> {
                         KindPayload.BreakPayload breakPayload =
                             (KindPayload.BreakPayload) transfer.payload();
-                        out.append(pad).append("  if __resT.t == \"break\" and __resT.id == ")
+                        out.append(pad).append("  if ").append(errorVar)
+                            .append(".t == \"break\" and ").append(errorVar)
+                            .append(".id == ")
                             .append(breakPayload.loopId().id()).append(" then\n");
                         emitPlainSuccess(tryOp);
                         emitTransferClosures(tryOp, opsById.get(breakPayload.loopId()),
@@ -3083,7 +3260,9 @@ public final class LuaSemanticEmitter {
                         KindPayload.ContinuePayload continuePayload =
                             (KindPayload.ContinuePayload) transfer.payload();
                         out.append(pad)
-                            .append("  if __resT.t == \"continue\" and __resT.id == ")
+                            .append("  if ").append(errorVar)
+                            .append(".t == \"continue\" and ").append(errorVar)
+                            .append(".id == ")
                             .append(continuePayload.loopId().id()).append(" then\n");
                         emitPlainSuccess(tryOp);
                         emitTransferClosures(tryOp, opsById.get(continuePayload.loopId()),
@@ -3094,17 +3273,19 @@ public final class LuaSemanticEmitter {
                     }
                     case RETURN -> {
                         out.append(pad)
-                            .append("  if __resT.t == \"return\" then\n");
+                            .append("  if ").append(errorVar)
+                            .append(".t == \"return\" then\n");
                         emitPlainSuccess(tryOp);
                         emitTransferClosures(tryOp, null, false);
-                        out.append(pad).append("    return __resT.v\n");
+                        out.append(pad).append("    return ").append(errorVar)
+                            .append(".v\n");
                         out.append(pad).append("  end\n");
                     }
                     default -> {
                     }
                 }
             }
-            out.append(pad).append("  error(__resT, 0)\n");
+            out.append(pad).append("  error(").append(errorVar).append(", 0)\n");
             out.append(pad).append("end\n");
         }
 
@@ -3795,16 +3976,25 @@ public final class LuaSemanticEmitter {
 
         /**
          * ENTRY_INVOKE — delegates exactly one CALL(DIRECT) to main
-         * (its owned child) and exits after the terminal.
+         * (its owned child) and exits after the terminal. A delegated
+         * failure publishes the ENTRY_INVOKE FAILURE terminal (the oracle's
+         * own projection) before the error propagates to the module-init
+         * wrapper's terminal.
          */
         private void emitEntryInvoke(SemanticOp op) {
             emitStart(op);
+            out.append("__okE, __resE = pcall(function()\n");
             for (SemanticOp candidate : opsById.values()) {
                 if (candidate.kind() == SemanticOpKind.CALL
                         && op.opId().equals(candidate.origin().parentOpId())) {
                     emitCall(candidate);
                 }
             }
+            out.append("end)\n");
+            out.append("if not __okE then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resE)");
+            out.append("  error(__resE, 0)\n");
+            out.append("end\n");
             emitPlainSuccess(op);
         }
 

@@ -4019,11 +4019,16 @@ public final class SemanticLowerer {
          * in-project factory facts. The seeds are never merged into
          * {@link #classLayouts}: the unit keeps carrying its own declared
          * layouts only (the class-construction validator discriminates a
-         * same-module class by exactly that membership). Empty outside the
-         * project entry.
+         * same-module class by exactly that membership). The default is the
+         * compiler-owned builtin {@code Error} registration alone
+         * (ISSUE-0619, {@code semantic-ir-construct-coverage-cutover} K13
+         * item 1): every session — the project entry's units included —
+         * resolves the builtin class through the same compiler-owned layout
+         * entry; declaration-class seeds exist only inside the project
+         * entry.
          */
         private ClassRegistrationSeeds registrationSeeds =
-            new ClassRegistrationSeeds(Map.of());
+            ClassRegistrationSeeds.builtinErrorOnly();
         /**
          * The declared conversion intrinsics of the compilation
          * (ISSUE-0634): the closed {@link IntrinsicKind} set the project
@@ -6131,11 +6136,17 @@ public final class SemanticLowerer {
                     // owner member (HOST_DEFAULTS for a host declaration
                     // class, FFI_PLAN for an extern-C declaration class,
                     // BUILTIN_DEFAULTS for the builtin Error). The emitted
-                    // CLASS_NEW carries the seed's owner fact; the
-                    // construction of a seeded owner is the construction
-                    // children's, so the composed gate rejects the op
-                    // fail-closed — a registration fact is never silently
-                    // executed as another owner.
+                    // CLASS_NEW carries the seed's owner fact. The builtin
+                    // Error construction is realized by the builtin arm
+                    // (K13): provided fields in literal order, one
+                    // CLASS_LITERAL_FIELD boundary per provided field, no
+                    // default child (the omitted fields take the compiler
+                    // constant empty string at the construction site), the
+                    // null factory ref, and the empty default-op list. The
+                    // declaration-class owners (HOST_DEFAULTS/FFI_PLAN) stay
+                    // fail-closed until their construction children land — a
+                    // registration fact is never silently executed as
+                    // another owner.
                     layout = seed.layout();
                     defaultOwner = seed.owner();
                 }
@@ -9088,6 +9099,18 @@ public final class SemanticLowerer {
             if (classCore) {
                 deal.semantic.ir.ClassLayout layout = classLayouts.get(classId);
                 if (layout == null) {
+                    // The registration seeds (the compiler-owned builtin
+                    // Error included, K13's field surface): a seeded class's
+                    // declared field descriptor comes from the seed layout
+                    // exactly like a locally declared class's; an unseeded
+                    // unresolvable class stays fail closed.
+                    ClassRegistrationSeeds.ClassRegistration seed =
+                        registrationSeeds.registrationFor(classId);
+                    if (seed != null) {
+                        layout = seed.layout();
+                    }
+                }
+                if (layout == null) {
                     throw new ConstructUnlowered("class field write '" + access.field()
                         + "' on " + classId + " without a local layout (the declared field "
                         + "descriptor comes from the unit's classLayouts; an imported "
@@ -11162,6 +11185,64 @@ public final class SemanticLowerer {
                 }
             }
             emitEntryInvokeDelegation();
+            emitNeverReturningBodyBoundaries();
+        }
+
+        /**
+         * The return cells of never-returning bodies (ISSUE-0619;
+         * {@code semantic-ir-construct-coverage-cutover} K13's throw/body
+         * coverage): a body whose walk ended terminated by a
+         * {@code THROW} carries no {@code RETURN}, so neither the source
+         * return arm nor the implicit-trailing-return arm ever emitted the
+         * body's single return boundary — while every statically
+         * materialized invocation of the body (the source {@code CALL},
+         * the {@code ASYNC_START} body task, the {@code EXTERNAL_ENTRY}, the
+         * {@code CALLBACK_INVOKE}, or the entry delegation) pins that boundary id
+         * in its payload and the closed call cell requires it to resolve to
+         * a {@code BOUNDARY} op. The boundary is emitted here once, at the
+         * finalization position (after every invocation op exists),
+         * parented to the invocation op whose shape the body was assigned —
+         * the closed table's invocation cell — with the body's declared
+         * return descriptor and the per-shape boundary kind.
+         *
+         * <p>The cell is never executed: the body's only terminator is the
+         * {@code THROW}, so no value can reach the return position. Its
+         * input identity is therefore the cell's reserved operand —
+         * allocated for the closed payload contract (a {@code BOUNDARY}
+         * always carries an input) and never produced or read, exactly like
+         * the body's return position. The op is a payload-owned child of its
+         * invocation op, so the block walk skips it and no consumer executes
+         * or emits it.</p>
+         */
+        private void emitNeverReturningBodyBoundaries() {
+            List<FunctionContext> pending = new ArrayList<>();
+            for (FunctionContext context : contextsByFunctionId.values()) {
+                if (!context.returnBoundaryEmitted && context.shapeOpId != null) {
+                    pending.add(context);
+                }
+            }
+            java.util.Collections.sort(pending,
+                java.util.Comparator.comparingLong(c -> c.functionId.id()));
+            for (FunctionContext context : pending) {
+                emitNeverReturningBodyBoundary(context);
+            }
+        }
+
+        /** One never-returning body's return cell, parented to its invocation op. */
+        private void emitNeverReturningBodyBoundary(FunctionContext context) {
+            context.returnBoundaryEmitted = true;
+            RuntimeDescriptor returnType = context.signature.returnType();
+            FailurePolicyId policy = descriptorKindPolicy(returnType);
+            BoundaryKind kind = returnBoundaryKind(context);
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            ValueId input = ids.nextValueId(module, nextOrdinal++, 0);
+            SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(programSpan),
+                SourceOriginKind.SYNTHETIC, anchor, context.shapeOpId);
+            emit(buildOp(context.returnBoundaryOpId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(kind, returnType, input,
+                    new BoundaryRealization.RuntimeValidation(
+                        CANONICAL_RUNTIME_VALIDATION_ID)),
+                null, null, policy, origin));
         }
 
         /**
@@ -11791,6 +11872,21 @@ public final class SemanticLowerer {
             catchFrames.add(0, new CatchFrame(statement.catchVar(), catchBinding));
             pushBlock(catchBlock);
             try {
+                // The catch binding's ALLOC sits at the catch block's entry
+                // (generation 0, DIRECT, mutable, no BINDING_INIT — the
+                // catch-entry write is TRY_CATCH's, ISSUE-0234): the catch
+                // body's loads resolve own-region exactly like a FOR_EACH
+                // iteration binding's, and the bindings validator's
+                // INIT_DOMINATES_LOAD finds the pinned catch-entry write
+                // (BindingsProductionValidator's catch-block arm).
+                BindingCoreIncarnation catchIncarnation = new BindingCoreIncarnation(
+                    INITIAL_LOOP_GENERATION, catchBlock, BindingCellKind.DIRECT,
+                    true, BindingProducer.BINDING_ALLOC, false);
+                emitNullOp(SemanticOpKind.BINDING_ALLOC,
+                    new KindPayload.BindingAllocPayload(catchBinding, catchBlock, true,
+                        cellKinds.cellKindOf(catchIncarnation), INITIAL_LOOP_GENERATION),
+                    statement.span(), FailurePolicyId.NO_DEAL_FAILURE,
+                    SourceOriginKind.SYNTHETIC, currentParent());
                 statementWalk.walk(statement.catchBlock().statements(), false);
             } finally {
                 popBlock();

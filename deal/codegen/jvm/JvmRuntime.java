@@ -139,14 +139,64 @@ public final class JvmRuntime {
         }
     }
 
-    /** A DEAL Error value ({code, message}). */
-    public static final class ErrorValue {
-        public final String code;
-        public final String message;
+    /**
+     * A DEAL Error value ({@code code, message}) — the builtin
+     * {@code Error} class's runtime carrier (ISSUE-0619;
+     * {@code semantic-ir-construct-coverage-cutover} K13). The carrier is
+     * a {@link ClassInstance} of the canonical {@code @/Error} identity:
+     * both declared fields are always present, a field write commits in
+     * place (every alias observes it), and {@code hasField}/{@code read}/
+     * {@code write} resolve the declared field names — the same closed
+     * presence surface the generated carriers realize. A field delete never
+     * reaches the runtime (every builtin Error field is required-present
+     * and the checker rejects {@code delete e.f} with E4004) and stays a
+     * fail-closed producer defect.
+     */
+    public static final class ErrorValue implements ClassInstance {
+        public String code;
+        public String message;
 
         public ErrorValue(String code, String message) {
             this.code = code;
             this.message = message;
+        }
+
+        @Override
+        public String classIdText() {
+            return "@/Error";
+        }
+
+        @Override
+        public boolean isPresent(String field) {
+            return "code".equals(field) || "message".equals(field);
+        }
+
+        @Override
+        public Object read(String field) {
+            return switch (field) {
+                case "code" -> code;
+                case "message" -> message;
+                default -> MISSING;
+            };
+        }
+
+        @Override
+        public void write(String field, Object value) {
+            switch (field) {
+                case "code" -> code = (String) value;
+                case "message" -> message = (String) value;
+                default -> throw new IllegalStateException(
+                    "the builtin Error carrier has no field '" + field
+                        + "' (producer defect)");
+            }
+        }
+
+        @Override
+        public void delete(String field) {
+            throw new IllegalStateException("FIELD_DELETE targets the builtin Error"
+                + " field '" + field + "': every builtin Error field is"
+                + " required-present and the checker rejects the delete with E4004"
+                + " — a fail-closed producer defect, never executed");
         }
     }
 

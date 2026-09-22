@@ -56,10 +56,11 @@ import java.util.stream.Stream;
  *   <li>the fail-closed families: a HOST-kind import
  *       ({@code HOST_MODULE_IMPORT}), a cross-module async call
  *       ({@code EXTERNAL_ASYNC_CALL}), a cross-module sync call, bytes,
- *       builtin {@code Error} construction, {@code time.nowMillis}, and
+ *       {@code time.nowMillis}, and
  *       function-typed materializations each fail with their named E6005
  *       and publish nothing, while a {@code STDLIB}/{@code COMPILED}-only
- *       closure and a same-module async call emit and execute;</li>
+ *       closure, the builtin Error construction (ISSUE-0619), and a
+ *       same-module async call emit and execute;</li>
  *   <li>the C9 source-map disposition: an explicit {@code --source-map}
  *       LuaJIT and JVM production compile succeeds, publishes the project
  *       artifact, writes no sidecar, and prints the pinned warning exactly
@@ -171,7 +172,7 @@ public class ProductionDispatchTest {
         }
         """;
 
-    /** The builtin-Error-construction fixture (a later slice's construct). */
+    /** The builtin-Error-construction fixture (ISSUE-0619's covered slice). */
     private static final String ERROR_SOURCE = """
         export function main(): null {
           let e: Error = { code: "E1", message: "m" }
@@ -919,16 +920,17 @@ public class ProductionDispatchTest {
             deleteRecursively(same);
         }
 
-        // (d) The later-slice constructs each fail with their named E6005.
+        // (d) The later-slice constructs each fail with their named E6005;
+        // the builtin Error construction is covered by ISSUE-0619 and
+        // executes its production artifact on both targets.
         checkLaterSliceConstruct("bytes", Map.of("src/main.deal", BYTES_SOURCE),
             "CONSTRUCT_UNLOWERED");
-        checkLaterSliceConstruct("builtin Error construction",
-            Map.of("src/main.deal", ERROR_SOURCE), "CONSTRUCTION_COHERENCE");
         checkLaterSliceConstruct("time.nowMillis",
             Map.of("src/main.deal", TIME_SOURCE), "CONSTRUCT_UNLOWERED");
         checkLaterSliceConstruct("function-typed materialization",
             Map.of("src/main.deal", FUNCTION_VALUE_SOURCE),
             "CONSTRUCT_UNLOWERED");
+        checkBuiltinErrorConstruction();
 
         // (e) The extern-C declaration import on LuaJIT fails with
         // HOST_MODULE_IMPORT (the FFI child owns the realization).
@@ -1005,6 +1007,75 @@ public class ProductionDispatchTest {
                     + compile.stderr());
             check(!Files.exists(project.resolve("out")),
                 name + ": the failure stages no artifact");
+        } finally {
+            deleteRecursively(project);
+        }
+    }
+
+    /**
+     * The builtin Error construction through the release-owned production
+     * invocation (ISSUE-0619's retargeted pin; the fixture the ISSUE-0643
+     * cutover battery pinned fail-closed): the closure emits exactly one
+     * project artifact per target, the emitted carriers are the canonical
+     * err values ({@code {__d = true, ...}} on LuaJIT,
+     * {@code JvmRuntime.ErrorValue} on the JVM), and both artifacts execute
+     * under their real toolchains with the empty success output.
+     */
+    private static void checkBuiltinErrorConstruction() throws Exception {
+        Path project = Files.createTempDirectory("production-dispatch-error-");
+        try {
+            write(project, "deal.json", DEAL_JSON_LUA);
+            write(project, "src/main.deal", ERROR_SOURCE);
+            ProjectOutcome luaCompile = productionCompile(project, "src/main.deal",
+                "out");
+            check(luaCompile.exitCode() == 0,
+                "the builtin Error closure emits one project artifact: "
+                    + luaCompile.stderr());
+            if (luaCompile.exitCode() == 0) {
+                String lua = Files.readString(project.resolve("out/main.lua"));
+                check(lua.contains("__instT = {__d = true, code = ")
+                        && lua.contains(", m = ")
+                        && lua.contains("\"E1\"")
+                        && lua.contains("\"m\""),
+                    "the LuaJIT artifact carries the canonical err carrier built "
+                        + "from the provided fields: " + lua);
+                ProcessOutcome run = runProcess(project.resolve("out"),
+                    "luajit", "main.lua");
+                check(run.exitCode() == 0 && run.output().isEmpty(),
+                    "the LuaJIT builtin Error artifact runs clean: exit="
+                        + run.exitCode() + " output=" + run.output());
+            }
+
+            Path jvmOut = project.resolve("out-jvm");
+            ProjectOutcome jvmCompile = runProductionCli("compile",
+                project.resolve("src/main.deal").toAbsolutePath().toString(),
+                "--backend", "jvm", "--output",
+                jvmOut.toAbsolutePath().toString());
+            check(jvmCompile.exitCode() == 0,
+                "the builtin Error JVM closure emits one project artifact: "
+                    + jvmCompile.stderr());
+            if (jvmCompile.exitCode() != 0) {
+                return;
+            }
+            String java = Files.readString(jvmOut.resolve("Main.java"));
+            check(java.contains("new JvmRuntime.ErrorValue("),
+                "the JVM artifact publishes the canonical ErrorValue carrier: "
+                    + java);
+            String buildCp = Path.of("build").toAbsolutePath().normalize()
+                .toString();
+            ProcessOutcome javac = runProcess(project, "javac", "--release", "25",
+                "-proc:none", "-cp", buildCp, "-d", jvmOut.toString(),
+                jvmOut.resolve("Main.java").toString());
+            check(javac.exitCode() == 0,
+                "the JVM builtin Error artifact compiles: " + javac.output());
+            if (javac.exitCode() != 0) {
+                return;
+            }
+            ProcessOutcome javaRun = runProcess(jvmOut, "java", "-cp",
+                buildCp + File.pathSeparator + jvmOut, "Main");
+            check(javaRun.exitCode() == 0 && javaRun.output().isEmpty(),
+                "the JVM builtin Error artifact runs clean: exit="
+                    + javaRun.exitCode() + " output=" + javaRun.output());
         } finally {
             deleteRecursively(project);
         }

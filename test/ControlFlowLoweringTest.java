@@ -1041,12 +1041,25 @@ public class ControlFlowLoweringTest {
             "the payload carries the producer-allocated catchBinding");
 
         List<OpId> catchOps = table.blockOps().get(payload.catchBlock());
-        check(catchOps.size() == 2,
-            "catchBlock carries exactly the BINDING_LOAD and the THROW; got " + catchOps.size());
-        SemanticOp load = opById(ops, catchOps.get(0));
-        SemanticOp throwOp = opById(ops, catchOps.get(1));
+        check(catchOps.size() == 3,
+            "catchBlock carries the catch binding's BINDING_ALLOC, the BINDING_LOAD,"
+                + " and the THROW; got " + catchOps.size());
+        SemanticOp alloc = opById(ops, catchOps.get(0));
+        SemanticOp load = opById(ops, catchOps.get(1));
+        SemanticOp throwOp = opById(ops, catchOps.get(2));
+        check(alloc.kind() == SemanticOpKind.BINDING_ALLOC,
+            "the first catch-block op is the catch binding's producing ALLOC "
+                + "(the catch-entry write's incarnation)");
+        KindPayload.BindingAllocPayload allocPayload =
+            (KindPayload.BindingAllocPayload) alloc.payload();
+        check(allocPayload.binding().equals(payload.catchBinding())
+                && allocPayload.generation() == SemanticLowerer.INITIAL_LOOP_GENERATION
+                && allocPayload.cellKind() == deal.semantic.ir.BindingCellKind.DIRECT
+                && allocPayload.scope().equals(payload.catchBlock()),
+            "the catch ALLOC is the catch binding's {scope=catch block, generation 0, "
+                + "DIRECT} incarnation");
         check(load.kind() == SemanticOpKind.BINDING_LOAD,
-            "the first catch-block op is the BINDING_LOAD of the catch variable");
+            "the second catch-block op is the BINDING_LOAD of the catch variable");
         KindPayload.BindingLoadPayload loadPayload = (KindPayload.BindingLoadPayload) load.payload();
         check(loadPayload.binding().equals(payload.catchBinding()),
             "the load carries the TRY_CATCH payload's catch binding");
@@ -1057,14 +1070,14 @@ public class ControlFlowLoweringTest {
             "the load resultType is D(Error) (the catch variable's checked type); got "
                 + load.resultType());
         check(throwOp.kind() == SemanticOpKind.THROW,
-            "the second catch-block op is the THROW");
+            "the third catch-block op is the THROW");
         check(throwOp.failurePolicy() == FailurePolicyId.THROW_TRANSFER,
             "the THROW carries THROW_TRANSFER (code/message preserved, origin = the THROW "
                 + "origin)");
         checkNoResult("THROW", throwOp);
         check(load.result().equals(((KindPayload.ThrowPayload) throwOp.payload()).errorValue()),
             "the THROW operand is the load's produced Error value (completes before START)");
-        for (SemanticOp op : List.of(load, throwOp)) {
+        for (SemanticOp op : List.of(alloc, load, throwOp)) {
             check(tryCatch.opId().equals(op.origin().parentOpId()),
                 op.kind() + " records the TRY_CATCH as parentOpId");
         }

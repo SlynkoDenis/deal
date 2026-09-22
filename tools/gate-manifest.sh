@@ -409,4 +409,19 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # backend's legacy arm, and the four std/json and four int-overflow
   # corpus sidecars).
   'fg|=== Running Canonical Failure-Text Parity Tests (ISSUE-0618) ===|java -ea -cp build deal.test.CanonicalFailureTextParityTest'
+  # ISSUE-0619 registration: the builtin Error construction, its field
+  # surface, and the canonical err carriers
+  # (semantic-ir-construct-coverage-cutover K13 and the K13 contract;
+  # luajit-jvm-single-lowering-production-cutover C1's registration list):
+  # the vertical drive (an Error literal with provided fields, a defaulted
+  # Error literal, a field read, a field write observed through an alias,
+  # and a catch-and-rethrow through the one project lowering, the composed
+  # chain, the semantic oracle, and both shared artifacts under the real
+  # luajit and javac/java toolchains), the CLASS_NEW(BUILTIN_DEFAULTS)
+  # facts over the compiler-owned builtin layout, the @/Error boundary
+  # crossings, the canonical carriers of both artifacts, the release-owned
+  # production artifacts' DEAL_ERROR_CODE terminal, the named drivable
+  # Error corpus fixtures, and the negative seeds (a non-builtin class
+  # under BUILTIN_DEFAULTS, the has/delete checker rejections).
+  'fg|=== Running Builtin Error Construction Tests (ISSUE-0619) ===|java -ea -cp build deal.test.BuiltinErrorConstructionTest'
 )

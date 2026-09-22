@@ -616,12 +616,17 @@ public class SemanticProductionGateTest {
             try {
                 write(project, "deal.json", DEAL_JSON_LUA);
                 write(project, "src/main.deal", fixture.getValue());
-                // ISSUE-0643 P10 item 2: the release-owned production
-                // invocation's outcome for this fixture — the named
-                // fail-closed rule for a later-slice construct, or the one
-                // project artifact for the stored-closure shapes the
-                // production lowering covers.
-                if (fixture.getKey().startsWith("stored-closure")) {
+                // ISSUE-0643 P10 item 2, retargeted by ISSUE-0619: the
+                // release-owned production invocation's outcome for this
+                // fixture — the named fail-closed rule for a later-slice
+                // construct, or the one project artifact for the shapes the
+                // production lowering covers (the stored/embedded function
+                // expressions and the builtin Error construction of the
+                // closure-capture fixture, whose only remaining blocker was
+                // the builtin Error construct).
+                boolean productionCovered = fixture.getKey().startsWith("stored-closure")
+                    || fixture.getKey().equals("closure-capture");
+                if (productionCovered) {
                     CompilationOrchestrator production =
                         compileProject(project, "src/main.deal", "out");
                     check(production.semanticEmissionCount() == 1
@@ -642,11 +647,8 @@ public class SemanticProductionGateTest {
                             + " output="
                             + productionRun.output().replace("\n", "\\n"));
                 } else {
-                    String expectedRule = fixture.getKey()
-                        .equals("closure-capture")
-                            ? "CONSTRUCTION_COHERENCE" : "CONSTRUCT_UNLOWERED";
                     checkProductionFailClosed(project, "src/main.deal", "out",
-                        expectedRule, fixture.getKey());
+                        "CONSTRUCT_UNLOWERED", fixture.getKey());
                 }
                 // The retained plan-time route stays the harness subject.
                 CompilationOrchestrator orchestrator =

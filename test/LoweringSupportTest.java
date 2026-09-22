@@ -269,6 +269,63 @@ public class LoweringSupportTest {
         }
     }
 
+    /**
+     * The release-owned production acceptance of one covered fixture
+     * (ISSUE-0619): the fixture compiles through the production invocation
+     * to exactly one project artifact, the artifact exists, and the
+     * artifact executes under its real toolchain with the pinned terminal —
+     * the empty success output, or the canonical
+     * {@code DEAL_ERROR_CODE: <code>} terminal of the declared failure.
+     */
+    private static void productionAccept(Path tmp, Map<String, String> sources,
+                                         String entryName, String what,
+                                         String expectedFailureCode)
+            throws Exception {
+        Path src = tmp.resolve("prod-src");
+        Files.createDirectories(src);
+        for (Map.Entry<String, String> source : sources.entrySet()) {
+            Files.writeString(src.resolve(source.getKey()), source.getValue());
+        }
+        Path output = tmp.resolve("prod-build");
+        CompilationOrchestrator orchestrator = new CompilationOrchestrator(
+            src.resolve(entryName).toAbsolutePath(), output, false, false,
+            false, false, Backend.LUAJIT, null,
+            List.of(src.toAbsolutePath()),
+            Path.of("std").toAbsolutePath().normalize(), null,
+            productionInvocation());
+        boolean ok = orchestrator.compile();
+        check(ok, what + ": the release-owned production invocation accepts the "
+            + "fixture: " + orchestrator.diagnostics());
+        if (!ok) {
+            return;
+        }
+        check(orchestrator.semanticEmissionCount() == 1
+                && orchestrator.retainedEmissionCount() == 0,
+            what + ": the production arm emits exactly one project artifact: "
+                + "semantic=" + orchestrator.semanticEmissionCount()
+                + " retained=" + orchestrator.retainedEmissionCount());
+        check(Files.exists(output.resolve("main.lua")),
+            what + ": the production artifact is staged");
+        ProcessBuilder builder = new ProcessBuilder("luajit", "main.lua");
+        builder.directory(output.toFile());
+        builder.redirectErrorStream(true);
+        Process process = builder.start();
+        String runOutput = new String(process.getInputStream().readAllBytes(),
+            java.nio.charset.StandardCharsets.UTF_8);
+        int exitCode = process.waitFor();
+        if (expectedFailureCode == null) {
+            check(exitCode == 0 && runOutput.isEmpty(),
+                what + ": the production artifact runs under luajit: exit="
+                    + exitCode + " output=" + runOutput.replace("\n", "\\n"));
+        } else {
+            check(exitCode == 1
+                    && runOutput.contains("DEAL_ERROR_CODE: " + expectedFailureCode),
+                what + ": the production artifact publishes the pinned failure "
+                    + "terminal DEAL_ERROR_CODE: " + expectedFailureCode + ": exit="
+                    + exitCode + " output=" + runOutput.replace("\n", "\\n"));
+        }
+    }
+
     private static RequirementManifestResult compileAndCompute(Path tmp,
                                                                Map<String, String> sources,
                                                                String entryName)
@@ -1561,14 +1618,22 @@ public class LoweringSupportTest {
                       throw { code: "TEST_FAIL", message: "boom" }
                     }
                     """), "main.deal");
-            if (result == null) {
-                return;
+            if (result != null) {
+                check(manifestOf(result, "main").capabilities().contains(
+                        SemanticCapability.CLASSES),
+                    "the builtin Error literal of the throw claims CLASSES at the "
+                        + "literal position (no declaring declaration exists): "
+                        + manifestOf(result, "main").capabilities());
             }
-            check(manifestOf(result, "main").capabilities().contains(
-                    SemanticCapability.CLASSES),
-                "the builtin Error literal of the throw claims CLASSES at the "
-                    + "literal position (no declaring declaration exists): "
-                    + manifestOf(result, "main").capabilities());
+            // ISSUE-0619: the fixture's only remaining blocker was the builtin
+            // Error construct, so the same source compiles through the
+            // release-owned production pipeline and its artifact executes.
+            productionAccept(tmp.resolve("production"), Map.of("main.deal", """
+                export function main(): null {
+                  throw { code: "TEST_FAIL", message: "boom" }
+                }
+                """), "main.deal",
+                "the builtin-Error-only E10 arm", "TEST_FAIL");
         } finally {
             deleteRecursively(tmp);
         }

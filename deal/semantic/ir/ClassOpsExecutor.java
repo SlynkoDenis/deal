@@ -952,6 +952,242 @@ public final class ClassOpsExecutor {
             new Value.Class(payload.classId(), List.copyOf(states)));
     }
 
+    // =========================================================================
+    // CLASS_NEW (BUILTIN_DEFAULTS, the builtin Error construction)
+    // =========================================================================
+
+    /**
+     * Executes one validated {@code CLASS_NEW} op carrying
+     * {@code defaultOwner: BUILTIN_DEFAULTS} (ISSUE-0619;
+     * {@code semantic-ir-construct-coverage-cutover} K13 items 2-4): the
+     * builtin {@code Error} construction. The shape is the compiler-owned
+     * one:
+     *
+     * <ol>
+     *   <li>the op is a {@code CLASS_NEW} carrying
+     *       {@code CLASS_CONSTRUCTION} for exactly {@link ClassId#ERROR}
+     *       over exactly {@link ClassLayout#BUILTIN_ERROR}, with a null
+     *       {@code classFactoryRef} and an empty
+     *       {@code classDefaultOpIds} (there is no factory and no default
+     *       block — the omitted fields take the compiler constant empty
+     *       string at the construction site);</li>
+     *   <li>the provided values resolve in literal order (K-D4 step 1); an
+     *       undeclared provided name is a producer defect (the checker's
+     *       E4002 rejects it before lowering);</li>
+     *   <li>the field boundaries run in payload order through the
+     *       {@link BoundaryCheckRunner} seam (K-D4 step 5) — exactly one
+     *       {@code CLASS_LITERAL_FIELD} child per provided field with the
+     *       field's declared descriptor and the provided value as its
+     *       pinned input; the first failing child fails the op and no
+     *       instance is published;</li>
+     *   <li>the instance carries the two declared fields in declaration
+     *       order, both present: the boundary-published provided value or
+     *       the compiler constant empty string.</li>
+     * </ol>
+     *
+     * <p>No default child runs: the builtin defaults are compiler
+     * constants, never an evaluated default block or a factory transfer;
+     * and no extra-key projection runs (the closed declared field set and
+     * the checker's E4002 make an unknown provided name unreachable).</p>
+     *
+     * @param op          the validated {@code CLASS_NEW} op carrying
+     *                    {@code CLASS_CONSTRUCTION} with
+     *                    {@code defaultOwner: BUILTIN_DEFAULTS}; non-null
+     * @param priorValues the resolved provided-field prior-step values;
+     *                    non-null, no null entries
+     * @param boundaryOps the unit's boundary ops by {@link OpId}; every
+     *                    {@code fieldBoundaries} id must resolve to a
+     *                    {@code BOUNDARY} op parented to this op; non-null
+     * @param layouts     the layout-resolution context
+     *                    {@code ClassId → ClassLayout}; the builtin class
+     *                    must resolve to exactly
+     *                    {@link ClassLayout#BUILTIN_ERROR}; non-null
+     * @param checkRunner the boundary-check delegate; non-null
+     * @return {@code Success} with the builtin Error instance (both fields
+     *         present in declaration order) after every provided field
+     *         boundary passed, or {@code Failure} with the first failing
+     *         boundary's failure
+     * @throws Defect               on a shape outside the pinned contract —
+     *                              a wrong op kind/policy/owner, a
+     *                              non-builtin class, a foreign layout, a
+     *                              non-null factory ref, a non-empty default
+     *                              child list, an unresolvable provided
+     *                              value, an undeclared provided name, a
+     *                              boundary child or entry outside the pinned
+     *                              shape, or an input-wiring mismatch
+     * @throws NullPointerException if any argument is null
+     */
+    public static Outcome<Value> executeClassNewBuiltinDefaults(
+            SemanticOp op,
+            Map<ValueId, Value> priorValues,
+            Map<OpId, SemanticOp> boundaryOps,
+            Map<ClassId, ClassLayout> layouts,
+            BoundaryCheckRunner checkRunner) {
+        requireOp(op, SemanticOpKind.CLASS_NEW, FailurePolicyId.CLASS_CONSTRUCTION);
+        Objects.requireNonNull(priorValues, "priorValues must not be null");
+        Objects.requireNonNull(boundaryOps, "boundaryOps must not be null");
+        Objects.requireNonNull(layouts, "layouts must not be null");
+        Objects.requireNonNull(checkRunner, "checkRunner must not be null");
+        KindPayload.ClassNewPayload payload = (KindPayload.ClassNewPayload) op.payload();
+
+        // This child's surface: BUILTIN_DEFAULTS execution only. The
+        // declaration-class owners (HOST_DEFAULTS/FFI_PLAN) stay the
+        // construction children's; a foreign owner reaching this surface is
+        // a producer defect, never silently executed.
+        if (payload.defaultOwner() != DefaultOwner.BUILTIN_DEFAULTS) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries defaultOwner "
+                + payload.defaultOwner() + ": this executor surface is the builtin"
+                + " Error construction (BUILTIN_DEFAULTS) — LOCAL is"
+                + " executeClassNewLocal's, SHARED_FACTORY transfer is"
+                + " executeClassNewSharedFactory's, RETAINED_ABI transfer is E10's, and"
+                + " the declaration-class owners (HOST_DEFAULTS/FFI_PLAN) have no"
+                + " execution surface in this slice; a foreign owner reaching"
+                + " executeClassNewBuiltinDefaults is a producer defect, never"
+                + " executed");
+        }
+        if (!ClassId.ERROR.equals(payload.classId())) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries defaultOwner"
+                + " BUILTIN_DEFAULTS for class " + payload.classId() + ": the"
+                + " builtin-defaults owner is admissible only for the builtin Error"
+                + " class " + ClassId.ERROR.text() + " — a non-builtin class under"
+                + " BUILTIN_DEFAULTS is a producer defect, never executed");
+        }
+        if (payload.classFactoryRef() != null) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries a non-null"
+                + " classFactoryRef " + payload.classFactoryRef() + " under"
+                + " BUILTIN_DEFAULTS: the builtin Error construction carries a null"
+                + " factory ref (the builtin defaults are compiler constants, never a"
+                + " factory transfer) — a producer defect, never executed");
+        }
+        if (!payload.classDefaultOpIds().isEmpty()) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries "
+                + payload.classDefaultOpIds() + " under BUILTIN_DEFAULTS: the builtin"
+                + " Error construction carries an empty child list (the omitted fields"
+                + " take the compiler constant empty string at the construction site)"
+                + " — a producer defect, never executed");
+        }
+
+        // Layout resolution (K-D11): the builtin class resolves through the
+        // compiler-owned layout entry, and the payload is never interpreted
+        // against a foreign layout.
+        ClassLayout layout = layouts.get(payload.classId());
+        if (layout == null || !layout.equals(ClassLayout.BUILTIN_ERROR)) {
+            throw new Defect("CLASS_NEW " + op.opId() + " classId "
+                + payload.classId() + " does not resolve to the compiler-owned"
+                + " builtin Error layout in the layout-resolution context: the"
+                + " builtin class is a compiler constant layout — an unresolvable or"
+                + " foreign entry is a producer defect, never executed");
+        }
+        if (!layout.equals(payload.layout())) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries a layout that"
+                + " differs from the compiler-owned builtin Error layout: the"
+                + " payload's layout must be exactly the resolved layout — a mismatch"
+                + " is a producer defect, never executed");
+        }
+
+        // Provided values resolve in literal order (K-D4 step 1); an
+        // undeclared provided name is unreachable from the checker (E4002)
+        // and stays fail closed.
+        LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
+        LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
+        for (KindPayload.ProvidedField field : payload.providedFields()) {
+            Value value = resolve(priorValues, field.valueOpId());
+            if (value instanceof Value.Missing) {
+                throw new Defect("CLASS_NEW " + op.opId() + " provided field '"
+                    + field.name() + "' (" + field.valueOpId() + ") resolves to the"
+                    + " internal Missing view: a provided field always carries a"
+                    + " present value (language null is the explicit Null variant) — a"
+                    + " wrong-kind value is a producer defect, never executed");
+            }
+            if (fieldOf(layout, field.name()) == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " provides field '"
+                    + field.name() + "' which is not a declared field of "
+                    + payload.classId() + ": the checker's E4002 rejects an extra"
+                    + " literal field before lowering — a producer defect, never"
+                    + " executed");
+            }
+            providedValues.put(field.name(), value);
+            providedValueIds.put(field.name(), field.valueOpId());
+        }
+
+        // The pinned field-boundary coverage (K-D4 step 5 shape): exactly
+        // one entry per provided field (CLASS_LITERAL_FIELD) in declaration
+        // order — an omitted field gets no boundary (it takes the compiler
+        // constant empty string).
+        List<KindPayload.FieldBoundary> boundaries = payload.fieldBoundaries();
+        if (boundaries.size() != providedValues.size()) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries "
+                + boundaries.size() + " field-boundary entries for "
+                + providedValues.size() + " provided fields: the pinned builtin"
+                + " Error shape carries exactly one CLASS_LITERAL_FIELD boundary per"
+                + " provided field — a child-count mismatch is a producer defect,"
+                + " never executed");
+        }
+        LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
+        for (KindPayload.FieldBoundary entry : boundaries) {
+            Value provided = providedValues.get(entry.field());
+            ValueId providedId = providedValueIds.get(entry.field());
+            if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD || provided == null
+                    || providedId == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " carries boundary entry"
+                    + " for field '" + entry.field() + "' of kind " + entry.kind()
+                    + ": the pinned builtin Error shape carries exactly one"
+                    + " CLASS_LITERAL_FIELD boundary per provided field — a"
+                    + " shape deviation is a producer defect, never executed");
+            }
+            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
+            if (fieldLayout == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry"
+                    + " names field '" + entry.field() + "' which is not a declared"
+                    + " field of " + payload.classId() + " — a producer defect, never"
+                    + " executed");
+            }
+            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
+                entry.kind());
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) child.payload();
+            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                    + child.opId() + " carries descriptor "
+                    + boundaryPayload.descriptor().canonicalSpecText()
+                    + ": the pinned child descriptor is the field's declared"
+                    + " descriptor " + fieldLayout.descriptor().canonicalSpecText()
+                    + " — a mismatch is a producer defect, never executed");
+            }
+            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
+            if (!boundaryPayload.input().equals(providedId)) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                    + child.opId() + " carries input " + boundaryPayload.input()
+                    + ": the pinned CLASS_LITERAL_FIELD input is the field's provided"
+                    + " value op " + providedId + " (K-D4 input wiring) — a mismatch"
+                    + " is a producer defect, never executed");
+            }
+            BoundaryResult result = checkRunner.run(boundaryPayload, provided);
+            if (result instanceof BoundaryResult.Pass pass) {
+                checkedValues.put(entry.field(), pass.value());
+                continue;
+            }
+            // The first failing child fails the op: no instance, no tag, and
+            // the later children never run.
+            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
+            return new Outcome.Failure<Value>(new OpFailure(fail.failure(), op.origin()));
+        }
+
+        // The instance: the declaration-order field states (both fields
+        // present) — the boundary-published provided values and the compiler
+        // constant empty string for the omitted fields.
+        List<FieldState> states = new ArrayList<>(layout.fields().size());
+        for (ClassLayout.FieldLayout fieldLayout : layout.fields()) {
+            Value value = checkedValues.get(fieldLayout.name());
+            if (value == null) {
+                value = Value.string("");
+            }
+            states.add(new FieldState.Present(value));
+        }
+        return new Outcome.Success<Value>(
+            new Value.Class(payload.classId(), List.copyOf(states)));
+    }
+
 
     // =========================================================================
     // CLASS_FACTORY (the SHARED_FACTORY transfer)
