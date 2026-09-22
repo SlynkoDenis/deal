@@ -1030,9 +1030,10 @@ public final class CompilationOrchestrator {
         // Foundation phase (F3/F8): after the checked project and index,
         // LoweringSupport computes exactly one SemanticRequirementManifest
         // per implementation module in dependency order (the closed
-        // four-part STDLIB_TIME_CONFLICT trigger + constructCoverage
-        // rows). Read-only over the checked facts; its E6005 diagnostics
-        // fail the compile exactly like frontend errors.
+        // capability claims — the superseded four-part
+        // STDLIB_TIME_CONFLICT trigger is retired since K7 — plus the
+        // constructCoverage rows). Read-only over the checked facts; its
+        // E6005 diagnostics fail the compile exactly like frontend errors.
         log("Phase 3.6: Semantic requirement manifests");
         computeRequirementManifests();
         if (hasErrors) { printDiagnostics(); return false; }
@@ -1733,9 +1734,11 @@ public final class CompilationOrchestrator {
      * Runs the requirement-manifest foundation after the checked project
      * and interface index (ISSUE-0289): hands the checked project and the
      * index to {@link LoweringSupport}, which computes one manifest per
-     * implementation module in dependency order — the closed four-part
-     * {@code STDLIB_TIME_CONFLICT} detector and the reachable-construct
-     * coverage rows. Support E6005 diagnostics merge into
+     * implementation module in dependency order — the closed capability
+     * claims (the superseded four-part {@code STDLIB_TIME_CONFLICT}
+     * detector is retired since K7: the cataloged-call arm claims
+     * {@code STDLIB_SEMANTICS}) and the reachable-construct coverage
+     * rows. Support E6005 diagnostics merge into
      * {@link #diagnostics()} and fail the compile; a failed computation
      * leaves {@link #requirementManifests()} null.
      */
