@@ -349,4 +349,26 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # executed surfaces (the T1 dependency), and byte-identical repeated
   # emission.
   'fg|=== Running Lua Production Project Emission Tests (ISSUE-0640) ===|java -ea -cp build deal.test.LuaProductionProjectEmissionTest'
+  # ISSUE-0642 registration: the production project emission unit
+  # (deal.module.ProductionProjectEmission) — the C9 warning, the one
+  # project lowering over the compile's declared inputs, the pre-emission
+  # closure guard (a HOST-kind MODULE_IMPORT and a cross-module async
+  # call), the one production emission per target, the one staged project
+  # artifact plus the unchanged LuaJIT runtime/stdlib deployment copies,
+  # and the fail-closed E6005 mapping
+  # (production-project-emission-and-atomic-cutover P5/P6/P7/P9/P11 and
+  # the production-arm, source-map, and fail-closed producer-guard
+  # contracts; luajit-jvm-single-lowering-production-cutover
+  # C3/C4/C5/C7/C8/C9): the one public static entry and its input set,
+  # the pinned warning texts and guard tokens, the two-module fixture's
+  # one staged artifact per target (`app.lua`/`App.java`) with no sidecar
+  # and the byte-identical repeated staging, the real luajit execution
+  # (the one-main probe) and the javac --release 25 -proc:none + java
+  # run, the atomic-failure cases (a bytes-bearing lowering and a
+  # cross-module sync-call emission each stage nothing), the HOST-import
+  # and cross-module-async fail-closed outcomes, the same-module async
+  # acceptance, and the source-map warning disposition. The fixture
+  # inputs are gathered through a harness-invocation compile (P10 item 3)
+  # and the unit is driven with the release-owned production invocation.
+  'fg|=== Running Production Project Emission Tests (ISSUE-0642) ===|java -ea -cp build deal.test.ProductionProjectEmissionTest'
 )

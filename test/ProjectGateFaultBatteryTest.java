@@ -118,8 +118,11 @@ import java.util.stream.Stream;
  * {@link FunctionExecutionBinding} shapes, every payload record's shape
  * through reflection), the version constant, the dumper's closed key sets
  * (the unit text protocol and the project manifest), and the real
- * production source surface (no {@code deal/**} call site invokes
- * {@code lowerProject}; the emission entries, the route planning and
+ * production source surface (exactly one {@code deal/**} call site invokes
+ * {@code lowerProject}, in the production project emission unit, plus the
+ * single declaration in {@code SemanticLowerer.java}; the production unit
+ * reads no routing, planner, registry, retained-backend, or counting
+ * surface; the emission entries, the harness route planning and
  * dispatch, the retained loops and counters, the mixed-edge validation,
  * the source-map handling, the stager, and the CLI keep their
  * manifest-registered tests). No JavaScript source references the
@@ -1458,11 +1461,15 @@ public class ProjectGateFaultBatteryTest {
         check(!productionSources.isEmpty(),
             "the production source surface is real and non-empty");
         int entryDeclarations = 0;
+        int unitCallSites = 0;
         for (Path file : productionSources) {
             String text = Files.readString(file, StandardCharsets.UTF_8);
             int occurrences = countOccurrences(text, "lowerProject(");
             if (file.getFileName().toString().equals("SemanticLowerer.java")) {
                 entryDeclarations += occurrences;
+            } else if (file.getFileName().toString()
+                    .equals("ProductionProjectEmission.java")) {
+                unitCallSites += occurrences;
             } else {
                 check(occurrences == 0,
                     "no production call site invokes lowerProject in " + file);
@@ -1471,6 +1478,23 @@ public class ProjectGateFaultBatteryTest {
         checkEq(1, entryDeclarations,
             "SemanticLowerer.java carries the single lowerProject declaration and "
                 + "no production call site");
+        checkEq(1, unitCallSites,
+            "the production project emission unit carries the single lowerProject "
+                + "call site of the production source set");
+
+        // ISSUE-0642: the production unit reads no routing, planner,
+        // registry, retained-backend, or counting surface.
+        String productionUnit = Files.readString(
+            root.resolve("deal/module/ProductionProjectEmission.java"),
+            StandardCharsets.UTF_8);
+        for (String forbidden : List.of("ModuleRoute", "MigrationPlanner",
+                "CapabilityRegistry", "routeOf(", "validateMixedEdges",
+                "LuaBackend.generate", "JvmBackend.generate",
+                "retainedEmissionCount")) {
+            check(!productionUnit.contains(forbidden),
+                "the production project emission unit references no '" + forbidden
+                    + "'");
+        }
 
         String orchestrator = Files.readString(
             root.resolve("deal/module/CompilationOrchestrator.java"),
@@ -1572,6 +1596,15 @@ public class ProjectGateFaultBatteryTest {
             "CheckedProjectBuilderTest", "ClosureLoweringTest",
             "FunctionBindingRegistryTest", "SemanticIrDumperTest",
             "SemanticIrSchemaTest");
+        // ISSUE-0642: the production project emission unit's focused main
+        // stays in the tree and registered (nothing deleted).
+        check(Files.isRegularFile(
+                root.resolve("test/ProductionProjectEmissionTest.java")),
+            "the production project emission unit's focused test main stays in the "
+                + "tree");
+        check(manifest.contains("deal.test.ProductionProjectEmissionTest"),
+            "the production project emission unit's focused test main is registered "
+                + "in tools/gate-manifest.sh");
         for (String pin : retargetedPins) {
             check(Files.isRegularFile(root.resolve("test/" + pin + ".java")),
                 "the retargeted pin " + pin
