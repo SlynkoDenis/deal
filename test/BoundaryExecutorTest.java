@@ -362,12 +362,12 @@ public class BoundaryExecutorTest {
         // row's template.
         expectFail(checkCell(FailurePolicyId.TYPE_DESCRIPTOR, INT,
                 BoundaryValueView.ofNumber(2147483648.0)),
-            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of range",
+            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of safe range",
             "int", "number", new LinkedHashMap<>(), null,
             "int descriptor vs 2147483648.0");
         expectFail(checkCell(FailurePolicyId.TYPE_DESCRIPTOR, INT,
                 BoundaryValueView.ofNumber(-2147483649.0)),
-            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of range",
+            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of safe range",
             "int", "number", new LinkedHashMap<>(), null,
             "int descriptor vs -2147483649.0");
 
@@ -679,7 +679,7 @@ public class BoundaryExecutorTest {
 
         expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, INT,
                 BoundaryValueView.ofNumber(2147483648.0)),
-            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of range",
+            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of safe range",
             "int", "number", new LinkedHashMap<>(), null,
             "async int completion out of range");
 

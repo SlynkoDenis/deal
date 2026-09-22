@@ -215,7 +215,7 @@ public class FailureContractRegistryTest {
                 + "descriptor (descriptor is expected; actual kind is actual)");
 
         expectRow(FailurePolicyId.INT32_RESULT, "E8004", "RUNTIME",
-            List.of("int out of range"), List.of(),
+            List.of("int out of safe range"), List.of(),
             "arithmetic/boundary origin", none, frames,
             "single range check: integral result outside [-2147483648, 2147483647]");
 
@@ -333,7 +333,8 @@ public class FailureContractRegistryTest {
                 + "null; no partial instance is visible");
 
         expectRow(FailurePolicyId.JSON_TO_ERROR, "E8001", "RUNTIME",
-            List.of("value at {fieldPath} is not JSON serializable: {actual}"),
+            List.of("value at {fieldPath} is not JSON serializable: {actual}",
+                "unsupported type for JSON encoding: {actual}"),
             List.of("fieldPath", "actual"),
             "call origin", none, frames,
             "first declaration-order unsupported value, wrong identity, cycle, missing "

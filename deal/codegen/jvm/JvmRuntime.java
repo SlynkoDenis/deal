@@ -1,6 +1,7 @@
 package deal.codegen.jvm;
 
 import deal.semantic.SemanticRuntimeModel;
+import deal.semantic.SharedStdlibSemantics;
 import deal.semantic.ir.ActualKind;
 
 import java.io.PrintStream;
@@ -591,7 +592,7 @@ public final class JvmRuntime {
                         "non-integer number");
                 }
                 if (d < -2147483648d || d > 2147483647d) {
-                    throw fail("E8004", "int out of range", "-", "int", "number");
+                    throw fail("E8004", "int out of safe range", "-", "int", "number");
                 }
                 return d;
             }
@@ -1262,7 +1263,7 @@ public final class JvmRuntime {
                     }
                 } catch (ArithmeticException overflow) {
                     raise(opKey, digest, parent, origin, "BINARY", "E8004",
-                        "int out of range", null, null);
+                        "int out of safe range", null, null);
                 }
                 return int32Result(result, opKey, digest, parent, origin, "BINARY");
             }
@@ -1295,7 +1296,7 @@ public final class JvmRuntime {
     static Object int32Result(long result, String opKey, String digest, String parent,
                               String origin, String kind) {
         if (result < Integer.MIN_VALUE || result > Integer.MAX_VALUE) {
-            raise(opKey, digest, parent, origin, kind, "E8004", "int out of range", null,
+            raise(opKey, digest, parent, origin, kind, "E8004", "int out of safe range", null,
                 null);
         }
         return result;
@@ -1347,12 +1348,14 @@ public final class JvmRuntime {
      * a {@link Long}, and a table parameter is a {@link Table}. A
      * failure raises the op FAILURE event and the {@link DealError}
      * through {@link #raise} with the exact closed projections —
-     * {@code INT32_RESULT} E8004 {@code int out of range},
+     * {@code INT32_RESULT} E8004 {@code int out of safe range},
      * {@code SQRT_NEGATIVE} E8001 {@code sqrt of negative number} (actual
      * = the canonical hex float), {@code JSON_PARSE_SYNTAX} E8001
      * {@code JSON parse error at position {oneBasedByteOffset}:
      * {reason}}, and {@code JSON_TO_ERROR} E8001
-     * {@code value at {fieldPath} is not JSON serializable: {actual}} —
+     * {@code unsupported type for JSON encoding: {actual}} with the pinned
+     * expected text {@code string, number, boolean, or table} and the
+     * canonical actual-kind token —
      * at the {@code STDLIB_CALL} call origin with the active frames.
      * Console ids are emitted inline by the emitters (the byte-exact
      * one-effect contract), never through this surface.
@@ -1365,7 +1368,7 @@ public final class JvmRuntime {
                     String text = (String) args[0];
                     long count = text.codePointCount(0, text.length());
                     if (count > Integer.MAX_VALUE) {
-                        throw new StdlibFailure("E8004", "int out of range", null, null);
+                        throw new StdlibFailure("E8004", "int out of safe range", null, null);
                     }
                     return Long.valueOf(count);
                 }
@@ -1473,7 +1476,7 @@ public final class JvmRuntime {
                     StringBuilder out = new StringBuilder();
                     java.util.Set<Object> path =
                         java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-                    stringifyTable(out, root, "", path);
+                    stringifyTable(out, root, path);
                     return out.toString();
                 }
                 case "MATH_FLOOR" -> {
@@ -1494,7 +1497,7 @@ public final class JvmRuntime {
                     long value = longOf(args[0]);
                     long absolute = value < 0 ? -value : value;
                     if (absolute > Integer.MAX_VALUE) {
-                        throw new StdlibFailure("E8004", "int out of range", null, null);
+                        throw new StdlibFailure("E8004", "int out of safe range", null, null);
                     }
                     return Long.valueOf(absolute);
                 }
@@ -2027,13 +2030,25 @@ public final class JvmRuntime {
     // The RFC-8259 serializer (JSON_STRINGIFY realization)
     // =========================================================================
 
+    /**
+     * The pinned {@code STDLIB_CALL(JSON_STRINGIFY)} rejection: the
+     * corpus-aligned visible text (the {@code JSON_TO_ERROR} row's second
+     * template) with the projection's expected text and the value's
+     * canonical actual-kind token. The walk's internal position never
+     * surfaces — the first declaration-order failure is the only
+     * observable fact.
+     */
+    private static StdlibFailure jsonEncodingFailure(String actual) {
+        return new StdlibFailure("E8001",
+            "unsupported type for JSON encoding: " + actual,
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, actual);
+    }
+
     /** Serializes one table (object) with cycle detection and first-insertion order. */
-    private static void stringifyTable(StringBuilder out, Table table, String fieldPath,
+    private static void stringifyTable(StringBuilder out, Table table,
                                        java.util.Set<Object> path) {
         if (!path.add(table)) {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: table", null,
-                null);
+            throw jsonEncodingFailure("table");
         }
         out.append('{');
         List<String> keys = new ArrayList<>(table.entries.keySet());
@@ -2044,35 +2059,31 @@ public final class JvmRuntime {
             }
             appendJsonString(out, key);
             out.append(':');
-            stringifyValue(out, table.entries.get(key),
-                fieldPath.isEmpty() ? key : fieldPath + "." + key, path);
+            stringifyValue(out, table.entries.get(key), path);
         }
         out.append('}');
         path.remove(table);
     }
 
     /** Serializes one array with cycle detection and index order. */
-    private static void stringifyArray(StringBuilder out, Array array, String fieldPath,
+    private static void stringifyArray(StringBuilder out, Array array,
                                        java.util.Set<Object> path) {
         if (!path.add(array)) {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: array", null,
-                null);
+            throw jsonEncodingFailure("array");
         }
         out.append('[');
         for (int i = 0; i < array.elements.size(); i++) {
             if (i > 0) {
                 out.append(',');
             }
-            stringifyValue(out, array.elements.get(i),
-                fieldPath.isEmpty() ? Integer.toString(i) : fieldPath + "." + i, path);
+            stringifyValue(out, array.elements.get(i), path);
         }
         out.append(']');
         path.remove(array);
     }
 
     /** Serializes one value: the first declaration-order failure wins (pre-order). */
-    private static void stringifyValue(StringBuilder out, Object value, String fieldPath,
+    private static void stringifyValue(StringBuilder out, Object value,
                                        java.util.Set<Object> path) {
         if (value == null) {
             out.append("null");
@@ -2083,42 +2094,29 @@ public final class JvmRuntime {
         } else if (value instanceof Double doubleValue) {
             double d = doubleValue.doubleValue();
             if (!Double.isFinite(d)) {
-                throw new StdlibFailure("E8001",
-                    "value at " + fieldPath + " is not JSON serializable: number", null,
-                    null);
+                throw jsonEncodingFailure("number");
             }
             out.append(Double.toString(d));
         } else if (value instanceof String string) {
             appendJsonString(out, string);
         } else if (value instanceof Table table) {
-            stringifyTable(out, table, fieldPath, path);
+            stringifyTable(out, table, path);
         } else if (value instanceof Array array) {
-            stringifyArray(out, array, fieldPath, path);
+            stringifyArray(out, array, path);
         } else if (value == MISSING) {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: missing", null,
-                null);
+            throw jsonEncodingFailure("missing");
         } else if (value instanceof FunctionValue || value instanceof Intrinsic
                 || value instanceof AdapterValue) {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: function", null,
-                null);
+            throw jsonEncodingFailure("function");
         } else if (value instanceof ErrorValue) {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath
-                    + " is not JSON serializable: class:@builtin/Error", null,
-                null);
+            throw jsonEncodingFailure("class:@builtin/Error");
         } else if (value instanceof ClassInstance instance) {
             // A class instance is not JSON serializable and projects as its
             // canonical identity (the closed class:<ClassId> actual token),
             // never the carrier's shape.
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: class:"
-                    + instance.classIdText(), null, null);
+            throw jsonEncodingFailure("class:" + instance.classIdText());
         } else {
-            throw new StdlibFailure("E8001",
-                "value at " + fieldPath + " is not JSON serializable: table", null,
-                null);
+            throw jsonEncodingFailure("table");
         }
     }
 
@@ -2287,7 +2285,7 @@ public final class JvmRuntime {
                 throw e;
             }
             if (d < -2147483648d || d > 2147483647d) {
-                DealError e = fail("E8004", "int out of range", origin, "int", "number");
+                DealError e = fail("E8004", "int out of safe range", origin, "int", "number");
                 ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
                     List.of(), null, errtext(e));
                 throw e;

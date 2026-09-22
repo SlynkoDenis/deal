@@ -1573,10 +1573,10 @@ public class StdlibClaimingTimeLockTest {
                 BoundaryFailure projection = failure.failure().failure();
                 check(projection.policy() == FailurePolicyId.INT32_RESULT
                         && projection.code() == DiagnosticCode.E8004
-                        && projection.message().equals("int out of range")
+                        && projection.message().equals("int out of safe range")
                         && projection.metadata().isEmpty()
                         && failure.failure().origin().equals(origin()),
-                    "the INT32_RESULT projection is exactly E8004 'int out of range' "
+                    "the INT32_RESULT projection is exactly E8004 'int out of safe range' "
                         + "at the call origin");
             }
         }
@@ -1643,7 +1643,7 @@ public class StdlibClaimingTimeLockTest {
                         instanceof SemanticRuntimeModel.Terminal.DealFailure terminal) {
                     SemanticRuntimeModel.ErrorSnapshot error = terminal.error();
                     check(error.code().equals("E8004")
-                            && error.message().equals("int out of range")
+                            && error.message().equals("int out of safe range")
                             && error.origin().equals(originAtomOf(call))
                             && error.frames().equals(expectedFrames(abs, call))
                             && error.cause() == null,

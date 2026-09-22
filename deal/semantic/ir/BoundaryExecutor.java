@@ -31,7 +31,7 @@ import java.util.Set;
  * non-function descriptor check projects wrong kinds as E8001
  * {@code expected {expected}, got {actual}} with the canonical
  * {@link ActualKind} token; the {@code int} path follows the pinned order
- * (kind → NaN → infinity → non-integer → E8004 {@code int out of range});
+ * (kind → NaN → infinity → non-integer → E8004 {@code int out of safe range});
  * a string view classified {@code invalid-unicode} projects the pinned
  * {@code expected string, got invalid Unicode scalar encoding}; a class
  * descriptor requires the tagged atom text byte-equal; an array descriptor

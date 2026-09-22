@@ -657,7 +657,7 @@ public final class ContainerOpsExecutor {
      * resolves exactly once (never re-evaluated) and the signed32 element
      * count is published with the pinned {@code INT32_RESULT} range check
      * — a count outside {@code [-2147483648, 2147483647]} fails E8004
-     * {@code int out of range} via the registry row (defensive: the
+     * {@code int out of safe range} via the registry row (defensive: the
      * semantic model's counts are bounded, so the model cannot produce an
      * out-of-range count; the check exists because the closed policy pins
      * it).

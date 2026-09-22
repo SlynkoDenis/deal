@@ -185,9 +185,10 @@ import java.util.stream.Stream;
  *       constituents — the profile-aware parser, the shared
  *       value-semantics primitive, the retained LuaJIT subprocess, and
  *       the retained JVM subprocess — and every case agrees per the
- *       pinned outcome (code + origin compared; canonical
- *       {@code int out of range} for the shared primitive and retained
- *       {@code int out of safe range} for the retained routes; raw
+ *       pinned outcome (code + origin compared; the pinned
+ *       {@code int out of safe range} for the shared primitive and for
+ *       the retained routes alike — the former two-template split is
+ *       retired; raw
  *       messages never compared across sides). The activated-state gate
  *       facts are asserted (activated at {@code V1_2_ACTIVE}, the public
  *       build of an int-using module derives {@code DEAL_V1_2_INT32}
@@ -2108,10 +2109,10 @@ public class FoundationIntegrationTest {
      * profile-aware parser, the shared value-semantics primitive, the
      * retained LuaJIT subprocess, and the retained JVM subprocess — and
      * asserts per-case agreement with the pinned outcome: code + origin
-     * compared, the canonical {@code int out of range} template for the
-     * shared primitive and the pinned retained
-     * {@code int out of safe range} template for both retained routes,
-     * raw messages never compared across sides. Then it asserts the activated-state
+     * compared, the pinned {@code int out of safe range} template for the
+     * shared primitive and the same pinned retained template for both
+     * retained routes (ISSUE-0618 retired the intentional two-template
+     * state), raw messages never compared across sides. Then it asserts the activated-state
      * activated-state gate facts (A2) and faults each named constituent in
      * turn — parser, shared semantics, LuaJIT route, JVM route, provider
      * matrix, release configuration, catalog, harness seam — proving the
@@ -3564,11 +3565,12 @@ public class FoundationIntegrationTest {
  * entry per area — literal boundaries, arithmetic, conversion, boundaries,
  * and the IEEE number operations — with per-case source text plus the
  * pinned expected outcome (result, code, per-side template, origin). For
- * E8004 cases the expected outcome records the canonical template
- * {@code int out of range} for the shared primitive and the pinned
- * retained template {@code int out of safe range} for the retained routes
- * ({@code LegacyErrorNormalization}: code + origin compared; raw messages
- * never compared across sides); the E8001 variants are
+ * E8004 cases the expected outcome records the pinned template
+ * {@code int out of safe range} for the shared primitive and for the
+ * retained routes alike (ISSUE-0618 retired the former two-template
+ * split: the shared {@code INT32_RESULT} row now renders the retained
+ * text; {@code LegacyErrorNormalization} still compares code + origin and
+ * never compares raw messages across sides); the E8001 variants are
  * canonical-equivalent on all four constituents. The corpus is consumed
  * by the four drivers of {@code SignedInt32IntegrationTest}: the
  * profile-aware parser, the {@code SharedValueSemantics} unit rows, the
@@ -3576,11 +3578,11 @@ public class FoundationIntegrationTest {
  */
 final class SignedInt32Corpus {
 
-    /** The pinned canonical E8004 template of the shared primitive. */
-    static final String CANONICAL_INT_OUT_OF_RANGE = "int out of range";
+    /** The pinned E8004 template of the shared primitive. */
+    static final String SHARED_INT32_TEMPLATE = "int out of safe range";
 
-    /** The pinned retained E8004 template of both retained routes. */
-    static final String RETAINED_INT_OUT_OF_SAFE_RANGE = "int out of safe range";
+    /** The pinned E8004 template of both retained routes. */
+    static final String RETAINED_INT32_TEMPLATE = "int out of safe range";
 
     /** The E8001 infinity variant (canonical-equivalent on all four). */
     static final String E8001_INFINITY = "expected int, got infinity";
@@ -3769,8 +3771,8 @@ final class SignedInt32Corpus {
         Case.runtime("lit_min_immediate", moduleReturn("-2147483648"),
             RuntimeOutcome.ok(List.of(ii(-2147483648L, "v:-2147483648")))),
         Case.runtime("lit_double_neg_min", moduleReturn("--2147483648"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.UNARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.UNARY,
                 List.of(iu("neg", -2147483648, "E8004")))),
         Case.compileError("lit_overflow", moduleReturn("2147483648"),
             "Integer literal out of range: 2147483648", 2, 10),
@@ -3781,32 +3783,32 @@ final class SignedInt32Corpus {
 
         // ---- Arithmetic: add/sub/mul/neg overflow, both signs ----
         Case.runtime("add_overflow_max", moduleReturn("2147483647 + 1"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("add", 2147483647, 1, "E8004")))),
         Case.runtime("add_overflow_min", moduleReturn("-2147483648 + -1"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("add", -2147483648, -1, "E8004")))),
         Case.runtime("sub_overflow_min", moduleReturn("-2147483648 - 1"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("sub", -2147483648, 1, "E8004")))),
         Case.runtime("sub_overflow_max", moduleReturn("2147483647 - -1"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("sub", 2147483647, -1, "E8004")))),
         Case.runtime("mul_overflow_max", moduleReturn("2147483647 * 2"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("mul", 2147483647, 2, "E8004")))),
         Case.runtime("mul_overflow_min", moduleReturn("-2147483648 * 2"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("mul", -2147483648, 2, "E8004")))),
         Case.runtime("neg_min", moduleReturn("-(-2147483648)"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.UNARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.UNARY,
                 List.of(iu("neg", -2147483648, "E8004")))),
 
         // ---- Arithmetic: truncating division/remainder, MIN edge ----
@@ -3816,8 +3818,8 @@ final class SignedInt32Corpus {
             RuntimeOutcome.ok(List.of(ib("div", 5, -2, "v:-2"),
                 ib("div", -5, 2, "v:-2")))),
         Case.runtime("div_min_neg_one", moduleReturn("-2147483648 / -1"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("div", -2147483648, -1, "E8004")))),
         Case.runtime("mod_min_neg_one", moduleAsserts(
                 assertFail("mod_min_neg_one", "-2147483648 % -1 !== 0",
@@ -3843,8 +3845,8 @@ final class SignedInt32Corpus {
 
         // ---- Arithmetic: the pow band (finite 2 ** 62, infinity 2 ** 1024) ----
         Case.runtime("pow_finite_band", moduleReturn("2 ** 62"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.BINARY,
                 List.of(ib("pow", 2, 62, "E8004")))),
         Case.runtime("pow_infinity_band", moduleReturn("2 ** 1024"),
             RuntimeOutcome.error("E8001", E8001_INFINITY, E8001_INFINITY,
@@ -3881,12 +3883,12 @@ final class SignedInt32Corpus {
             RuntimeOutcome.ok(List.of(in(2147483647.0, "v:2147483647"),
                 in(-2147483648.0, "v:-2147483648"), in(-0.0, "v:0")))),
         Case.runtime("conv_overflow_pos", moduleReturn("int(2147483648.0)"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.CALL,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.CALL,
                 List.of(in(2147483648.0, "E8004")))),
         Case.runtime("conv_overflow_neg", moduleReturn("int(-2147483649.0)"),
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 10, OpKind.CALL,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 10, OpKind.CALL,
                 List.of(in(-2147483649.0, "E8004")))),
 
         // ---- Boundaries: array element, class int field, table read ----
@@ -3901,8 +3903,8 @@ final class SignedInt32Corpus {
                   return null
                 }
                 """,
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 2, 20, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 2, 20, OpKind.BINARY,
                 List.of(ib("add", 2147483647, 1, "E8004")))),
         Case.runtime("boundary_class_field", """
                 class Box { f: int = 0; }
@@ -3918,8 +3920,8 @@ final class SignedInt32Corpus {
                   return null
                 }
                 """,
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 5, 9, OpKind.BINARY,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 5, 9, OpKind.BINARY,
                 List.of(ib("add", 2147483647, 1, "E8004")))),
         Case.runtime("boundary_table_read", """
                 export function test(): int {
@@ -3934,8 +3936,8 @@ final class SignedInt32Corpus {
                   return null
                 }
                 """,
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 3, 10, OpKind.DECL_TYPE,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 3, 10, OpKind.DECL_TYPE,
                 List.of(ii(2147483648L, "E8004")))),
 
         // ---- Boundary: declared host int return (JVM lane with the real
@@ -3953,8 +3955,8 @@ final class SignedInt32Corpus {
                   return null
                 }
                 """,
-            RuntimeOutcome.error("E8004", CANONICAL_INT_OUT_OF_RANGE,
-                RETAINED_INT_OUT_OF_SAFE_RANGE, 4, 10, OpKind.CALL,
+            RuntimeOutcome.error("E8004", SHARED_INT32_TEMPLATE,
+                RETAINED_INT32_TEMPLATE, 4, 10, OpKind.CALL,
                 List.of(ii(2147483648L, "E8004"))),
             new HostDef("host/log", "bindings/log.d.deal",
                 "export function value(): int;\n",

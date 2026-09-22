@@ -87,7 +87,7 @@ import java.util.Set;
  *   <li>Representative exact projections end-to-end (descriptor from
  *       {@code Type} → boundary op → executor → report entry): the int
  *       path (Pass with the same in-range number carrier; E8004
- *       {@code int out of range} at the signed32 upper end), E8010
+ *       {@code int out of safe range} at the signed32 upper end), E8010
  *       function-signature mismatch, E8002 {@code negative array index},
  *       the {@code HOST_PARAMETER} {@code {index}} projection, E8002
  *       {@code array index out of bounds} for index &gt; length, the
@@ -383,7 +383,7 @@ public class BoundaryIntegrationTest {
             passArm(BoundaryValueView.ofNumber(7.0)),
             failArm(BoundaryValueView.ofNumber(2147483648.0), BoundaryContext.none(),
                 new ExecFail(FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004,
-                    "int out of range", "int", "number", new LinkedHashMap<>(), null))));
+                    "int out of safe range", "int", "number", new LinkedHashMap<>(), null))));
 
         // 2. MODULE_EXPORT number — number accepts an int carrier.
         OpId numBoundary = nextOpId();

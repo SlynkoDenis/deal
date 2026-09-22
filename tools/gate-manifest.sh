@@ -393,4 +393,20 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # preserved), the accepted same-module async closure, the C9 source-map
   # disposition, and the harness-arm dispatch rows.
   'fg|=== Running Production Dispatch and Cutover Acceptance Tests (ISSUE-0643) ===|java -ea -cp build deal.test.ProductionDispatchTest'
+  # ISSUE-0618 registration: the canonical v1.2 failure-text parity test
+  # (semantic-ir-construct-coverage-cutover K8 and Verification 9;
+  # semantic-ir-construct-coverage-cutover K1/K2 for the drive): the
+  # INT32_RESULT row and the row-driven producers (SharedValueSemantics,
+  # the stdlib primitive) rendering `int out of safe range`, the
+  # JSON_TO_ERROR row's corpus-aligned STDLIB_CALL(JSON_STRINGIFY)
+  # rejection template with the pinned expected/actual pair, the
+  # literal-carrying shared JVM runtime sites, and the two probes
+  # (int32 overflow, json.stringify rejection) driving the one project
+  # lowering through the oracle, the production LuaJIT artifact under
+  # real luajit, and the production JVM artifact under javac --release 25
+  # -proc:none plus java; plus the unchanged surfaces (the legacy-profile
+  # corpus pin, the JS runtime / std/json.lua texts, the retained JVM
+  # backend's legacy arm, and the four std/json and four int-overflow
+  # corpus sidecars).
+  'fg|=== Running Canonical Failure-Text Parity Tests (ISSUE-0618) ===|java -ea -cp build deal.test.CanonicalFailureTextParityTest'
 )

@@ -604,12 +604,14 @@ public final class StdlibEquivalenceBatteryTest {
         cases.add(new ValueCase("stringify-nan", StdlibFunctionId.JSON_STRINGIFY,
             List.of(new Arg.NaNTableArg()), JS,
             fail(FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-                "value at a is not JSON serializable: number", null, null,
+                "unsupported type for JSON encoding: number",
+                SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "number",
                 "fieldPath", "a", "actual", "number")));
         cases.add(new ValueCase("stringify-function-leaf", StdlibFunctionId.JSON_STRINGIFY,
             List.of(new Arg.FnLeafTableArg()), LUA_JS,
             fail(FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-                "value at f is not JSON serializable: function", null, null,
+                "unsupported type for JSON encoding: function",
+                SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
                 "fieldPath", "f", "actual", "function")));
 
         // ---- math ----
@@ -648,7 +650,7 @@ public final class StdlibEquivalenceBatteryTest {
         cases.add(new ValueCase("absInt-min", StdlibFunctionId.MATH_ABS_INT,
             List.of(new Arg.IntArg(Integer.MIN_VALUE)), ALL,
             fail(FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004,
-                "int out of range", null, null)));
+                "int out of safe range", null, null)));
         cases.add(new ValueCase("absNumber-neg1.5", StdlibFunctionId.MATH_ABS_NUMBER,
             List.of(new Arg.NumArg(-1.5)), ALL, ok(n(1.5))));
         cases.add(new ValueCase("absNumber-neg0", StdlibFunctionId.MATH_ABS_NUMBER,
@@ -2403,7 +2405,8 @@ public final class StdlibEquivalenceBatteryTest {
             new SharedStdlibSemantics.StdlibFailure(tamperedPathFailure,
                 Reference.ORIGIN));
         PinnedOutcome pathPin = fail(FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-            "value at a is not JSON serializable: number", null, null,
+            "unsupported type for JSON encoding: number",
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "number",
             "fieldPath", "a", "actual", "number");
         check(!pinnedMatches(tamperedPathOutcome, pathPin),
             "a tampered {fieldPath} fails the pinned projection assertion");
@@ -2534,9 +2537,10 @@ public final class StdlibEquivalenceBatteryTest {
         check(js.containsKey("absInt-min"),
             "the JS retained absInt safe-range divergence on -2147483648 is detected: "
                 + js.get("absInt-min"));
-        check(jvm.containsKey("absInt-min"),
-            "the JVM emitted absInt E8004 message divergence ('int out of safe range' vs the "
-                + "canonical 'int out of range') is detected: " + jvm.get("absInt-min"));
+        check(!jvm.containsKey("absInt-min"),
+            "the JVM emitted absInt helper matches the common INT32_RESULT projection "
+                + "('int out of safe range' on both sides — the former cross-side "
+                + "message divergence is retired): " + jvm.get("absInt-min"));
         check(!jvm.containsKey("sqrt-neg4"),
             "the JVM emitted sqrt helper matches the common SQRT_NEGATIVE projection on "
                 + "sqrt(-4)");

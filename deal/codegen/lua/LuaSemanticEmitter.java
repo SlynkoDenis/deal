@@ -5054,7 +5054,7 @@ local function __bcheck(desc, staticKind, v)
           "int", "non-integer number"), 0)
       end
       if v.d < -2147483648 or v.d > 2147483647 then
-        return error(__failExpr("E8004", "int out of range", "-", "int",
+        return error(__failExpr("E8004", "int out of safe range", "-", "int",
           "number"), 0)
       end
       return v
@@ -5073,7 +5073,7 @@ local function __bcheck(desc, staticKind, v)
           "int", "non-integer number"), 0)
       end
       if v < -2147483648 or v > 2147483647 then
-        return error(__failExpr("E8004", "int out of range", "-", "int",
+        return error(__failExpr("E8004", "int out of safe range", "-", "int",
           "number"), 0)
       end
       return v
@@ -5194,7 +5194,7 @@ local function __unary(selector, v, opKey, digest, parent, origin)
   if selector == "INT32_NEG" then
     local r = -v
     if r < -2147483648 or r > 2147483647 then
-      local e = __failExpr("E8004", "int out of range", origin, nil, nil)
+      local e = __failExpr("E8004", "int out of safe range", origin, nil, nil)
       __ev(opKey, "FAILURE", "UNARY", digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
@@ -5206,7 +5206,7 @@ local function __arith(selector, l, r, opKey, digest, parent, origin)
   l = __num(l); r = __num(r)
   local function rng(v)
     if v < -2147483648 or v > 2147483647 then
-      local e = __failExpr("E8004", "int out of range", origin, nil, nil)
+      local e = __failExpr("E8004", "int out of safe range", origin, nil, nil)
       __ev(opKey, "FAILURE", "BINARY", digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
@@ -5279,7 +5279,7 @@ local function __intConv(v, kind, opKey, digest, parent, origin)
       error(e, 0)
     end
     if v < -2147483648 or v > 2147483647 then
-      local e = __failExpr("E8004", "int out of range", origin, "int", "number")
+      local e = __failExpr("E8004", "int out of safe range", origin, "int", "number")
       __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
@@ -5816,7 +5816,7 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
   end
   local function __int32Gate(value)
     if value < -2147483648 or value > 2147483647 then
-      __sfail("E8004", "int out of range", nil, nil)
+      __sfail("E8004", "int out of safe range", nil, nil)
     end
     return value
   end
@@ -6124,9 +6124,13 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
   elseif fn == "JSON_STRINGIFY" then
     local out = {}
     local path = {}
-    local function sfFail(actual, fieldPath)
-      __sfail("E8001",
-        "value at "..fieldPath.." is not JSON serializable: "..actual, nil, nil)
+    -- The pinned STDLIB_CALL(JSON_STRINGIFY) rejection: the visible
+    -- message carries the canonical actual-kind token, and the expected
+    -- text and the token are the projection's expected/actual fields (the
+    -- shared walker's internal fieldPath never surfaces).
+    local function sfFail(actual)
+      __sfail("E8001", "unsupported type for JSON encoding: "..actual,
+        "string, number, boolean, or table", actual)
     end
     local sfValue
     -- The number slot flag is the written slot's recorded static kind
@@ -6135,9 +6139,9 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
     -- slot through the integer spelling. Without the mark (a dynamic
     -- position, a __jn carrier, or a slot no shared write path wrote)
     -- the int spelling stands, exactly the JSON_PARSE carrier split.
-    sfValue = function(v, fieldPath, isNumber)
+    sfValue = function(v, isNumber)
       if v == nil then out[#out + 1] = "null"; return end
-      if v == __MISSING then sfFail("missing", fieldPath); return end
+      if v == __MISSING then sfFail("missing"); return end
       local t = type(v)
       if t == "boolean" then
         out[#out + 1] = (v and "true" or "false")
@@ -6145,7 +6149,7 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
       end
       if t == "number" then
         if v ~= v or v == math.huge or v == -math.huge then
-          sfFail("number", fieldPath)
+          sfFail("number")
         end
         if isNumber then out[#out + 1] = __sfNumText(v)
         else out[#out + 1] = tostring(v) end
@@ -6157,14 +6161,14 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
           if v.k == "int" then out[#out + 1] = tostring(v.d)
           else
             if v.d ~= v.d or v.d == math.huge or v.d == -math.huge then
-              sfFail("number", fieldPath)
+              sfFail("number")
             end
             out[#out + 1] = __sfNumText(v.d)
           end
           return
         end
         if v.__a then
-          if path[v] then sfFail("array", fieldPath); return end
+          if path[v] then sfFail("array"); return end
           path[v] = true
           out[#out + 1] = "["
           local marks = v.__nK
@@ -6172,22 +6176,20 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
           for i = 1, v.__n do
             if i > 1 then out[#out + 1] = "," end
             local elem = v[i]
-            local elemPath = fieldPath == "" and tostring(i - 1)
-              or fieldPath.."."..tostring(i - 1)
             -- A raw nil slot is the internal missing (the deleted
             -- element model, exactly the read-side __arrayRead mapping);
             -- a present null is the __NULL marker. The deleted element is
             -- never serialized as JSON null.
             if elem == __NULL then elem = nil
-            elseif elem == nil then sfFail("missing", elemPath) end
-            sfValue(elem, elemPath, marks ~= nil and marks[i] == true)
+            elseif elem == nil then sfFail("missing") end
+            sfValue(elem, marks ~= nil and marks[i] == true)
           end
           out[#out + 1] = "]"
           path[v] = nil
           return
         end
         if v.__t then
-          if path[v] then sfFail("table", fieldPath); return end
+          if path[v] then sfFail("table"); return end
           path[v] = true
           out[#out + 1] = "{"
           local marks = v.__nK
@@ -6197,8 +6199,7 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
             local k = v.__order[i]
             out[#out + 1] = __jsonEscape(k)
             out[#out + 1] = ":"
-            sfValue(v[k], fieldPath == "" and k or fieldPath.."."..k,
-              marks ~= nil and marks[k] == true)
+            sfValue(v[k], marks ~= nil and marks[k] == true)
           end
           out[#out + 1] = "}"
           path[v] = nil
@@ -6208,16 +6209,16 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
         -- "class:<ClassId>" projection), never the carrier's shape: the
         -- marker is checked before the function arm (every class instance
         -- carries the field map __f).
-        if v.__c then sfFail("class:"..v.__id, fieldPath); return end
-        if v.__fn ~= nil or v.__f then sfFail("function", fieldPath); return end
-        if v.__d then sfFail("class:@builtin/Error", fieldPath); return end
-        sfFail("table", fieldPath)
+        if v.__c then sfFail("class:"..v.__id); return end
+        if v.__fn ~= nil or v.__f then sfFail("function"); return end
+        if v.__d then sfFail("class:@builtin/Error"); return end
+        sfFail("table")
         return
       end
-      if t == "function" then sfFail("function", fieldPath); return end
-      sfFail("table", fieldPath)
+      if t == "function" then sfFail("function"); return end
+      sfFail("table")
     end
-    sfValue(__args[1], "", false)
+    sfValue(__args[1], false)
     return table.concat(out)
   elseif fn == "MATH_FLOOR" then
     return math.floor(__args[1])

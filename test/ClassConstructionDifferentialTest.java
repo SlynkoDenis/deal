@@ -2159,7 +2159,7 @@ public class ClassConstructionDifferentialTest {
             String message = run.terminal()
                     instanceof SemanticRuntimeModel.Terminal.DealFailure failure
                 ? failure.error().message() : run.terminal().toString();
-            check("value at c is not JSON serializable: class:@main/Foo".equals(message),
+            check("unsupported type for JSON encoding: class:@main/Foo".equals(message),
                 "class-in-table JSON_STRINGIFY: " + run.consumer()
                     + " projects the canonical class:<ClassId> actual: " + message);
         }

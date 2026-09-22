@@ -798,7 +798,8 @@ public final class StdlibIntegrationTest {
             seeds.add(new Seed(StdlibFunctionId.JSON_STRINGIFY,
                 List.of(new Value.Table(table)),
                 fail(FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-                    "value at f is not JSON serializable: function", null, null,
+                    "unsupported type for JSON encoding: function",
+                    SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
                     "fieldPath", "f", "actual", "function")));
         }
         {
@@ -807,7 +808,8 @@ public final class StdlibIntegrationTest {
             seeds.add(new Seed(StdlibFunctionId.JSON_STRINGIFY,
                 List.of(new Value.Table(table)),
                 fail(FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-                    "value at f is not JSON serializable: number", null, null,
+                    "unsupported type for JSON encoding: number",
+                    SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "number",
                     "fieldPath", "f", "actual", "number")));
         }
 
@@ -828,7 +830,7 @@ public final class StdlibIntegrationTest {
         seeds.add(seed(StdlibFunctionId.MATH_ABS_INT, List.of(i(3)), ok(i(3))));
         seeds.add(new Seed(StdlibFunctionId.MATH_ABS_INT, List.of(i(Integer.MIN_VALUE)),
             fail(FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004,
-                "int out of range", null, null)));
+                "int out of safe range", null, null)));
         seeds.add(seed(StdlibFunctionId.MATH_ABS_NUMBER, List.of(n(-1.5)), ok(n(1.5))));
         seeds.add(seed(StdlibFunctionId.MATH_ABS_NUMBER, List.of(n(-0.0)), ok(n(0.0))));
         seeds.add(seed(StdlibFunctionId.MATH_MIN_INT, List.of(i(2), i(3)), ok(i(2))));
@@ -1433,7 +1435,9 @@ public final class StdlibIntegrationTest {
             "T4: the STDLIB_RETURN boundary rejects the non-table top-level parse "
                 + "with E8001 'expected table, got int'");
 
-        // (c) JSON_TO_ERROR: the first declaration-order failure with {fieldPath}/{actual}.
+        // (c) JSON_TO_ERROR: the first declaration-order failure with the
+        // corpus-aligned rejection text and the expected/actual pair; the
+        // walker's {fieldPath} stays internal metadata.
         SemanticOp stringifyOp = corpus.ops().get(StdlibFunctionId.JSON_STRINGIFY);
         SemanticTable<Value> table = new SemanticTable<>();
         table.put("a", i(1));
@@ -1449,16 +1453,20 @@ public final class StdlibIntegrationTest {
         if (toError.policy() != FailurePolicyId.JSON_TO_ERROR
                 || toError.code() != DiagnosticCode.E8001
                 || !toError.message()
-                    .equals("value at f is not JSON serializable: function")
+                    .equals("unsupported type for JSON encoding: function")
+                || !SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED.equals(toError.expected())
+                || !"function".equals(toError.actual())
                 || !toError.metadata()
                     .equals(Map.of("fieldPath", "f", "actual", "function"))
                 || toError.cause() != null
                 || !stringifyFailure.failure().origin().equals(stringifyOp.origin())) {
             return defect("T4 failure projection — JSON_TO_ERROR — expected E8001 "
-                + "'value at f is not JSON serializable: function' with "
-                + "{fieldPath:f, actual:function} at the call origin and no cause; got "
+                + "'unsupported type for JSON encoding: function' with expected "
+                + "'string, number, boolean, or table', actual 'function', the "
+                + "internal {fieldPath:f} metadata at the call origin and no cause; got "
                 + "policy=" + toError.policy() + " code=" + toError.code()
-                + " message='" + toError.message() + "' metadata=" + toError.metadata());
+                + " message='" + toError.message() + "' expected=" + toError.expected()
+                + " actual=" + toError.actual() + " metadata=" + toError.metadata());
         }
 
         // (d) SQRT_NEGATIVE and INT32_RESULT project exactly.
@@ -1483,11 +1491,11 @@ public final class StdlibIntegrationTest {
                 && absFailure.failure().failure().policy()
                     == FailurePolicyId.INT32_RESULT
                 && absFailure.failure().failure().code() == DiagnosticCode.E8004
-                && absFailure.failure().failure().message().equals("int out of range")
+                && absFailure.failure().failure().message().equals("int out of safe range")
                 && absFailure.failure().failure().metadata().isEmpty()
                 && absFailure.failure().origin().equals(absOp.origin()),
             "T4: INT32_RESULT projects exactly — absInt(-2147483648) is E8004 "
-                + "'int out of range' at the call origin");
+                + "'int out of safe range' at the call origin");
 
         // (e) The boundary precedence: invalid scalar encodings fail the
         // argument's STDLIB_PARAMETER boundary before any algorithm runs.

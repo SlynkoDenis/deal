@@ -31,7 +31,7 @@ import java.util.Objects;
  *       {@link #int32Neg}: exact {@code long} intermediates (exact for all
  *       int32 operands); a result outside
  *       {@code [-2147483648, 2147483647]} fails E8004
- *       {@code int out of range} ({@code INT32_RESULT}).</li>
+ *       {@code int out of safe range} ({@code INT32_RESULT}).</li>
  *   <li>{@link #int32Div}, {@link #int32Mod}: zero divisor fails E8005
  *       {@code integer division by zero} first; truncation toward zero;
  *       then the {@code INT32_RESULT} gate
@@ -49,7 +49,7 @@ import java.util.Objects;
  *       {@code d = Math.pow((double) a, (double) b)}:
  *       {@code NaN(d)} → E8001 {@code expected int, got NaN};
  *       {@code infinite(d)} → E8001 {@code expected int, got infinity};
- *       finite {@code d} → E8004 {@code int out of range}.
+ *       finite {@code d} → E8004 {@code int out of safe range}.
  *       Pinned bands: {@code 2 ** 62} → E8004,
  *       {@code 2 ** 1024} → E8001. Classification is sign-insensitive,
  *       and doubles are exact for every {@code |result| <= 2^53}, so the
@@ -58,12 +58,12 @@ import java.util.Objects;
  *       NaN → E8001 {@code expected int, got NaN}; ±infinity → E8001
  *       {@code expected int, got infinity}; fractional → E8001
  *       {@code expected int, got non-integer number}; integral out of
- *       range → E8004 {@code int out of range}. {@code -0.0} is
+ *       range → E8004 {@code int out of safe range}. {@code -0.0} is
  *       normalized to {@code 0} (negative zero does not exist in
  *       {@code int}).</li>
  *   <li>{@link #checkInt32Integral}: the int descriptor path tail —
  *       after kind/integrality checks — out of range → E8004
- *       {@code int out of range}.</li>
+ *       {@code int out of safe range}.</li>
  *   <li>{@link #numberFromInt}: exact double ({@code NUMBER_CONVERSION};
  *       every int32 value is exactly representable).</li>
  * </ul>
@@ -223,7 +223,7 @@ public final class SharedValueSemantics {
      * double intermediate in the retained NaN/infinity-first order —
      * NaN → E8001 {@code expected int, got NaN}, infinite → E8001
      * {@code expected int, got infinity}, finite → E8004
-     * {@code int out of range}. Pinned bands: {@code 2 ** 62} → E8004;
+     * {@code int out of safe range}. Pinned bands: {@code 2 ** 62} → E8004;
      * {@code 2 ** 1024} → E8001 {@code expected int, got infinity}.
      * {@code 0 ** 0} → {@code 1}; {@code (-2) ** 63} is exactly in-long
      * and fails the ±2^31 gate → E8004.
@@ -272,7 +272,7 @@ public final class SharedValueSemantics {
      * {@code expected int, got NaN}; ±infinity → E8001
      * {@code expected int, got infinity}; fractional → E8001
      * {@code expected int, got non-integer number}; integral out of
-     * range → E8004 {@code int out of range}. {@code -0.0} normalizes to
+     * range → E8004 {@code int out of safe range}. {@code -0.0} normalizes to
      * {@code 0} (negative zero does not exist in {@code int}).
      */
     public static Int32Result intFromNumber(double value, SourceOrigin origin) {
@@ -295,7 +295,7 @@ public final class SharedValueSemantics {
     /**
      * The int descriptor path tail (after kind/integrality checks):
      * an integral long outside the signed32 range → E8004
-     * {@code int out of range}; otherwise the signed32 value.
+     * {@code int out of safe range}; otherwise the signed32 value.
      */
     public static Int32Result checkInt32Integral(long value, SourceOrigin origin) {
         Objects.requireNonNull(origin, "origin must not be null");

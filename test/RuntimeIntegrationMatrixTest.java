@@ -21,6 +21,7 @@ import deal.semantic.ModuleFact;
 import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticRuntimeModel;
+import deal.semantic.SharedStdlibSemantics;
 import deal.semantic.ir.AnchorId;
 import deal.semantic.ir.BinarySelector;
 import deal.semantic.ir.BlockId;
@@ -293,6 +294,31 @@ public class RuntimeIntegrationMatrixTest {
                 ? failure.error().message() : run.terminal().toString();
             check(message.equals(actual), what + ": " + run.consumer()
                 + " publishes the exact failure message (got " + actual + ")");
+        }
+    }
+
+    /**
+     * Asserts every consumer's terminal failure expected/actual pair
+     * exactly (the cross-consumer verdict compares the traces
+     * event-for-event; this pin additionally fixes the closed projection
+     * facts).
+     */
+    private static void checkTerminalExpectedActual(SemanticDifferentialHarness.Verdict verdict,
+            String expected, String actual, String what) {
+        if (verdict == null) {
+            return;
+        }
+        for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+            if (!(run.terminal()
+                    instanceof SemanticRuntimeModel.Terminal.DealFailure failure)) {
+                continue;
+            }
+            SemanticRuntimeModel.ErrorSnapshot error = failure.error();
+            check(java.util.Objects.equals(error.expected(), expected)
+                    && java.util.Objects.equals(error.actual(), actual),
+                what + ": " + run.consumer()
+                    + " publishes the exact expected/actual pair (got expected="
+                    + error.expected() + " actual=" + error.actual() + ")");
         }
     }
 
@@ -2035,7 +2061,10 @@ public class RuntimeIntegrationMatrixTest {
             SemanticDifferentialHarness.Verdict verdict = runMatrix(source,
                 "JSON_STRINGIFY deleted array element (E8001 missing)", List.of(), E8001);
             checkTerminalMessage(verdict,
-                "value at xs.1 is not JSON serializable: missing",
+                "unsupported type for JSON encoding: missing",
+                "JSON_STRINGIFY deleted array element");
+            checkTerminalExpectedActual(verdict,
+                SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "missing",
                 "JSON_STRINGIFY deleted array element");
         }
 

@@ -481,7 +481,7 @@ public class LoweringFoundationTest {
 
         // Fail fails closed on null components.
         expectThrows(NullPointerException.class,
-            () -> SharedValueSemantics.Int32Result.fail(null, "int out of range",
+            () -> SharedValueSemantics.Int32Result.fail(null, "int out of safe range",
                 origin("null-code")),
             "Fail(null code) fails closed");
         expectThrows(NullPointerException.class,
@@ -490,7 +490,7 @@ public class LoweringFoundationTest {
             "Fail(null template) fails closed");
         expectThrows(NullPointerException.class,
             () -> SharedValueSemantics.Int32Result.fail(DiagnosticCode.E8004,
-                "int out of range", null),
+                "int out of safe range", null),
             "Fail(null origin) fails closed");
 
         // A null origin fails closed on every failing-capable operation.
@@ -536,11 +536,11 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.int32Add(1073741824, 1073741823, ok),
             2147483647, "add boundary sum");
         expectFailAt(SharedValueSemantics.int32Add(2147483647, 1, over),
-            "E8004", "int out of range", over, "add max + 1");
+            "E8004", "int out of safe range", over, "add max + 1");
         expectFailAt(SharedValueSemantics.int32Add(-2147483648, -1, under),
-            "E8004", "int out of range", under, "add min + -1");
+            "E8004", "int out of safe range", under, "add min + -1");
         expectFailAt(SharedValueSemantics.int32Add(1073741824, 1073741824, over),
-            "E8004", "int out of range", over, "add 2^30 + 2^30");
+            "E8004", "int out of safe range", over, "add 2^30 + 2^30");
 
         // sub
         expectValue(SharedValueSemantics.int32Sub(-2147483648, 0, ok),
@@ -550,9 +550,9 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.int32Sub(0, 2147483647, ok),
             -2147483647, "sub 0 - max");
         expectFailAt(SharedValueSemantics.int32Sub(-2147483648, 1, under),
-            "E8004", "int out of range", under, "sub min - 1");
+            "E8004", "int out of safe range", under, "sub min - 1");
         expectFailAt(SharedValueSemantics.int32Sub(2147483647, -1, over),
-            "E8004", "int out of range", over, "sub max - -1");
+            "E8004", "int out of safe range", over, "sub max - -1");
 
         // mul
         expectValue(SharedValueSemantics.int32Mul(0, -2147483648, mulOk),
@@ -564,13 +564,13 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.int32Mul(46340, 46340, mulOk),
             2147395600, "mul boundary product");
         expectFailAt(SharedValueSemantics.int32Mul(2147483647, 2, mulOver),
-            "E8004", "int out of range", mulOver, "mul max * 2");
+            "E8004", "int out of safe range", mulOver, "mul max * 2");
         expectFailAt(SharedValueSemantics.int32Mul(-2147483648, 2, mulOver),
-            "E8004", "int out of range", mulOver, "mul min * 2");
+            "E8004", "int out of safe range", mulOver, "mul min * 2");
         expectFailAt(SharedValueSemantics.int32Mul(46341, 46341, mulOver),
-            "E8004", "int out of range", mulOver, "mul 46341 * 46341");
+            "E8004", "int out of safe range", mulOver, "mul 46341 * 46341");
         expectFailAt(SharedValueSemantics.int32Mul(-46341, -46341, mulOver),
-            "E8004", "int out of range", mulOver, "mul -46341 * -46341");
+            "E8004", "int out of safe range", mulOver, "mul -46341 * -46341");
 
         // neg
         expectValue(SharedValueSemantics.int32Neg(0, negOk), 0, "neg 0 -> 0");
@@ -581,7 +581,7 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.int32Neg(-2147483647, negOk),
             2147483647, "neg -max");
         expectFailAt(SharedValueSemantics.int32Neg(-2147483648, negOver),
-            "E8004", "int out of range", negOver, "neg min -> E8004");
+            "E8004", "int out of safe range", negOver, "neg min -> E8004");
     }
 
     static void testSharedValueSemanticsInt32DivMod() {
@@ -638,7 +638,7 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.int32Mod(-2147483648, 2147483647, ok),
             -1, "mod min % max = -1");
         expectFailAt(SharedValueSemantics.int32Div(-2147483648, -1, minNegOne),
-            "E8004", "int out of range", minNegOne,
+            "E8004", "int out of safe range", minNegOne,
             "div min / -1 -> E8004");
         expectValue(SharedValueSemantics.int32Mod(-2147483648, -1, modMinNegOne),
             0, "mod min % -1 = 0 (truncated remainder)");
@@ -693,25 +693,25 @@ public class LoweringFoundationTest {
 
         // Finite out-of-range band -> E8004 (exact long, then the ±2^31 gate).
         expectFailAt(SharedValueSemantics.int32Pow(2, 31, over),
-            "E8004", "int out of range", over, "pow 2 ** 31");
+            "E8004", "int out of safe range", over, "pow 2 ** 31");
         expectFailAt(SharedValueSemantics.int32Pow(-2, 32, over),
-            "E8004", "int out of range", over, "pow -2 ** 32");
+            "E8004", "int out of safe range", over, "pow -2 ** 32");
         expectFailAt(SharedValueSemantics.int32Pow(-2147483648, 2, over),
-            "E8004", "int out of range", over, "pow min ** 2");
+            "E8004", "int out of safe range", over, "pow min ** 2");
         expectFailAt(SharedValueSemantics.int32Pow(2, 62, pow62),
-            "E8004", "int out of range", pow62,
+            "E8004", "int out of safe range", pow62,
             "pow 2 ** 62 -> E8004 (finite band)");
         expectFailAt(SharedValueSemantics.int32Pow(-2, 63, pow63),
-            "E8004", "int out of range", pow63,
+            "E8004", "int out of safe range", pow63,
             "pow -2 ** 63 -> E8004 (exactly in-long, out of range)");
         expectFailAt(SharedValueSemantics.int32Pow(2, 63, over),
-            "E8004", "int out of range", over,
+            "E8004", "int out of safe range", over,
             "pow 2 ** 63 -> E8004 (long overflow, finite classification)");
         expectFailAt(SharedValueSemantics.int32Pow(-2, 64, over),
-            "E8004", "int out of range", over,
+            "E8004", "int out of safe range", over,
             "pow -2 ** 64 -> E8004 (long overflow via squaring, finite)");
         expectFailAt(SharedValueSemantics.int32Pow(3, 64, over),
-            "E8004", "int out of range", over,
+            "E8004", "int out of safe range", over,
             "pow 3 ** 64 -> E8004 (long overflow, finite)");
 
         // Infinity band -> E8001 expected int, got infinity (sign-insensitive).
@@ -763,13 +763,13 @@ public class LoweringFoundationTest {
             "E8001", "expected int, got non-integer number", order,
             "int(2^31 + 0.5): fractional wins over range (normative order)");
         expectFailAt(SharedValueSemantics.intFromNumber(2147483648.0, range),
-            "E8004", "int out of range", range, "int(2^31)");
+            "E8004", "int out of safe range", range, "int(2^31)");
         expectFailAt(SharedValueSemantics.intFromNumber(-2147483649.0, range),
-            "E8004", "int out of range", range, "int(-2^31 - 1)");
+            "E8004", "int out of safe range", range, "int(-2^31 - 1)");
         expectFailAt(SharedValueSemantics.intFromNumber(9007199254740992.0, range),
-            "E8004", "int out of range", range, "int(2^53)");
+            "E8004", "int out of safe range", range, "int(2^53)");
         expectFailAt(SharedValueSemantics.intFromNumber(1e300, range),
-            "E8004", "int out of range", range, "int(1e300)");
+            "E8004", "int out of safe range", range, "int(1e300)");
         expectValue(SharedValueSemantics.intFromNumber(2147483647.0, ok),
             2147483647, "int(max)");
         expectValue(SharedValueSemantics.intFromNumber(-2147483648.0, ok),
@@ -791,16 +791,16 @@ public class LoweringFoundationTest {
         expectValue(SharedValueSemantics.checkInt32Integral(0L, checkOk), 0,
             "checkInt32Integral(0)");
         expectFailAt(SharedValueSemantics.checkInt32Integral(-2147483649L, checkOver),
-            "E8004", "int out of range", checkOver,
+            "E8004", "int out of safe range", checkOver,
             "checkInt32Integral(min - 1)");
         expectFailAt(SharedValueSemantics.checkInt32Integral(2147483648L, checkOver),
-            "E8004", "int out of range", checkOver,
+            "E8004", "int out of safe range", checkOver,
             "checkInt32Integral(max + 1)");
         expectFailAt(SharedValueSemantics.checkInt32Integral(Long.MIN_VALUE, checkOver),
-            "E8004", "int out of range", checkOver,
+            "E8004", "int out of safe range", checkOver,
             "checkInt32Integral(Long.MIN_VALUE)");
         expectFailAt(SharedValueSemantics.checkInt32Integral(Long.MAX_VALUE, checkOver),
-            "E8004", "int out of range", checkOver,
+            "E8004", "int out of safe range", checkOver,
             "checkInt32Integral(Long.MAX_VALUE)");
 
         // numberFromInt: exact double for every int32.
@@ -1074,7 +1074,7 @@ public class LoweringFoundationTest {
         SourceOrigin pow = origin("origin-pow");
         SourceOrigin cvt = origin("origin-cvt");
         expectFailAt(SharedValueSemantics.int32Add(2147483647, 1, add),
-            "E8004", "int out of range", add, "add overflow origin");
+            "E8004", "int out of safe range", add, "add overflow origin");
         expectFailAt(SharedValueSemantics.int32Div(1, 0, div),
             "E8005", "integer division by zero", div, "div zero origin");
         expectFailAt(SharedValueSemantics.int32Pow(2, -1, pow),
@@ -1085,7 +1085,7 @@ public class LoweringFoundationTest {
         expectFailAt(SharedValueSemantics.intFromNumber(Double.NaN, cvt),
             "E8001", "expected int, got NaN", cvt, "conversion NaN origin");
         expectFailAt(SharedValueSemantics.checkInt32Integral(2147483648L, add),
-            "E8004", "int out of range", add, "checkInt32Integral origin");
+            "E8004", "int out of safe range", add, "checkInt32Integral origin");
     }
 
     static void testSelectorPolicyCrossCheck() {

@@ -735,8 +735,9 @@ public class SharedStdlibSemanticsTest {
                                                String actual, String note) {
         expectFailure(SharedStdlibSemantics.jsonStringify(origin(), table),
             FailurePolicyId.JSON_TO_ERROR, DiagnosticCode.E8001,
-            "value at " + fieldPath + " is not JSON serializable: " + actual,
-            null, null, Map.of("fieldPath", fieldPath, "actual", actual), origin(), note);
+            "unsupported type for JSON encoding: " + actual,
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, actual,
+            Map.of("fieldPath", fieldPath, "actual", actual), origin(), note);
     }
 
     static void testJsonStringifyValues() {
@@ -936,9 +937,9 @@ public class SharedStdlibSemanticsTest {
         expectSuccess(SharedStdlibSemantics.mathAbsInt(origin(), 2147483647),
             new Value.Int(2147483647), "absInt(2147483647) = 2147483647");
         expectFailure(SharedStdlibSemantics.mathAbsInt(origin(), -2147483648),
-            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of range",
+            FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004, "int out of safe range",
             null, null, Map.of(), origin(),
-            "absInt(-2147483648) fails E8004 int out of range at the call origin");
+            "absInt(-2147483648) fails E8004 int out of safe range at the call origin");
 
         expectSuccess(SharedStdlibSemantics.mathAbsNumber(origin(), -1.5),
             new Value.Number(1.5), "absNumber(-1.5) = 1.5");
@@ -1629,7 +1630,7 @@ public class SharedStdlibSemanticsTest {
         Outcome<Value> overflow = SharedStdlibSemantics.execute(absInt,
             List.of(new Value.Int(-2147483648)), null);
         expectFailure(overflow, FailurePolicyId.INT32_RESULT, DiagnosticCode.E8004,
-            "int out of range", null, null, Map.of(), absInt.origin(),
+            "int out of safe range", null, null, Map.of(), absInt.origin(),
             "absInt(-2147483648) through execute fails E8004 at the call origin");
 
         // Spot check: SQRT_NEGATIVE through execute carries the operand.

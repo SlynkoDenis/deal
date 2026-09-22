@@ -28,7 +28,7 @@ import java.util.Objects;
  * variant, E8002 {@code negative array index} /
  * {@code array index out of bounds}, E8003
  * {@code array element {oneBasedIndex} type mismatch}, E8004
- * {@code int out of range}, E8005 {@code integer division by zero},
+ * {@code int out of safe range}, E8005 {@code integer division by zero},
  * E8006 {@code integer exponent must be non-negative}, E8007
  * {@code extra field '{field}' in class '{classId}'}, the E8010
  * signature/parameter/return/async variants, the six E8011 host-load
@@ -109,7 +109,7 @@ public final class FailureContractRegistry {
                 + "descriptor (descriptor is expected; actual kind is actual)"));
 
         rows.put(FailurePolicyId.INT32_RESULT, makeRow(FailurePolicyId.INT32_RESULT,
-            DiagnosticCode.E8004, List.of("int out of range"), List.of(),
+            DiagnosticCode.E8004, List.of("int out of safe range"), List.of(),
             "arithmetic/boundary origin", CAUSE_NONE, FRAMES_ACTIVE,
             "single range check: integral result outside [-2147483648, 2147483647]"));
 
@@ -242,9 +242,16 @@ public final class FailureContractRegistry {
             "any syntax, unknown-key, descriptor, default, or field failure returns language "
                 + "null; no partial instance is visible"));
 
+        // Two projections share the row: template 0 is the @jsonable
+        // C$toJson walk's first declaration-order failure (the generated
+        // body's pinned fieldPath spelling), template 1 is the
+        // STDLIB_CALL(JSON_STRINGIFY) rejection aligned to the corpus
+        // pins (the canonical actual-kind token; the walker's fieldPath
+        // stays internal metadata, never part of the visible projection).
         rows.put(FailurePolicyId.JSON_TO_ERROR, makeRow(FailurePolicyId.JSON_TO_ERROR,
             DiagnosticCode.E8001,
-            List.of("value at {fieldPath} is not JSON serializable: {actual}"),
+            List.of("value at {fieldPath} is not JSON serializable: {actual}",
+                "unsupported type for JSON encoding: {actual}"),
             List.of("fieldPath", "actual"),
             "call origin", CAUSE_NONE, FRAMES_ACTIVE,
             "first declaration-order unsupported value, wrong identity, cycle, missing "

@@ -118,12 +118,15 @@ import java.util.Set;
  * ({@code Double.toString} — the JDK's unique-identification spelling);
  * the first failure in declaration order fails via
  * {@code JSON_TO_ERROR} — E8001
- * {@code value at {fieldPath} is not JSON serializable: {actual}} with
- * metadata {@code {fieldPath}}/{@code {actual}}, origin = the call
+ * {@code unsupported type for JSON encoding: {actual}} with the pinned
+ * expected text {@code string, number, boolean, or table} and metadata
+ * {@code {fieldPath}}/{@code {actual}}, origin = the call
  * origin. The {@code {fieldPath}} spelling is owned by this component: a
  * dot-separated pre-order traversal from the root value — table fields
  * append the field name, array elements append the 0-based element
- * index, and the root itself has the empty path. Unsupported values
+ * index, and the root itself has the empty path; it stays internal
+ * metadata and never surfaces in the DEAL-visible projection.
+ * Unsupported values
  * (functions, class instances, async-operation handles, missing values,
  * invalid Unicode scalar sequences), cycles, and nonfinite numbers fail
  * here; acyclic finite data never fails.</p>
@@ -136,7 +139,7 @@ import java.util.Set;
  * hex-float spelling, {@link CanonicalJson#numberHex}); NaN returns NaN
  * and {@code -0.0} returns {@code -0.0}. {@code MATH_ABS_INT} — signed32
  * absolute value; {@code -2147483648} fails {@code INT32_RESULT} (E8004
- * {@code int out of range} at the call origin). {@code MATH_ABS_NUMBER}
+ * {@code int out of safe range} at the call origin). {@code MATH_ABS_NUMBER}
  * — IEEE absolute value ({@code -0.0} → {@code +0.0}).
  * {@code MATH_MIN_INT}/{@code MATH_MAX_INT} — return the selected
  * signed32 operand; equal operands return that operand value.</p>
@@ -800,7 +803,7 @@ public final class SharedStdlibSemantics {
      * {@code STRING_LENGTH}: the Unicode scalar count (code points — a
      * surrogate pair is one scalar) as signed32; a count outside
      * {@code [-2147483648, 2147483647]} fails E8004
-     * {@code int out of range} ({@code INT32_RESULT} at the call origin).
+     * {@code int out of safe range} ({@code INT32_RESULT} at the call origin).
      * Defensive: the model's counts are bounded, but the closed policy
      * pins the gate.
      *
@@ -1108,6 +1111,16 @@ public final class SharedStdlibSemantics {
     /** The defect class: the end of input where a value was required. */
     public static final String REASON_UNEXPECTED_END = "unexpected end of input";
 
+    /**
+     * The pinned expected text of the {@code STDLIB_CALL(JSON_STRINGIFY)}
+     * rejection (the {@code JSON_TO_ERROR} row's second template): the
+     * value kinds JSON encoding admits. Shared by the primitive's
+     * projection and by the two target runtimes' stdlib realizations —
+     * the three consumers are compared event-for-event.
+     */
+    public static final String JSON_STRINGIFY_EXPECTED =
+        "string, number, boolean, or table";
+
     /** The internal parse failure: the defect class and its 1-based UTF-8 byte offset. */
     private static final class JsonParseFailure extends RuntimeException {
 
@@ -1202,10 +1215,13 @@ public final class SharedStdlibSemantics {
      * shortest round-trippable decimal number formatting
      * ({@code Double.toString}); the first failure in declaration order
      * fails via {@code JSON_TO_ERROR} — E8001
-     * {@code value at {fieldPath} is not JSON serializable: {actual}}
-     * with metadata {@code {fieldPath}}/{@code {actual}}, origin = the
-     * call origin. Unsupported values, cycles, and nonfinite numbers
-     * fail here; acyclic finite data never fails.
+     * {@code unsupported type for JSON encoding: {actual}}
+     * with the pinned expected text {@code string, number, boolean, or
+     * table}, actual = the value's canonical actual-kind token, and
+     * metadata {@code {fieldPath}}/{@code {actual}} (the field path
+     * stays internal metadata), origin = the call origin. Unsupported
+     * values, cycles, and nonfinite numbers fail here; acyclic finite
+     * data never fails.
      *
      * <p>{@code {fieldPath}} spelling (owned here): a dot-separated
      * pre-order traversal from the root value — table fields append the
@@ -1231,7 +1247,11 @@ public final class SharedStdlibSemantics {
         try {
             stringifyTable(out, table, "", path);
         } catch (JsonStringifyFailure stringifyFailure) {
-            return failOf(FailurePolicyId.JSON_TO_ERROR, 0, null, null,
+            // The STDLIB_CALL(JSON_STRINGIFY) rejection: row template 1
+            // (the corpus-aligned visible text); the walker's fieldPath
+            // stays internal metadata.
+            return failOf(FailurePolicyId.JSON_TO_ERROR, 1, JSON_STRINGIFY_EXPECTED,
+                stringifyFailure.actual,
                 jsonToErrorMetadata(stringifyFailure.fieldPath, stringifyFailure.actual),
                 origin);
         }
@@ -1783,7 +1803,7 @@ public final class SharedStdlibSemantics {
     /**
      * {@code MATH_ABS_INT}: signed32 absolute value;
      * {@code -2147483648} fails {@code INT32_RESULT} (E8004
-     * {@code int out of range} at the call origin) — the exact long
+     * {@code int out of safe range} at the call origin) — the exact long
      * intermediate makes the overflow visible before any narrowing.
      *
      * @param origin the {@code STDLIB_CALL} operation origin; non-null

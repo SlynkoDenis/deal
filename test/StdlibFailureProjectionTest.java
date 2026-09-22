@@ -254,10 +254,14 @@ public class StdlibFailureProjectionTest {
         FailurePolicyRow toErrorRow = FailureContractRegistry.row(
             FailurePolicyId.JSON_TO_ERROR);
         check(toErrorRow.code() == DiagnosticCode.E8001
-                && toErrorRow.templates().size() == 1
-                && toErrorRow.template().contains("is not JSON serializable")
+                && toErrorRow.templates().size() == 2
+                && toErrorRow.templates().get(0).contains("is not JSON serializable")
+                && toErrorRow.templates().get(1).equals(
+                    "unsupported type for JSON encoding: {actual}")
                 && toErrorRow.metadataKeys().equals(List.of("fieldPath", "actual")),
-            "JSON_TO_ERROR pins the exact template and the fieldPath/actual keys");
+            "JSON_TO_ERROR pins the @jsonable template first and the corpus-aligned "
+                + "STDLIB_CALL(JSON_STRINGIFY) rejection second, with the "
+                + "fieldPath/actual keys");
         check(toErrorRow.originRule().equals("call origin"),
             "JSON_TO_ERROR pins the call origin");
 
@@ -273,8 +277,8 @@ public class StdlibFailureProjectionTest {
         FailurePolicyRow int32Row = FailureContractRegistry.row(
             FailurePolicyId.INT32_RESULT);
         check(int32Row.code() == DiagnosticCode.E8004
-                && int32Row.templates().equals(List.of("int out of range")),
-            "INT32_RESULT pins E8004 'int out of range'");
+                && int32Row.templates().equals(List.of("int out of safe range")),
+            "INT32_RESULT pins E8004 'int out of safe range'");
 
         FailurePolicyRow infraRow = FailureContractRegistry.row(
             FailurePolicyId.INFRASTRUCTURE_ONLY);
@@ -334,15 +338,35 @@ public class StdlibFailureProjectionTest {
     private static void expectProjection(Outcome<Value> outcome, FailurePolicyId policy,
                                          Map<String, String> metadata,
                                          SourceOrigin origin, String note) {
+        expectProjection(outcome, policy, 0, null, null, metadata, origin, false, note);
+    }
+
+    /** Asserts one sealed failure's exact projection against the row's
+     *  selected template index with the pinned expected/actual pair. */
+    private static void expectProjection(Outcome<Value> outcome, FailurePolicyId policy,
+                                         int templateIndex, String expected, String actual,
+                                         Map<String, String> metadata,
+                                         SourceOrigin origin, String note) {
+        expectProjection(outcome, policy, templateIndex, expected, actual, metadata,
+            origin, true, note);
+    }
+
+    private static void expectProjection(Outcome<Value> outcome, FailurePolicyId policy,
+                                         int templateIndex, String expected, String actual,
+                                         Map<String, String> metadata, SourceOrigin origin,
+                                         boolean compareExpectedActual, String note) {
         if (outcome instanceof Outcome.Failure<Value> failure) {
             SharedStdlibSemantics.StdlibFailure stdlibFailure = failure.failure();
             BoundaryFailure projection = stdlibFailure.failure();
             FailurePolicyRow row = FailureContractRegistry.row(policy);
-            String expectedMessage = BoundaryFailure.fromRow(row, 0, null, null,
-                metadata, null).message();
+            String expectedMessage = BoundaryFailure.fromRow(row, templateIndex, expected,
+                actual, metadata, null).message();
             boolean ok = projection.policy() == policy
                 && projection.code() == row.code()
                 && projection.message().equals(expectedMessage)
+                && (!compareExpectedActual
+                    || (java.util.Objects.equals(projection.expected(), expected)
+                        && java.util.Objects.equals(projection.actual(), actual)))
                 && projection.metadata().equals(metadata)
                 && projection.cause() == null
                 && stdlibFailure.origin().equals(origin);
@@ -352,7 +376,8 @@ public class StdlibFailureProjectionTest {
             }
             fail(note + " — projection mismatch: policy=" + projection.policy()
                 + " code=" + projection.code() + " message=\"" + projection.message()
-                + "\" metadata=" + projection.metadata()
+                + "\" expected=" + projection.expected() + " actual="
+                + projection.actual() + " metadata=" + projection.metadata()
                 + " origin=" + stdlibFailure.origin());
             return;
         }
@@ -399,22 +424,27 @@ public class StdlibFailureProjectionTest {
                 SharedStdlibSemantics.REASON_UNEXPECTED_END),
             origin(), "a missing array value reports the end-of-input defect");
 
-        // JSON_TO_ERROR: first declaration-order failure with
-        // {fieldPath}/{actual}.
+        // JSON_TO_ERROR: first declaration-order failure with the
+        // corpus-aligned rejection text; the walker's {fieldPath} stays
+        // internal metadata (never part of the visible projection).
         SemanticTable<Value> table = new SemanticTable<>();
         table.put("f", new Value.Other(ActualKind.FUNCTION, null));
         table.put("m", new Value.Other(ActualKind.MISSING, null));
         expectProjection(SharedStdlibSemantics.jsonStringify(origin(), table),
-            FailurePolicyId.JSON_TO_ERROR, Map.of("fieldPath", "f", "actual", "function"),
+            FailurePolicyId.JSON_TO_ERROR, 1,
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
+            Map.of("fieldPath", "f", "actual", "function"),
             origin(), "the first declaration-order failure wins with fieldPath f");
         SemanticTable<Value> nested = new SemanticTable<>();
         SemanticTable<Value> inner = new SemanticTable<>();
         inner.put("bad", new Value.Other(ActualKind.FUNCTION, null));
         nested.put("a", new Value.Table(inner));
         expectProjection(SharedStdlibSemantics.jsonStringify(origin(), nested),
-            FailurePolicyId.JSON_TO_ERROR, Map.of("fieldPath", "a.bad",
-                "actual", "function"),
-            origin(), "nested failures report the dot-separated path");
+            FailurePolicyId.JSON_TO_ERROR, 1,
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
+            Map.of("fieldPath", "a.bad", "actual", "function"),
+            origin(), "nested failures keep the dot-separated path as internal "
+                + "metadata");
 
         // SQRT_NEGATIVE: E8001, operation origin; NaN passes.
         expectProjection(SharedStdlibSemantics.mathSqrt(origin(), -4.0),
@@ -615,11 +645,38 @@ public class StdlibFailureProjectionTest {
                                        SemanticRuntimeModel.ConsumerRun run,
                                        String code, String message, String origin,
                                        List<String> frames, String what) {
+        expectTerminal(scenario, run, code, message, origin, frames, null, null, false,
+            what);
+    }
+
+    /**
+     * Asserts the oracle terminal of one scenario: the exact code,
+     * message, expected/actual pair, origin, no cause, and the active
+     * frame list.
+     */
+    private static void expectTerminal(Scenario scenario,
+                                       SemanticRuntimeModel.ConsumerRun run,
+                                       String code, String message, String origin,
+                                       List<String> frames, String expected,
+                                       String actual, String what) {
+        expectTerminal(scenario, run, code, message, origin, frames, expected, actual,
+            true, what);
+    }
+
+    private static void expectTerminal(Scenario scenario,
+                                       SemanticRuntimeModel.ConsumerRun run,
+                                       String code, String message, String origin,
+                                       List<String> frames, String expected,
+                                       String actual, boolean compareExpectedActual,
+                                       String what) {
         if (run.terminal()
                 instanceof SemanticRuntimeModel.Terminal.DealFailure terminal) {
             SemanticRuntimeModel.ErrorSnapshot error = terminal.error();
             boolean ok = error.code().equals(code)
                 && error.message().equals(message)
+                && (!compareExpectedActual
+                    || (java.util.Objects.equals(error.expected(), expected)
+                        && java.util.Objects.equals(error.actual(), actual)))
                 && (origin == null || origin.equals(error.origin()))
                 && error.frames().equals(frames)
                 && error.cause() == null;
@@ -628,7 +685,8 @@ public class StdlibFailureProjectionTest {
                 return;
             }
             fail(what + " — terminal mismatch: code=" + error.code() + " message=\""
-                + error.message() + "\" origin=" + error.origin() + " frames="
+                + error.message() + "\" expected=" + error.expected() + " actual="
+                + error.actual() + " origin=" + error.origin() + " frames="
                 + error.frames() + " cause=" + error.cause());
             return;
         }
@@ -772,7 +830,7 @@ public class StdlibFailureProjectionTest {
             if (call != null) {
                 SemanticRuntimeModel.ConsumerRun run =
                     SemanticOracle.execute(abs.unit(), abs.table());
-                expectTerminal(abs, run, "E8004", "int out of range",
+                expectTerminal(abs, run, "E8004", "int out of safe range",
                     originAtomOf(call), expectedFrames(abs, call),
                     "absInt of -2147483648 projects E8004 at the call origin");
             }
@@ -807,8 +865,9 @@ public class StdlibFailureProjectionTest {
                 SemanticRuntimeModel.ConsumerRun run =
                     SemanticOracle.execute(stringify.unit(), stringify.table());
                 expectTerminal(stringify, run, "E8001",
-                    "value at f is not JSON serializable: function",
+                    "unsupported type for JSON encoding: function",
                     originAtomOf(call), expectedFrames(stringify, call),
+                    SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
                     "the first declaration-order stringify failure projects "
                         + "JSON_TO_ERROR at the call origin");
             }
@@ -1117,12 +1176,16 @@ public class StdlibFailureProjectionTest {
         SemanticTable<Value> firstOrder = new SemanticTable<>();
         firstOrder.put("a", new Value.Other(ActualKind.FUNCTION, null));
         firstOrder.put("b", new Value.Other(ActualKind.MISSING, null));
-        String toErrorExpected = BoundaryFailure.fromRow(toErrorRow, 0, null, null,
+        String toErrorExpected = BoundaryFailure.fromRow(toErrorRow, 1,
+            SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED, "function",
             Map.of("fieldPath", "a", "actual", "function"), null).message();
         Outcome<Value> toErrorOutcome =
             SharedStdlibSemantics.jsonStringify(origin(), firstOrder);
         boolean firstWins = toErrorOutcome instanceof Outcome.Failure<Value> failure
             && failure.failure().failure().message().equals(toErrorExpected)
+            && SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED.equals(
+                failure.failure().failure().expected())
+            && "function".equals(failure.failure().failure().actual())
             && failure.failure().failure().metadata().equals(
                 Map.of("fieldPath", "a", "actual", "function"));
         check(firstWins,
