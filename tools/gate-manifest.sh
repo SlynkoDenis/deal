@@ -675,4 +675,19 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # previously pinned value-read E6005 assertions assert the realized
   # behavior, and the landed async-entry matrix stays registered).
   'fg|=== Running Read-Value Integration Verification Tests (ISSUE-0649) ===|java -ea -cp build deal.test.ReadValueIntegrationVerificationTest'
+  # ISSUE-0651 registration: the sync host call arms and the
+  # host-boundary crossings (host-module-load-and-host-call-realization
+  # H3, H7, the sync host call contract, and the host-boundary carrier
+  # projection contract; semantic-ir-construct-coverage-cutover K4;
+  # luajit-jvm-single-lowering-production-cutover C2; sequencing step 2):
+  # the CALL(HOST)/CALL(INDIRECT) and CALLBACK_INVOKE host arms on both
+  # targets (the LuaJIT .f invocation with the trailing span triplet and
+  # the pinned E8010 parameter/return cells at the call origin; the JVM
+  # per-export wrapper with the import's origin triple), the H7 crossing
+  # projection (the $DealRt function bridges, the declared element-shape
+  # array carriers with the normal-return copy-back, the declared-return
+  # materialization), and the admitted sync host fixture set executed
+  # end-to-end under luajit and javac --release 25 -proc:none + java with
+  # the sidecar-pinned outcomes and origins.
+  'fg|=== Running Sync Host Call Realization Tests (ISSUE-0651) ===|java -ea -cp build deal.test.HostCallRealizationTest'
 )

@@ -32,6 +32,7 @@ import deal.semantic.ir.SemanticOpKind;
 import deal.semantic.ir.SourceSpan;
 import deal.semantic.ir.StructuredBodyTable;
 import deal.semantic.ir.ValueId;
+import deal.types.Type;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -336,7 +337,7 @@ public final class JvmSemanticEmitter {
                 String className, HostDeclarationSurface hostSurface) {
             this.hostAbi = hostSurface == null ? null
                 : new JvmHostAbiEmission(JvmHostAbiEmission.collect(
-                    project, hostSurface));
+                    project, hostSurface), className);
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -1819,12 +1820,18 @@ public final class JvmSemanticEmitter {
                 out.append(indent(indent)).append("  Object __mr_")
                     .append(boundary.opId().id()).append(";\n");
                 out.append(indent(indent)).append("  try {\n");
-                out.append(indent(indent)).append("    __mr_")
-                    .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(");\n");
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    out.append(indent(indent)).append("    __mr_")
+                        .append(boundary.opId().id()).append(" = ")
+                        .append("true ? ").append(target).append(" : null;\n");
+                } else {
+                    out.append(indent(indent)).append("    __mr_")
+                        .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
+                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                        .append(", ")
+                        .append(javaString(staticKind(boundaryPayload.descriptor())))
+                        .append(", ").append(target).append(");\n");
+                }
                 out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("    JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -1936,16 +1943,38 @@ public final class JvmSemanticEmitter {
                 // boundary FAILURE and the op FAILURE events with the
                 // boundary origin (a wrong present kind fails the
                 // differential verdict even with coincidental output).
+                // A function-typed contextual position (ISSUE-0651) admits
+                // the closed function carriers — the production
+                // FunctionValue/AdapterValue carrier and the host-facing
+                // wrapper — whose declared-signature authority is the
+                // crossing cell (the pinned E8010 parameter text at the
+                // call origin), never this contextual read; a non-function
+                // value still fails the row's E8001.
                 String checkedName = "__orb_" + boundary.opId().id();
                 String errorName = "__obe_" + boundary.opId().id();
                 String rebuiltName = "__obe2_" + boundary.opId().id();
                 out.append(indent(indent)).append("try {\n");
-                out.append(indent(indent + 1)).append("Object ").append(checkedName)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(");\n");
+                if (isFunctionDescriptor(boundaryPayload.descriptor())) {
+                    out.append(indent(indent + 1)).append("Object ")
+                        .append(checkedName).append(" = (").append(target)
+                        .append(" == null || ").append(target)
+                        .append(" instanceof JvmRuntime.FunctionValue")
+                        .append(hostAbi == null ? ""
+                            : " || " + target + " instanceof $DealRt.FnValue")
+                        .append(") ? ").append(target)
+                        .append(" : JvmRuntime.bcheck(")
+                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                        .append(", ")
+                        .append(javaString(staticKind(boundaryPayload.descriptor())))
+                        .append(", ").append(target).append(");\n");
+                } else {
+                    out.append(indent(indent + 1)).append("Object ")
+                        .append(checkedName).append(" = JvmRuntime.bcheck(")
+                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                        .append(", ")
+                        .append(javaString(staticKind(boundaryPayload.descriptor())))
+                        .append(", ").append(target).append(");\n");
+                }
                 out.append(indent(indent + 1)).append(target).append(" = ")
                     .append(checkedName).append(";\n");
                 out.append(indent(indent)).append("} catch (JvmRuntime.DealError ")
@@ -1967,6 +1996,29 @@ public final class JvmSemanticEmitter {
                 emitBoundarySuccess(boundary, target, boundaryPayload.descriptor(), indent);
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /** Whether one boundary descriptor is a function type (nullable unwrapped). */
+        private boolean isFunctionDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Func;
+        }
+
+        /** Whether one boundary descriptor is an array type (nullable unwrapped). */
+        private boolean isArrayDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Array;
+        }
+
+        /**
+         * Whether one boundary descriptor is a composite value type whose
+         * contextual read defers its shape check to the consuming declared
+         * cell (ISSUE-0651: the function and array carriers).
+         */
+        private boolean defersContextualCheck(RuntimeDescriptor descriptor) {
+            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor);
         }
 
         /**
@@ -2751,6 +2803,21 @@ public final class JvmSemanticEmitter {
             KindPayload.CallPayload payload = (KindPayload.CallPayload) op.payload();
             FunctionExecutionBinding binding = callBinding(payload);
             emitStart(op, indent);
+            // The host arms (ISSUE-0651; host-module-load-and-host-call-
+            // realization H3 and the sync host call contract): the loaded
+            // surface entry is invoked through the emitted per-export
+            // wrapper and the boundary children's events surround the
+            // checks. The wrapper is the single check authority for the
+            // host cells: the arm runs no generic descriptor-kind check on
+            // the DEAL_TO_HOST/HOST_TO_DEAL cells.
+            if (binding instanceof FunctionExecutionBinding.HostFunction host) {
+                emitHostCall(op, payload, host.hostModuleId(), host.exportName(), indent);
+                return;
+            }
+            if (binding instanceof FunctionExecutionBinding.HostFunctionValue hostValue) {
+                emitHostValueCall(op, payload, hostValue, indent);
+                return;
+            }
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp boundary = opsById.get(boundaryId);
                 KindPayload.BoundaryPayload boundaryPayload =
@@ -2866,6 +2933,288 @@ public final class JvmSemanticEmitter {
                     + " resolves no FunctionExecutionBinding (producer defect)");
             }
             return binding;
+        }
+
+        /**
+         * The sync host call arm (ISSUE-0651;
+         * {@code host-module-load-and-host-call-realization} H3/H7 and the
+         * sync host call contract): every declared parameter cell runs in
+         * one-based order through the emitted host-check seam (the same
+         * rule the wrapper's own cell runs, so the pinned E8010
+         * {@code parameter {i} type mismatch} projection surfaces at the
+         * call origin), each checked value is projected into its declared
+         * host-facing carrier (H7: the per-signature function bridge, the
+         * declared element-shape array carrier), the emitted per-export
+         * wrapper is invoked with the import's origin triple, and the
+         * declared return value is projected back into the production
+         * value carriers. The wrapper is the single check authority for
+         * the host cells: this arm runs no generic descriptor-kind check
+         * on the DEAL_TO_HOST/HOST_TO_DEAL cells. A declared array
+         * parameter's host element writes are copied back into the
+         * production array only after a normal return (a failed call
+         * copies nothing back). A DEAL error the host raises propagates
+         * unchanged.
+         */
+        private void emitHostCall(SemanticOp op, KindPayload.CallPayload payload,
+                ModuleId hostModuleId, String exportName, int indent) {
+            if (hostAbi == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " resolves the host export '" + hostModuleId.path() + "."
+                    + exportName + "' but the session carries no host ABI"
+                    + " emission surface (a producer defect; only the"
+                    + " production project entry carries the compile's"
+                    + " declaration surface)");
+            }
+            String wrapper = hostAbi.requireWrapper(hostModuleId.path(), exportName);
+            Type.Func declared = hostAbi.declaredFunction(hostModuleId.path(),
+                exportName);
+            HostCallArguments arguments = emitHostArguments(op, payload, declared, indent);
+            StringBuilder call = new StringBuilder(wrapper).append('(');
+            for (String projected : arguments.projected()) {
+                call.append(projected).append(", ");
+            }
+            call.append(originArgs(op)).append(')');
+            finishHostCall(op, payload, declared, arguments, call.toString(), true,
+                indent);
+        }
+
+        /**
+         * The {@code HostFunctionValue} indirect call arm: the value
+         * materialized at its producing host crossing ({@code
+         * host-module-load-and-host-call-realization} H3/H5/H7) is
+         * invoked through the production function carrier the crossing's
+         * declared-return projection published, with the same declared
+         * parameter cells and the pinned E8010 texts at the call origin.
+         */
+        private void emitHostValueCall(SemanticOp op, KindPayload.CallPayload payload,
+                FunctionExecutionBinding.HostFunctionValue hostValue, int indent) {
+            if (hostAbi == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " resolves the host-materialized function value of module '"
+                    + hostValue.hostModuleId().path() + "' but the session carries"
+                    + " no host ABI emission surface (a producer defect)");
+            }
+            Type.Func declared = hostAbi.declaredFunctionValue(
+                hostValue.descriptor().canonicalSpecText());
+            SemanticOp crossing = opsById.get(hostValue.materializingBoundaryOpId());
+            if (crossing == null
+                    || !(crossing.payload() instanceof KindPayload.BoundaryPayload boundary)) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " names the materializing host crossing "
+                    + hostValue.materializingBoundaryOpId()
+                    + ", which is not a boundary op of the emitted closure"
+                    + " (a producer defect)");
+            }
+            String value = slot(boundary.input());
+            HostCallArguments arguments = emitHostArguments(op, payload, declared, indent);
+            StringBuilder call = new StringBuilder("((JvmRuntime.FunctionValue) ")
+                .append(value).append(").fn.invoke(new java.lang.Object[]{ ");
+            for (int i = 0; i < arguments.projected().size(); i++) {
+                if (i > 0) {
+                    call.append(", ");
+                }
+                call.append(arguments.projected().get(i));
+            }
+            call.append(" })");
+            finishHostCall(op, payload, declared, arguments, call.toString(), false,
+                indent);
+        }
+
+        /** The projected argument names, array carriers, and array parameters of one host call. */
+        private record HostCallArguments(List<String> projected, List<String> carriers,
+            List<String> arrays, List<String> arrayCarriers) {
+        }
+
+        /**
+         * The declared parameter cells of one host call: one-based order,
+         * each cell through the emitted host-check seam with the pinned
+         * E8010 projection at the call origin, then the host-facing
+         * crossing projection (H7).
+         */
+        private HostCallArguments emitHostArguments(SemanticOp op,
+                KindPayload.CallPayload payload, Type.Func declared, int indent) {
+            List<String> projected = new ArrayList<>();
+            List<String> carriers = new ArrayList<>();
+            List<String> arrays = new ArrayList<>();
+            List<String> arrayCarriers = new ArrayList<>();
+            int index = 1;
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp boundary = opsById.get(boundaryId);
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String input = slot(boundaryPayload.input());
+                Type declaredParameter = index - 1 < declared.paramTypes().size()
+                    ? declared.paramTypes().get(index - 1) : null;
+                String desc = declaredParameter == null
+                    ? boundaryPayload.descriptor().canonicalSpecText()
+                    : JvmHostAbiEmission.descriptorText(declaredParameter);
+                emitBoundaryStart(boundary, input, boundaryPayload.descriptor(), indent);
+                String checked = "__hp_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(checked)
+                    .append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(checked)
+                    .append(" = __hostParamCheck(").append(index).append(", ")
+                    .append(javaString(desc)).append(", ").append(input)
+                    .append(", ").append(originArgs(op)).append(");\n");
+                out.append(indent(indent))
+                    .append("} catch (JvmRuntime.DealError __be) {\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                out.append(indent(indent)).append("  throw __be;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor(),
+                    indent);
+                String value = "__hq_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(value)
+                    .append(" = __hostProjectArg(").append(javaString(desc))
+                    .append(", ").append(checked).append(");\n");
+                projected.add(value);
+                if (declaredParameter != null
+                        && innerOf(declaredParameter) instanceof Type.Array) {
+                    // The copy-back target is the production array the
+                    // crossing materialized the carrier from, and the source
+                    // is the projected carrier the host method received.
+                    arrays.add(checked);
+                    carriers.add(desc);
+                    arrayCarriers.add(value);
+                }
+                index++;
+            }
+            return new HostCallArguments(List.copyOf(projected), List.copyOf(carriers),
+                List.copyOf(arrays), List.copyOf(arrayCarriers));
+        }
+
+        /**
+         * The call half of one host arm: the invocation under the op's
+         * FAILURE events, the declared return value's production
+         * projection, the normal-return copy-back of the declared array
+         * parameters, and the return boundary's events.
+         */
+        private void finishHostCall(SemanticOp op, KindPayload.CallPayload payload,
+                Type.Func declared, HostCallArguments arguments, String invocation,
+                boolean targetChecksReturn, int indent) {
+            Type declaredReturn = declared.returnType();
+            String result = "__hr_" + op.opId().id();
+            String call = targetChecksReturn ? invocation
+                : "__hostCheck("
+                    + javaString(JvmHostAbiEmission.descriptorText(declaredReturn))
+                    + ", " + invocation + ", false, " + originArgs(op) + ")";
+            if (declaredReturn instanceof Type.Null) {
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(call).append(";\n");
+                emitHostCallCatch(op, payload, indent);
+                out.append(indent(indent)).append("Object ").append(result)
+                    .append(" = null;\n");
+            } else {
+                String carrier = hostAbi.needsReturnProjection(declaredReturn)
+                    ? "java.lang.Object"
+                    : hostAbi.carrierType(declaredReturn,
+                        declaredReturn instanceof Type.Nullable);
+                String held = "__hw_" + op.opId().id();
+                out.append(indent(indent)).append(carrier).append(" ").append(held)
+                    .append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(held).append(" = ")
+                    .append(call).append(";\n");
+                emitHostCallCatch(op, payload, indent);
+                out.append(indent(indent)).append("Object ").append(result)
+                    .append(" = ").append(productionValueOf(declaredReturn, held))
+                    .append(";\n");
+            }
+            for (int i = 0; i < arguments.arrays().size(); i++) {
+                out.append(indent(indent)).append("__hostArrayCopyBack(")
+                    .append(javaString(arguments.carriers().get(i))).append(", ")
+                    .append(arguments.arrayCarriers().get(i))
+                    .append(", (JvmRuntime.Array) ")
+                    .append(arguments.arrays().get(i)).append(");\n");
+            }
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
+                : opsById.get(payload.returnBoundaryOpId());
+            if (returnBoundary != null && !(declaredReturn instanceof Type.Null)) {
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) returnBoundary.payload();
+                emitBoundaryStart(returnBoundary, result,
+                    boundaryPayload.descriptor(), indent);
+                emitBoundarySuccess(returnBoundary, result,
+                    boundaryPayload.descriptor(), indent);
+            }
+            out.append(indent(indent)).append(slot((ValueId) op.result())).append(" = ")
+                .append(result).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The catch half of one host call: the op FAILURE (and, for the
+         * wrapper's declared-return cell, the return boundary's FAILURE)
+         * with the wrapper's own error, then the identical rethrow — a
+         * DEAL error the host raises propagates unchanged.
+         */
+        private void emitHostCallCatch(SemanticOp op, KindPayload.CallPayload payload,
+                int indent) {
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
+                : opsById.get(payload.returnBoundaryOpId());
+            if (returnBoundary != null) {
+                out.append(indent(indent)).append("  if (\"E8010\".equals(__e.code)"
+                    + " && __e.msg != null && __e.msg.startsWith(\"return value 1"
+                    + " type mismatch\")) {\n");
+                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                    "JvmRuntime.errtext(__e)", indent + 2);
+                out.append(indent(indent)).append("  }\n");
+            }
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__e)", indent + 1);
+            out.append(indent(indent)).append("  throw __e;\n");
+            out.append(indent(indent)).append("}\n");
+        }
+
+        /** The declared inner type of one position (nullable unwrapped). */
+        private static Type innerOf(Type type) {
+            return type instanceof Type.Nullable nullable ? nullable.inner() : type;
+        }
+
+        /**
+         * The production value carrier of one declared host return: the
+         * host-facing scalar carriers are the production carriers (an
+         * {@code int} is a {@code Long}, a {@code number} a
+         * {@code Double}), the projected array/function returns are
+         * already production values, and a nullable position keeps the
+         * language null.
+         */
+        private String productionValueOf(Type declaredReturn, String expression) {
+            Type inner = innerOf(declaredReturn);
+            boolean nullable = declaredReturn instanceof Type.Nullable;
+            if (inner instanceof Type.Int) {
+                return nullable
+                    ? "(" + expression + " == null ? null :"
+                        + " java.lang.Long.valueOf(((java.lang.Number) "
+                        + expression + ").longValue()))"
+                    : "java.lang.Long.valueOf(" + expression + ")";
+            }
+            if (inner instanceof Type.Number) {
+                return nullable
+                    ? "(" + expression + " == null ? null : java.lang.Double.valueOf("
+                        + "((java.lang.Number) " + expression + ").doubleValue()))"
+                    : "java.lang.Double.valueOf(" + expression + ")";
+            }
+            if (inner instanceof Type.Boolean && !nullable) {
+                return "java.lang.Boolean.valueOf(" + expression + ")";
+            }
+            return expression;
+        }
+
+        /** The origin-argument triplet of a wrapper invocation. */
+        private String originArgs(SemanticOp op) {
+            SourceSpan span = op.origin().span();
+            if (span == null) {
+                return "\"-\", 0, 0";
+            }
+            return javaString(op.origin().sourceId()) + ", " + span.startLine()
+                + ", " + span.startColumn();
         }
 
         /**
@@ -4168,6 +4517,33 @@ public final class JvmSemanticEmitter {
                     out.append(indent(indent)).append("    throw __e;\n");
                     out.append(indent(indent)).append("  }\n");
                 }
+                case FunctionExecutionBinding.HostFunction host ->
+                    emitHostCallbackInvoke(op, payload,
+                        hostAbi.requireWrapper(host.hostModuleId().path(),
+                            host.exportName()), indent);
+                case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                    SemanticOp crossing = opsById.get(
+                        hostValue.materializingBoundaryOpId());
+                    if (crossing == null
+                            || !(crossing.payload()
+                                instanceof KindPayload.BoundaryPayload boundary)) {
+                        throw new IllegalStateException("CALLBACK_INVOKE "
+                            + op.opId() + " names the materializing host crossing "
+                            + hostValue.materializingBoundaryOpId()
+                            + ", which is not a boundary op of the emitted closure"
+                            + " (a producer defect)");
+                    }
+                    emitHostCallbackValue(op, payload, slot(boundary.input()), indent);
+                }
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
+                    throw new IllegalStateException("CALLBACK_INVOKE " + op.opId()
+                        + " resolves the " + intrinsic.kind() + " intrinsic carrier"
+                        + " (the intrinsic carrier is the function-typed-value"
+                        + " child's — a fail-closed producer defect)");
+                case FunctionExecutionBinding.ExternalFunction external ->
+                    throw new IllegalStateException("CALLBACK_INVOKE " + op.opId()
+                        + " resolves an external binding outside the statically-"
+                        + "resolved slice (a fail-closed producer defect)");
                 default -> throw new IllegalStateException("CALLBACK_INVOKE "
                     + op.opId() + " resolves a binding outside the statically-resolved "
                     + "slice: " + binding);
@@ -4183,6 +4559,109 @@ public final class JvmSemanticEmitter {
             }
             out.append(indent(indent)).append("  return __res;\n");
             out.append(indent(indent)).append("}\n");
+        }
+
+        /**
+         * The host {@code CALLBACK_INVOKE} arm (ISSUE-0651;
+         * {@code host-module-load-and-host-call-realization} H3 and the sync
+         * host call contract): the callback record's bound value resolves
+         * to a declared host export, so the host-driven invocation runs the
+         * emitted per-export wrapper with the {@code HOST_TO_DEAL} checked
+         * arguments and the callback op's own origin, then the callback
+         * op's own return projection (its single return boundary child).
+         */
+        private void emitHostCallbackInvoke(SemanticOp op,
+                KindPayload.CallbackInvokePayload payload, String wrapper, int indent) {
+            StringBuilder call = new StringBuilder(wrapper).append('(');
+            for (int i = 0; i < payload.parameterBoundaryOpIds().size(); i++) {
+                SemanticOp boundary = opsById.get(payload.parameterBoundaryOpIds().get(i));
+                call.append("__cb_").append(boundary.opId().id()).append(", ");
+            }
+            call.append(originArgs(op)).append(')');
+            out.append(indent(indent)).append("  try {\n");
+            out.append(indent(indent)).append("    __res = ").append(call)
+                .append(";\n");
+            out.append(indent(indent))
+                .append("  } catch (JvmRuntime.DealError __e) {\n");
+            if (trace) {
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__e)", indent + 2);
+            }
+            out.append(indent(indent)).append("    throw __e;\n");
+            out.append(indent(indent)).append("  }\n");
+            emitCallbackReturnCell(op, payload, indent);
+        }
+
+        /**
+         * The host-materialized {@code CALLBACK_INVOKE} arm: the value the
+         * callback record's producing host crossing published is invoked
+         * through its production function carrier with the same declared
+         * cells and the callback op's own return projection.
+         */
+        private void emitHostCallbackValue(SemanticOp op,
+                KindPayload.CallbackInvokePayload payload, String value, int indent) {
+            out.append(indent(indent)).append("  try {\n");
+            out.append(indent(indent)).append("    __res = ((JvmRuntime.FunctionValue) ")
+                .append(value).append(").fn.invoke(new Object[]{");
+            for (int i = 0; i < payload.parameterBoundaryOpIds().size(); i++) {
+                if (i > 0) {
+                    out.append(", ");
+                }
+                SemanticOp boundary = opsById.get(payload.parameterBoundaryOpIds().get(i));
+                out.append("__cb_").append(boundary.opId().id());
+            }
+            out.append("});\n");
+            out.append(indent(indent))
+                .append("  } catch (JvmRuntime.DealError __e) {\n");
+            if (trace) {
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__e)", indent + 2);
+            }
+            out.append(indent(indent)).append("    throw __e;\n");
+            out.append(indent(indent)).append("  }\n");
+            emitCallbackReturnCell(op, payload, indent);
+        }
+
+        /** The callback op's own single return boundary cell, when recorded. */
+        private void emitCallbackReturnCell(SemanticOp op,
+                KindPayload.CallbackInvokePayload payload, int indent) {
+            if (payload.returnBoundaryOpId() == null) {
+                return;
+            }
+            SemanticOp boundary = opsById.get(payload.returnBoundaryOpId());
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) boundary.payload();
+            emitBoundaryStartAtom(boundary, "JvmRuntime.atom(__res, "
+                + javaString(staticKind(boundaryPayload.descriptor())) + ")", indent);
+            String checked = "__cbr_" + boundary.opId().id();
+            out.append(indent(indent)).append("  Object ").append(checked)
+                .append(";\n");
+            out.append(indent(indent)).append("  try {\n");
+            out.append(indent(indent)).append("    ").append(checked)
+                .append(" = JvmRuntime.bcheck(")
+                .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(javaString(staticKind(boundaryPayload.descriptor())))
+                .append(", __res);\n");
+            out.append(indent(indent))
+                .append("  } catch (JvmRuntime.DealError __be) {\n");
+            out.append(indent(indent))
+                .append("    JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                    + "__be.code, __be.msg, ")
+                .append(javaString(originOf(boundary)))
+                .append(", __be.expected, __be.actual, __be.frames, null);\n");
+            if (trace) {
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__bre)", indent + 2);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__bre)", indent + 2);
+            }
+            out.append(indent(indent)).append("    throw __bre;\n");
+            out.append(indent(indent)).append("  }\n");
+            emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor(),
+                indent + 1);
+            out.append(indent(indent)).append("  __res = ").append(checked)
+                .append(";\n");
         }
 
         // -- async (E4, D13) ----------------------------------------------------------

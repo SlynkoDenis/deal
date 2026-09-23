@@ -81,16 +81,27 @@ final class JvmHostAbiEmission {
     }
 
     private final List<HostModule> modules;
+    /**
+     * The production artifact's top-level class name (the crossing
+     * bridges' host-to-DEAL delegation target): the emitted bridge
+     * classes live in the {@code $DealRt} scope, so they name the class
+     * explicitly.
+     */
+    private final String artifactClass;
     /** The per-signature wrapper classes by shape id (declaration order). */
     private final Map<String, Type.Func> shapes = new LinkedHashMap<>();
     /** The synthesized records by simple name (declaration order). */
     private final Map<String, RecordInfo> records = new LinkedHashMap<>();
     /** The per-class array-wrapper simple names by class-carrying specifier/name key. */
     private final Map<String, String> classArrayWrappers = new LinkedHashMap<>();
+    /** The declared array descriptor → element type (the crossing source). */
+    private final Map<String, Type> arrayElements = new LinkedHashMap<>();
 
-    JvmHostAbiEmission(List<HostModule> modules) {
+    JvmHostAbiEmission(List<HostModule> modules, String artifactClass) {
         this.modules = List.copyOf(Objects.requireNonNull(modules,
             "modules must not be null"));
+        this.artifactClass = Objects.requireNonNull(artifactClass,
+            "artifactClass must not be null");
         for (HostModule module : this.modules) {
             for (Map.Entry<String, HostDeclarationSurface.DeclaredClass> entry
                     : module.facts().classes().entrySet()) {
@@ -101,6 +112,32 @@ final class JvmHostAbiEmission {
             for (Map.Entry<String, Type> export
                     : module.facts().exports().entrySet()) {
                 collectType(module, export.getValue());
+                collectArrayElement(export.getValue());
+            }
+            for (HostDeclarationSurface.DeclaredClass declared
+                    : module.facts().classes().values()) {
+                for (HostDeclarationSurface.DeclaredField field : declared.fields()) {
+                    collectArrayElement(field.type());
+                }
+            }
+        }
+    }
+
+    /** Collects every declared array position's element type (the crossing shapes). */
+    private void collectArrayElement(Type type) {
+        switch (type) {
+            case Type.Nullable nullable -> collectArrayElement(nullable.inner());
+            case Type.Func func -> {
+                for (Type param : func.paramTypes()) {
+                    collectArrayElement(param);
+                }
+                collectArrayElement(func.returnType());
+            }
+            case Type.Array array -> {
+                arrayElements.putIfAbsent(descriptorText(array), array.element());
+                collectArrayElement(array.element());
+            }
+            default -> {
             }
         }
     }
@@ -448,9 +485,111 @@ final class JvmHostAbiEmission {
         return sb.append('"').toString();
     }
 
+    /**
+     * The per-export wrapper name of one resolved host module and declared
+     * function export: the emitted surface entry the sync host arms invoke.
+     * A call whose resolved module or export has no emitted wrapper is a
+     * fail-closed producer defect — never a silent call.
+     */
+    String requireWrapper(String modulePath, String exportName) {
+            for (HostModule module : modules) {
+                if (!module.modulePath().equals(modulePath)) {
+                    continue;
+                }
+                for (Map.Entry<String, Type> export
+                        : module.facts().exports().entrySet()) {
+                    if (export.getKey().equals(exportName)
+                            && export.getValue() instanceof Type.Func) {
+                        return wrapperName(key(modulePath), exportName);
+                    }
+                }
+            }
+            throw new IllegalStateException("the host call resolves '" + modulePath
+                + "." + exportName + "' but the emitted host ABI surface carries"
+                + " no per-export wrapper for it (a producer defect)");
+        }
+
+    /**
+     * The declared signature of one host module's function export: the
+     * declaration surface's own type (the H7 crossing projection's single
+     * declared-type source). A missing module or export is the same
+     * fail-closed producer defect as {@link #requireWrapper}.
+     */
+    Type.Func declaredFunction(String modulePath, String exportName) {
+            for (HostModule module : modules) {
+                if (!module.modulePath().equals(modulePath)) {
+                    continue;
+                }
+                Type declared = module.facts().exports().get(exportName);
+                if (declared instanceof Type.Func func) {
+                    return func;
+                }
+            }
+            throw new IllegalStateException("the host call resolves '" + modulePath
+                + "." + exportName + "' but the declaration surface carries no"
+                + " declared function export for it (a producer defect)");
+        }
+
+    /**
+     * The declared signature of one host-materialized function value's
+     * crossing descriptor (a function-typed {@code HOST_TO_DEAL} return
+     * position of a declared host export): the declaration surface's own
+     * type, the H7 projection's single declared-type source. A crossing
+     * descriptor with no declared position is a fail-closed producer
+     * defect.
+     */
+    Type.Func declaredFunctionValue(String descriptorText) {
+        for (HostModule module : modules) {
+            for (Type export : module.facts().exports().values()) {
+                Type.Func found = findDeclaredFunction(export, descriptorText);
+                if (found != null) {
+                    return found;
+                }
+            }
+            for (HostDeclarationSurface.DeclaredClass declared
+                    : module.facts().classes().values()) {
+                for (HostDeclarationSurface.DeclaredField field : declared.fields()) {
+                    Type.Func found = findDeclaredFunction(field.type(), descriptorText);
+                    if (found != null) {
+                        return found;
+                    }
+                }
+            }
+        }
+        throw new IllegalStateException("the host-materialized function value of"
+            + " descriptor '" + descriptorText + "' has no declared function"
+            + " position in the compile's declaration surface (a producer defect)");
+    }
+
+    private static Type.Func findDeclaredFunction(Type type, String descriptorText) {
+        switch (type) {
+            case Type.Nullable nullable -> {
+                return findDeclaredFunction(nullable.inner(), descriptorText);
+            }
+            case Type.Array array -> {
+                return findDeclaredFunction(array.element(), descriptorText);
+            }
+            case Type.Func func -> {
+                if (descriptorText(func).equals(descriptorText)) {
+                    return func;
+                }
+                for (Type param : func.paramTypes()) {
+                    Type.Func found = findDeclaredFunction(param, descriptorText);
+                    if (found != null) {
+                        return found;
+                    }
+                }
+                return findDeclaredFunction(func.returnType(), descriptorText);
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
     // =========================================================================
     // Emission: the artifact's host ABI class members
-    // =========================================================================
+    // =========================================================================================================================================
 
     /**
      * Emits the host ABI class members of the production artifact: the
@@ -486,6 +625,7 @@ final class JvmHostAbiEmission {
             emitWrappers(out, module);
         }
         emitSeams(out);
+        emitCrossings(out);
     }
 
     /**
@@ -589,6 +729,13 @@ final class JvmHostAbiEmission {
                     .append(javaString(descriptorText(func.paramTypes().get(i))))
                     .append(", __a").append(i)
                     .append(", oFile, oLine, oCol);\n");
+                // The host-facing projection of the checked parameter (H7):
+                // the declared carrier class at the crossing, never the
+                // production value carrier.
+                out.append("    __a").append(i)
+                    .append(" = __hostProjectArg(")
+                    .append(javaString(descriptorText(func.paramTypes().get(i))))
+                    .append(", __a").append(i).append(");\n");
             }
             out.append("    java.lang.Object __r = __hostInvoke(")
                 .append(methodField(key, export.getKey()))
@@ -604,8 +751,24 @@ final class JvmHostAbiEmission {
         if (type instanceof Type.Null) {
             return "void";
         }
+        if (needsReturnProjection(type)) {
+            return "java.lang.Object";
+        }
         boolean nullable = type instanceof Type.Nullable;
         return carrierType(type, nullable);
+    }
+
+    /**
+     * Whether one declared return position needs the host-to-DEAL
+     * projection at the crossing (H7): a declared array or function
+     * return is materialized back into the production value carriers
+     * (a {@link JvmRuntime.Array} / the bridged production function
+     * carrier) instead of the host-facing carrier class. Every other
+     * position's carrier is the production value itself.
+     */
+    boolean needsReturnProjection(Type type) {
+        Type inner = unwrapNullable(type);
+        return inner instanceof Type.Array || inner instanceof Type.Func;
     }
 
     /** The declared return cell of one wrapper. */
@@ -641,6 +804,14 @@ final class JvmHostAbiEmission {
         }
         String checked = "__hostCheck(" + javaString(desc)
             + ", __r, false, oFile, oLine, oCol)";
+        if (needsReturnProjection(ret)) {
+            // The host-to-DEAL crossing (H7): the declared array carrier is
+            // materialized back into the production array carrier and a
+            // declared function value into the bridged production carrier.
+            out.append("    return __hostToDeal(").append(javaString(desc))
+                .append(", ").append(checked).append(");\n");
+            return;
+        }
         String carrier = carrierType(ret, nullable);
         out.append("    return ").append(castExpression(carrier, checked))
             .append(";\n");
@@ -719,6 +890,7 @@ final class JvmHostAbiEmission {
         out.append("  }\n\n");
         out.append("  static java.lang.String __hostInnerMessage(java.lang.String d, "
             + "java.lang.Object v, JvmRuntime.DealError inner) {\n");
+        out.append("    if (d.startsWith(\"?\")) return __hostInnerMessage(d.substring(1), v, inner);\n");
         out.append("    if (inner != null && (\"E8010\".equals(inner.code) || \"E8003\".equals(inner.code))) return inner.msg;\n");
         out.append("    if (d.startsWith(\"[\")) return \"expected array\";\n");
         out.append("    if (d.startsWith(\"(\") || d.startsWith(\"async(\")) return \"expected function\";\n");
@@ -779,6 +951,272 @@ final class JvmHostAbiEmission {
         out.append("      throw JvmRuntime.fail(\"E8010\", \"host function invocation failed: \" + __e, oFile + \":\" + oLine + \":\" + oCol, null, null);\n");
         out.append("    }\n");
         out.append("  }\n\n");
+    }
+
+    // =========================================================================
+    // Emission: the host-boundary crossing projections (H7)
+    // =========================================================================
+
+    /**
+     * Emits the host-boundary crossing projections (ISSUE-0651;
+     * {@code host-module-load-and-host-call-realization} H7 and the
+     * host-boundary carrier projection contract): the DEAL-to-host
+     * parameter projection (the declared host-facing carrier: the
+     * per-signature function bridge and the declared element-shape array
+     * carrier), the host-to-DEAL declared-return projection (the
+     * production function carrier and the materialized
+     * {@link JvmRuntime.Array}), and the normal-return copy-back of a
+     * declared array parameter's host element writes. The declared
+     * descriptor already fixed the carrier class, so every projection is
+     * a per-crossing materialization, never a runtime path selection.
+     */
+    private void emitCrossings(StringBuilder out) {
+        out.append("  // ---- The host-boundary crossing projections (ISSUE-0651; H7) ----\n");
+        out.append("  static java.lang.Object __hostProjectArg(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
+        out.append("    if (inner.startsWith(\"(\") || inner.startsWith(\"async(\")) return __hostFnCarrier(inner, v);\n");
+        out.append("    if (inner.startsWith(\"[\")) return __hostArrayFromDeal(d, v);\n");
+        out.append("    if (inner.equals(\"int\")) return java.lang.Integer.valueOf(((java.lang.Number) v).intValue());\n");
+        out.append("    if (inner.equals(\"number\")) return java.lang.Double.valueOf(((java.lang.Number) v).doubleValue());\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        out.append("  static java.lang.Object __hostToDeal(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
+        out.append("    if (inner.startsWith(\"(\") || inner.startsWith(\"async(\")) return __hostFnToDeal(inner, v);\n");
+        out.append("    if (inner.startsWith(\"[\")) return __hostArrayToDeal(d, v);\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        emitFunctionCrossings(out);
+        emitArrayCrossings(out);
+    }
+
+    /**
+     * The function-position projections: DEAL-to-host materializes the
+     * declared per-signature bridge over the production carrier (the
+     * bridge runs the carrier and applies the declared return cell),
+     * host-to-DEAL republishes the bridged production carrier — the
+     * identical value for a value that crossed out and back — and adapts
+     * a foreign wrapper whose descriptor text is byte-equal. A raw host
+     * function value is never adapted.
+     */
+    private void emitFunctionCrossings(StringBuilder out) {
+        out.append("  static java.lang.Object __hostFnCarrier(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        out.append("    if (v instanceof JvmRuntime.FunctionValue __fv) {\n");
+        for (Map.Entry<String, Type.Func> shape : shapes.entrySet()) {
+            out.append("      if (d.equals(").append(javaString(descriptorText(shape.getValue())))
+                .append(")) return new $DealRt.__Bridge$").append(shape.getKey())
+                .append("(__fv);\n");
+        }
+        out.append("    }\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        out.append("  static java.lang.Object __hostFnToDeal(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        for (Map.Entry<String, Type.Func> shape : shapes.entrySet()) {
+            String desc = javaString(descriptorText(shape.getValue()));
+            String shapeId = shape.getKey();
+            out.append("    if (d.equals(").append(desc).append(")) {\n");
+            out.append("      if (v instanceof $DealRt.__Bridge$").append(shapeId)
+                .append(" __b) return __b.$carrier;\n");
+            out.append("      if (v instanceof $DealRt.").append(shapeId)
+                .append(" __w) return __hostForeignFn$").append(shapeId)
+                .append("(__w);\n");
+            out.append("      return v;\n");
+            out.append("    }\n");
+        }
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        for (Map.Entry<String, Type.Func> shape : shapes.entrySet()) {
+            emitForeignFnAdapter(out, shape.getKey(), shape.getValue());
+        }
+    }
+
+    /** One foreign {@code $DealRt.FnValue} adapter per declared signature. */
+    private void emitForeignFnAdapter(StringBuilder out, String shapeId, Type.Func func) {
+        StringBuilder params = new StringBuilder();
+        for (int i = 0; i < func.paramTypes().size(); i++) {
+            if (i > 0) {
+                params.append(", ");
+            }
+            params.append(paramClassLiteral(func.paramTypes().get(i)));
+        }
+        out.append("  static JvmRuntime.FunctionValue __hostForeignFn$").append(shapeId)
+            .append("($DealRt.").append(shapeId).append(" fw) {\n");
+        out.append("    java.lang.reflect.Method m;\n");
+        out.append("    try {\n");
+        out.append("      m = $DealRt.").append(shapeId)
+            .append(".class.getDeclaredMethod(\"invoke\"");
+        for (Type param : func.paramTypes()) {
+            out.append(", ").append(paramClassLiteral(param));
+        }
+        out.append(");\n");
+        out.append("      m.setAccessible(true);\n");
+        out.append("    } catch (java.lang.Exception __e) {\n");
+        out.append("      throw JvmRuntime.fail(\"E8010\", \"host function value "
+            + "adaptation failed: \" + __e, \"-\", null, null);\n");
+        out.append("    }\n");
+        out.append("    return new JvmRuntime.FunctionValue(__args -> {\n");
+        out.append("      try { return m.invoke(fw, __args); }\n");
+        out.append("      catch (java.lang.reflect.InvocationTargetException __e) {\n");
+        out.append("        java.lang.Throwable __c = __e.getCause();\n");
+        out.append("        if (__c instanceof RuntimeException __rr) { throw __rr; }\n");
+        out.append("        if (__c instanceof Error __er) { throw __er; }\n");
+        out.append("        throw JvmRuntime.fail(\"E8010\", \"host function value "
+            + "raised: \" + __c, \"-\", null, null);\n");
+        out.append("      }\n");
+        out.append("      catch (java.lang.IllegalAccessException |"
+            + " java.lang.IllegalArgumentException __e) {\n");
+        out.append("        throw JvmRuntime.fail(\"E8010\", \"host function value "
+            + "invocation failed: \" + __e, \"-\", null, null);\n");
+        out.append("      }\n");
+        out.append("    }, ").append(javaString(descriptorText(func))).append(", ")
+            .append(javaString(descriptorText(func))).append(", null);\n");
+        out.append("  }\n\n");
+    }
+
+    /**
+     * The declared element-shape array crossings: DEAL-to-host materializes
+     * the declared carrier from the production {@link JvmRuntime.Array}
+     * slots (after the declared element cell admitted them), host-to-DEAL
+     * materializes the production array from the carrier, and a
+     * normal-return copy-back mirrors the host's element writes into the
+     * production array (a failed call copies nothing back).
+     */
+    private void emitArrayCrossings(StringBuilder out) {
+        // DEAL -> host: the declared carrier materialized per crossing.
+        out.append("  static java.lang.Object __hostArrayFromDeal(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        out.append("    if (!(v instanceof JvmRuntime.Array __a)) return v;\n");
+        for (Map.Entry<String, Type> entry : arrayElements.entrySet()) {
+            String desc = entry.getKey();
+            Type element = entry.getValue();
+            String carrier = arrayCarrier(element);
+            String component = elementComponent(element);
+            out.append("    if (d.equals(").append(javaString(desc)).append(")) {\n");
+            out.append("      ").append(component).append("[] __d = new ")
+                .append(component).append("[").append("__a.length];\n");
+            out.append("      for (int __i = 0; __i < __a.length; __i++) { __d[__i] = ")
+                .append(elementExtract(element,
+                    "__i < __a.elements.size() ? __a.elements.get(__i) : null"))
+                .append("; }\n");
+            out.append("      return new $DealRt.").append(carrier).append("(__d);\n");
+            out.append("    }\n");
+        }
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        // host -> DEAL: the production array materialized from the carrier.
+        out.append("  static JvmRuntime.Array __hostArrayToDeal(java.lang.String d, java.lang.Object v) {\n");
+        out.append("    if (v == null) return null;\n");
+        out.append("    if (v instanceof JvmRuntime.Array __a) return __a;\n");
+        for (Map.Entry<String, Type> entry : arrayElements.entrySet()) {
+            String desc = entry.getKey();
+            Type element = entry.getValue();
+            String carrier = arrayCarrier(element);
+            out.append("    if (d.equals(").append(javaString(desc))
+                .append(") && v instanceof $DealRt.").append(carrier).append(" __c) {\n");
+            out.append("      JvmRuntime.Array __r = new JvmRuntime.Array(__c.data.length);\n");
+            out.append("      for (int __i = 0; __i < __c.data.length; __i++) { __r.elements.add(")
+                .append(elementStore(element, "__c.data[__i]"))
+                .append("); }\n");
+            out.append("      return __r;\n");
+            out.append("    }\n");
+        }
+        out.append("    throw JvmRuntime.fail(\"E8010\", \"host array value has no "
+            + "declared carrier for \" + d, \"-\", d, null);\n");
+        out.append("  }\n\n");
+        // The normal-return copy-back of a declared array parameter.
+        out.append("  static void __hostArrayCopyBack(java.lang.String d, "
+            + "java.lang.Object v, JvmRuntime.Array t) {\n");
+        out.append("    if (v == null || t == null) return;\n");
+        out.append("    if (v instanceof JvmRuntime.Array) return;\n");
+        for (Map.Entry<String, Type> entry : arrayElements.entrySet()) {
+            String desc = entry.getKey();
+            Type element = entry.getValue();
+            String carrier = arrayCarrier(element);
+            out.append("    if (d.equals(").append(javaString(desc))
+                .append(") && v instanceof $DealRt.").append(carrier).append(" __c) {\n");
+            out.append("      for (int __i = 0; __i < __c.data.length && __i < t.length; __i++) {\n");
+            out.append("        while (t.elements.size() <= __i) t.elements.add(null);\n");
+            out.append("        t.elements.set(__i, ")
+                .append(elementStore(element, "__c.data[__i]")).append(");\n");
+            out.append("      }\n");
+            out.append("      return;\n");
+            out.append("    }\n");
+        }
+        out.append("  }\n\n");
+    }
+
+    /** The Java component type of one declared array element. */
+    private String elementComponent(Type element) {
+        if (element instanceof Type.Nullable nullable) {
+            return boxedCarrier(nullable.inner());
+        }
+        return switch (element) {
+            case Type.Int ignored -> "int";
+            case Type.Number ignored -> "double";
+            case Type.Boolean ignored -> "boolean";
+            case Type.String ignored -> "java.lang.String";
+            case Type.Bytes ignored -> "$DealRt.Bytes";
+            case Type.Class cls -> "$DealRt." + recordSimpleNameOf(cls);
+            default -> "java.lang.Object";
+        };
+    }
+
+    /** The production slot → declared carrier component extraction. */
+    private String elementExtract(Type element, String expression) {
+        if (element instanceof Type.Nullable nullable) {
+            Type inner = nullable.inner();
+            return "(" + expression + " == null ? null : "
+                + boxedOf(inner, "((java.lang.Number) " + expression + ")", expression)
+                + ")";
+        }
+        return switch (element) {
+            case Type.Int ignored -> "((java.lang.Number) (" + expression + ")).intValue()";
+            case Type.Number ignored -> "((java.lang.Number) (" + expression + ")).doubleValue()";
+            case Type.Boolean ignored -> "((java.lang.Boolean) (" + expression + ")).booleanValue()";
+            case Type.String ignored -> "(java.lang.String) (" + expression + ")";
+            case Type.Bytes ignored -> "($DealRt.Bytes) (" + expression + ")";
+            default -> "(" + expression + ")";
+        };
+    }
+
+    /**
+     * The declared carrier component → production slot store (the boxed
+     * value model: an {@code int} element stays a {@code Long}, a
+     * {@code number} a {@code Double}, a nullable element keeps null).
+     */
+    private String elementStore(Type element, String expression) {
+        Type inner = element instanceof Type.Nullable nullable ? nullable.inner() : element;
+        boolean nullable = element instanceof Type.Nullable;
+        String boxed = switch (inner) {
+            case Type.Int ignored -> "java.lang.Long.valueOf(((java.lang.Number) ("
+                + expression + ")).longValue())";
+            case Type.Number ignored -> "java.lang.Double.valueOf(((java.lang.Number) ("
+                + expression + ")).doubleValue())";
+            case Type.Boolean ignored -> "java.lang.Boolean.valueOf(((java.lang.Boolean) ("
+                + expression + ")).booleanValue())";
+            default -> "(" + expression + ")";
+        };
+        if (nullable) {
+            return "(" + expression + " == null ? null : " + boxed + ")";
+        }
+        return boxed;
+    }
+
+    /** The boxed expression of one primitive inner carrier. */
+    private String boxedOf(Type inner, String numberExpression, String expression) {
+        return switch (inner) {
+            case Type.Int ignored -> "java.lang.Integer.valueOf("
+                + numberExpression + ".intValue())";
+            case Type.Number ignored -> "java.lang.Double.valueOf("
+                + numberExpression + ".doubleValue())";
+            case Type.Boolean ignored -> "java.lang.Boolean.valueOf((java.lang.Boolean) "
+                + expression + ")";
+            default -> expression;
+        };
     }
 
     /** The descriptor-driven value check of the parameter/return cells. */
@@ -999,6 +1437,88 @@ final class JvmHostAbiEmission {
                 .append(" p").append(i);
         }
         out.append(");\n");
+        out.append("  }\n\n");
+        // The declared bridge of this signature (ISSUE-0651; H7): the
+        // host-facing wrapper class over one production function carrier —
+        // its typed invoke runs the carrier (the DEAL body's own frames and
+        // return cell) and applies the declared return cell's projection.
+        out.append("  static final class __Bridge$").append(shapeId)
+            .append(" extends ").append(shapeId).append(" {\n");
+        out.append("    final JvmRuntime.FunctionValue $carrier;\n");
+        out.append("    __Bridge$").append(shapeId)
+            .append("(JvmRuntime.FunctionValue carrier) { this.$carrier = carrier; }\n");
+        out.append("    ").append(returnJavaType(func.returnType())).append(" invoke(");
+        for (int i = 0; i < func.paramTypes().size(); i++) {
+            if (i > 0) {
+                out.append(", ");
+            }
+            out.append(carrierType(func.paramTypes().get(i),
+                func.paramTypes().get(i) instanceof Type.Nullable)).append(" p").append(i);
+        }
+        out.append(") {\n");
+        StringBuilder boxed = new StringBuilder();
+        for (int i = 0; i < func.paramTypes().size(); i++) {
+            if (i > 0) {
+                boxed.append(", ");
+            }
+            boxed.append(boxedParameter(func.paramTypes().get(i), "p" + i));
+        }
+        Type bridgedReturn = func.returnType();
+        if (bridgedReturn instanceof Type.Null) {
+            out.append("      this.$carrier.fn.invoke(new java.lang.Object[]{ ")
+                .append(boxed).append(" });\n");
+            out.append("    }\n");
+        } else {
+            out.append("      java.lang.Object __r = this.$carrier.fn.invoke("
+                + "new java.lang.Object[]{ ").append(boxed).append(" });\n");
+            out.append("      return ").append(bridgeReturn(func)).append(";\n");
+            out.append("    }\n");
+        }
         out.append("  }\n");
+    }
+
+    /** The boxed production argument of one bridge parameter position. */
+    private String boxedParameter(Type param, String name) {
+        boolean nullable = param instanceof Type.Nullable;
+        Type inner = unwrapNullable(param);
+        return switch (inner) {
+            case Type.Int ignored -> nullable
+                ? "(" + name + " == null ? null : java.lang.Long.valueOf((long) "
+                    + name + ".intValue()))"
+                : "java.lang.Long.valueOf((long) " + name + ")";
+            case Type.Number ignored -> "java.lang.Double.valueOf(" + name + ")";
+            case Type.Boolean ignored -> "java.lang.Boolean.valueOf(" + name + ")";
+            default -> name;
+        };
+    }
+
+    /** The declared return cell's projection of one bridge invocation. */
+    private String bridgeReturn(Type.Func func) {
+        Type ret = func.returnType();
+        String desc = descriptorText(ret);
+        Type inner = unwrapNullable(ret);
+        boolean nullable = ret instanceof Type.Nullable;
+        String expression;
+        if (inner instanceof Type.Array || inner instanceof Type.Func) {
+            String carrier = inner instanceof Type.Array array
+                ? arrayCarrier(array.element())
+                : JvmBackend.fnShapeId((Type.Func) inner);
+            expression = "($DealRt." + carrier + ") " + artifactClass
+                + ".__hostProjectArg(" + javaString(desc) + ", __r)";
+            if (nullable) {
+                expression = "(__r == null ? null : " + expression + ")";
+            }
+            return expression;
+        }
+        String carrier = carrierType(ret, nullable);
+        return switch (carrier) {
+            case "int" -> "((java.lang.Number) __r).intValue()";
+            case "double" -> "((java.lang.Number) __r).doubleValue()";
+            case "boolean" -> "((java.lang.Boolean) __r).booleanValue()";
+            case "java.lang.Integer" -> "(__r == null ? null : java.lang.Integer.valueOf(((java.lang.Number) __r).intValue()))";
+            case "java.lang.Double" -> "(__r == null ? null : java.lang.Double.valueOf(((java.lang.Number) __r).doubleValue()))";
+            case "java.lang.Boolean" -> "(__r == null ? null : java.lang.Boolean.valueOf(((java.lang.Boolean) __r).booleanValue()))";
+            default -> "(" + carrier + ") __r";
+        };
     }
 }

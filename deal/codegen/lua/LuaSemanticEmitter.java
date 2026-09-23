@@ -655,6 +655,7 @@ public final class LuaSemanticEmitter {
             // then, so a host-free chunk keeps its self-contained prelude.
             if (hasHostImports()) {
                 out.append("local __rt = require(\"deal.runtime\")\n");
+                out.append(HOST_BOUNDARY_PRELUDE);
             }
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 String moduleKey = luaString(moduleUnit.moduleId().path());
@@ -701,7 +702,7 @@ public final class LuaSemanticEmitter {
             // scope; every check/return temp is a top-level assignment).
             out.append("local __chk, __rvT, __rvcT, __okT, __resT, __terrT, "
                 + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
-                + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT\n");
+                + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT\n");
 
             // Function factories first (capture cells are factory
             // arguments); the local names are pre-declared so bodies can
@@ -1584,11 +1585,21 @@ public final class LuaSemanticEmitter {
                     .append(", {__rawArgAtom(")
                     .append(luaString(staticKind(boundaryPayload.descriptor())))
                     .append(", ").append(target).append(")}, nil, nil)\n");
-                out.append("__okB, __chkB = pcall(__bcheck, ")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(")\n");
+                // A contextual composite value (ISSUE-0651): the function and
+                // array carriers pass through — the consuming declared cell
+                // carries the pinned E8010 projection at its own origin (the
+                // corpus pins the call-origin failure for a wrong-kind
+                // argument whose contextual read sits on the argument
+                // expression); every other descriptor keeps the strict row.
+                out.append("__okB, __chkB = ")
+                    .append(defersContextualCheck(boundaryPayload.descriptor())
+                        ? "true, " + target
+                        : "pcall(__bcheck, "
+                            + luaString(descriptorText(boundaryPayload.descriptor()))
+                            + ", "
+                            + luaString(staticKind(boundaryPayload.descriptor()))
+                            + ", " + target + ")")
+                    .append("\n");
                 out.append("if not __okB then\n");
                 out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
                     .append("\n");
@@ -1690,11 +1701,43 @@ public final class LuaSemanticEmitter {
                 // boundary FAILURE and the op FAILURE events with the
                 // boundary origin (a wrong present kind fails the
                 // differential verdict even with coincidental output).
-                out.append("__okB, __chkB = pcall(__bcheck, ")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(")\n");
+                // A function-typed contextual position (ISSUE-0651) admits
+                // the closed function carriers — the DEAL carrier and the
+                // host-facing wrapper — whose declared-signature authority
+                // is the crossing cell (the pinned E8010 parameter text at
+                // the call origin), never this contextual read; a
+                // non-function value still fails the row's E8001.
+                if (isFunctionDescriptor(boundaryPayload.descriptor())
+                        || isArrayDescriptor(boundaryPayload.descriptor())) {
+                    // The contextual read of a composite value (ISSUE-0651):
+                    // the closed function/array carriers pass through, and
+                    // the consuming declared cell carries the pinned E8010
+                    // projection at its own origin (the corpus pins the
+                    // call-origin failure for a wrong-kind argument whose
+                    // contextual read sits on the argument expression).
+                    out.append("if ").append(target)
+                        .append(" == nil or ").append(target)
+                        .append(" == __NULL or (type(").append(target)
+                        .append(") == \"table\" and (").append(target)
+                        .append(".__fn ~= nil or ").append(target)
+                        .append(".__kind == \"function\")) or type(")
+                        .append(target).append(") == \"table\" then\n");
+                    out.append("  __okB, __chkB = true, ").append(target)
+                        .append("\n");
+                    out.append("else\n");
+                    out.append("  __okB, __chkB = pcall(__bcheck, ")
+                        .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                        .append(", ")
+                        .append(luaString(staticKind(boundaryPayload.descriptor())))
+                        .append(", ").append(target).append(")\n");
+                    out.append("end\n");
+                } else {
+                    out.append("__okB, __chkB = pcall(__bcheck, ")
+                        .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                        .append(", ")
+                        .append(luaString(staticKind(boundaryPayload.descriptor())))
+                        .append(", ").append(target).append(")\n");
+                }
                 out.append("if not __okB then\n");
                 out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
                     .append("\n");
@@ -1708,6 +1751,29 @@ public final class LuaSemanticEmitter {
                 emitBoundarySuccess(boundary, target, boundaryPayload.descriptor());
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /** Whether one boundary descriptor is a function type (nullable unwrapped). */
+        private boolean isFunctionDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Func;
+        }
+
+        /** Whether one boundary descriptor is an array type (nullable unwrapped). */
+        private boolean isArrayDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Array;
+        }
+
+        /**
+         * Whether one boundary descriptor is a composite value type whose
+         * contextual read defers its shape check to the consuming declared
+         * cell (ISSUE-0651: the function and array carriers).
+         */
+        private boolean defersContextualCheck(RuntimeDescriptor descriptor) {
+            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor);
         }
 
         /**
@@ -2515,6 +2581,22 @@ public final class LuaSemanticEmitter {
             KindPayload.CallPayload payload = (KindPayload.CallPayload) op.payload();
             FunctionExecutionBinding binding = callBinding(payload);
             emitStart(op);
+            // The host arms (ISSUE-0651; host-module-load-and-host-call-
+            // realization H3/H7 and the sync host call contract): the
+            // loaded surface entry is invoked through the landed wrapper's
+            // own `.f` calling convention with the trailing literal span
+            // triplet, the declared parameter cells run at the call site
+            // with the pinned E8010 projections, and every crossed value is
+            // projected through the host-facing carrier set.
+            if (binding instanceof FunctionExecutionBinding.HostFunction host) {
+                emitHostCall(op, payload, host.hostModuleId(), host.exportName(),
+                    true);
+                return;
+            }
+            if (binding instanceof FunctionExecutionBinding.HostFunctionValue hostValue) {
+                emitHostValueCall(op, payload, hostValue);
+                return;
+            }
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp boundary = opsById.get(boundaryId);
                 KindPayload.BoundaryPayload boundaryPayload =
@@ -2622,6 +2704,174 @@ public final class LuaSemanticEmitter {
                     + " resolves no FunctionExecutionBinding (producer defect)");
             }
             return binding;
+        }
+
+        /**
+         * The sync host call arm (ISSUE-0651;
+         * {@code host-module-load-and-host-call-realization} H3/H7 and the
+         * sync host call contract): the loaded surface entry is resolved
+         * by {@code (hostModuleId, exportName)} — the resolved module
+         * identity is the registry key, so no alias is needed and the
+         * direct {@code CALL(HOST)}, the value-position
+         * {@code CALL(INDIRECT)}, and a host callback all use the one
+         * loaded entry — and invoked through the landed wrapper's
+         * {@code .f} calling convention with the completed argument
+         * values and the trailing literal span triplet.
+         */
+        private void emitHostCall(SemanticOp op, KindPayload.CallPayload payload,
+                ModuleId hostModuleId, String exportName, boolean moduleEntry) {
+            emitHostInvocation(op, payload,
+                "__exportSurfaces[" + luaString(hostModuleId.path()) + "]["
+                    + luaString(exportName) + "]");
+        }
+
+        /**
+         * The {@code HostFunctionValue} indirect call arm: the value
+         * materialized at its producing host crossing is invoked through
+         * the host-facing wrapper the crossing published — the loaded
+         * surface's own calling convention ({@code .f} with the span
+         * triplet), so the declared cells of the materialized function
+         * type run exactly as the direct host call's do.
+         */
+        private void emitHostValueCall(SemanticOp op, KindPayload.CallPayload payload,
+                FunctionExecutionBinding.HostFunctionValue hostValue) {
+            SemanticOp crossing = opsById.get(hostValue.materializingBoundaryOpId());
+            if (crossing == null
+                    || !(crossing.payload() instanceof KindPayload.BoundaryPayload boundary)) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " names the materializing host crossing "
+                    + hostValue.materializingBoundaryOpId()
+                    + ", which is not a boundary op of the emitted closure"
+                    + " (a producer defect)");
+            }
+            emitHostInvocation(op, payload, slot(boundary.input()));
+        }
+
+        /**
+         * The invocation half of one host arm: the declared parameter
+         * cells in one-based order (the loaded wrapper's own parameter
+         * rule, so the pinned E8010 {@code parameter {i} type mismatch}
+         * texts surface at the call origin), the host-facing projection of
+         * each checked parameter (H7), the {@code .f} call with the span
+         * triplet, and the declared return cell — every boundary child's
+         * trace events (START, SUCCESS, FAILURE with the pinned projection)
+         * surround the checks so the differential comparison against the
+         * oracle stays event-for-event; production mode suppresses them
+         * ({@code __ev} is a no-op).
+         */
+        private void emitHostInvocation(SemanticOp op, KindPayload.CallPayload payload,
+                String target) {
+            out.append("__hbT = {}\n");
+            int index = 1;
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp boundary = opsById.get(boundaryId);
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String input = slot(boundaryPayload.input());
+                String desc = boundaryPayload.descriptor().canonicalSpecText();
+                String origin = luaString(originOf(boundary));
+                emitBoundaryStart(boundary, input, boundaryPayload.descriptor());
+                if (isFunctionPosition(boundaryPayload.descriptor())) {
+                    out.append("__okB, __chkB = pcall(__hostFnParam, ")
+                        .append(luaString(desc)).append(", ")
+                        .append(luaString(innerFunctionText(boundaryPayload.descriptor())))
+                        .append(", ").append(index).append(", ").append(input)
+                        .append(", ").append(origin).append(")\n");
+                } else {
+                    out.append("__okB, __chkB = pcall(__hostParamCell, ")
+                        .append(luaString(desc)).append(", ").append(index)
+                        .append(", ").append(input).append(", ").append(origin)
+                        .append(")\n");
+                }
+                out.append("if not __okB then\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(__chkB)");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(__chkB)");
+                out.append("  error(__chkB, 0)\n");
+                out.append("end\n");
+                emitBoundarySuccess(boundary, "__chkB", boundaryPayload.descriptor());
+                out.append("__hbT[").append(index).append("] = __hostProjectArg(")
+                    .append(luaString(desc)).append(", ")
+                    .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
+                index++;
+            }
+            // The converged host-boundary call shape: the trailing literal
+            // span triplet is how a boundary error reports the DEAL call
+            // site byte-exact.
+            out.append("__okT, __resT = pcall(").append(target).append(".f");
+            for (int i = 1; i < index; i++) {
+                out.append(", __hbT[").append(i).append("]");
+            }
+            out.append(", ").append(spanTripletArgs(op)).append(")\n");
+            out.append("if not __okT then\n");
+            out.append("  __resT = __hostError(__resT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("  error(__resT, 0)\n");
+            out.append("end\n");
+            // The declared return cell: the single HOST_TO_DEAL child of
+            // the call, run at the call origin (the loaded wrapper already
+            // runs its own return rule; the cell re-projects the pinned
+            // text and keeps the boundary child's event pair exact).
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            String declaredReturn = returnBoundary == null ? null
+                : ((KindPayload.BoundaryPayload) returnBoundary.payload())
+                    .descriptor().canonicalSpecText();
+            if (returnBoundary != null) {
+                emitBoundaryStartAtom(returnBoundary, "__atom("
+                    + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
+                        .payload()).descriptor())) + ", __resT)");
+                out.append("__okB, __chkB = pcall(__hostReturnCell, ")
+                    .append(luaString(declaredReturn)).append(", __resT, ")
+                    .append(luaString(originOf(returnBoundary))).append(", false)\n");
+                out.append("if not __okB then\n");
+                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                    "__errtext(__chkB)");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(__chkB)");
+                out.append("  error(__chkB, 0)\n");
+                out.append("end\n");
+                emitBoundarySuccess(returnBoundary, "__resT",
+                    ((KindPayload.BoundaryPayload) returnBoundary.payload())
+                        .descriptor());
+            }
+            String result = slot((ValueId) op.result());
+            out.append(result).append(" = ")
+                .append(returnBoundary == null ? "__resT" : "__chkB")
+                .append("\n");
+            emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
+        }
+
+        /** Whether one declared host position is a function type. */
+        private boolean isFunctionPosition(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Func;
+        }
+
+        /** The canonical descriptor text of one declared position's inner type. */
+        private String innerFunctionText(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner.canonicalSpecText();
+        }
+
+        /** The inner-type argument of the projection helper (nil for other positions). */
+        private String sourceTextOf(RuntimeDescriptor descriptor) {
+            return isFunctionPosition(descriptor)
+                ? luaString(innerFunctionText(descriptor)) : "nil";
+        }
+
+        /** The literal span-triplet arguments of one host call site. */
+        private String spanTripletArgs(SemanticOp op) {
+            SourceSpan span = op.origin().span();
+            if (span == null) {
+                return "\"-\", 0, 0";
+            }
+            return luaString(op.origin().sourceId()) + ", " + span.startLine() + ", "
+                + span.startColumn();
         }
 
         private void emitIntrinsic(SemanticOp op) {
@@ -3806,6 +4056,24 @@ public final class LuaSemanticEmitter {
                     out.append("    error(__resT, 0)\n");
                     out.append("  end\n");
                 }
+                case FunctionExecutionBinding.HostFunction host ->
+                    emitHostCallbackInvoke(op, payload,
+                        "__exportSurfaces[" + luaString(host.hostModuleId().path())
+                            + "][" + luaString(host.exportName()) + "]");
+                case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                    SemanticOp crossing = opsById.get(
+                        hostValue.materializingBoundaryOpId());
+                    if (crossing == null
+                            || !(crossing.payload()
+                                instanceof KindPayload.BoundaryPayload boundary)) {
+                        throw new IllegalStateException("CALLBACK_INVOKE "
+                            + op.opId() + " names the materializing host crossing "
+                            + hostValue.materializingBoundaryOpId()
+                            + ", which is not a boundary op of the emitted closure"
+                            + " (a producer defect)");
+                    }
+                    emitHostCallbackInvoke(op, payload, slot(boundary.input()));
+                }
                 default -> throw new IllegalStateException("CALLBACK_INVOKE "
                     + op.opId() + " resolves a binding outside the statically-resolved "
                     + "slice: " + binding);
@@ -3821,6 +4089,59 @@ public final class LuaSemanticEmitter {
             }
             out.append("  return __resT\n");
             out.append("end\n");
+        }
+
+        /**
+         * The host {@code CALLBACK_INVOKE} arm (ISSUE-0651;
+         * {@code host-module-load-and-host-call-realization} H3 and the sync
+         * host call contract): the callback record's bound value resolves
+         * to a host function, so the host-driven invocation runs the loaded
+         * surface entry with the {@code HOST_TO_DEAL} checked arguments and
+         * the callback op's own origin, then the callback op's own return
+         * projection (its single return boundary child).
+         */
+        private void emitHostCallbackInvoke(SemanticOp op,
+                KindPayload.CallbackInvokePayload payload, String target) {
+            StringBuilder args = new StringBuilder();
+            for (int i = 0; i < payload.parameterBoundaryOpIds().size(); i++) {
+                if (args.length() > 0) {
+                    args.append(", ");
+                }
+                args.append("__cargs[").append(i + 1).append("]");
+            }
+            out.append("  __okT, __resT = pcall(").append(target).append(".f");
+            if (args.length() > 0) {
+                out.append(", ").append(args);
+            }
+            out.append(", ").append(spanTripletArgs(op)).append(")\n");
+            out.append("  if not __okT then\n");
+            out.append("    __resT = __hostError(__resT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("    error(__resT, 0)\n");
+            out.append("  end\n");
+            if (payload.returnBoundaryOpId() != null) {
+                SemanticOp boundary = opsById.get(payload.returnBoundaryOpId());
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                emitBoundaryStart(boundary, "__resT", boundaryPayload.descriptor());
+                out.append("  __okB, __chkB = pcall(__bcheck, ")
+                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(luaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", __resT)\n");
+                out.append("  if not __okB then\n");
+                out.append("    __chkB.o = ")
+                    .append(luaString(originOf(boundary))).append("\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(__chkB)");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(__chkB)");
+                out.append("    error(__chkB, 0)\n");
+                out.append("  end\n");
+                out.append("  __resT = __chkB\n");
+                emitBoundarySuccess(boundary, "__resT", boundaryPayload.descriptor());
+            }
         }
 
         // -- async (E4, D13) ----------------------------------------------------------
@@ -5329,6 +5650,158 @@ local function __jsonToClassOp(planName, root)
 end
 """;
 
+    /**
+     * The host-boundary prelude of the production chunk (ISSUE-0651;
+     * {@code host-module-load-and-host-call-realization} H3/H7 and the sync
+     * host call contract): the declared parameter/return cells of a host
+     * call (the loaded runtime matcher's own rule, projected through the
+     * pinned E8010 templates at the call origin — the wrapper's parameter
+     * cells, run at the call site so the boundary children's trace events
+     * carry the pinned projection), the DEAL-function-value to
+     * host-facing-wrapper projection of a declared function position, and
+     * the bridge the host calls back through. Emitted exactly for a chunk
+     * with a HOST-kind import, after the runtime binding it uses.
+     */
+    private static final String HOST_BOUNDARY_PRELUDE = """
+-- The production chunk is the v1.2 profile: the deployed runtime's int32
+-- gate uses the pinned v1.2 template ("int out of safe range") for the
+-- host cells' int rows, exactly like the emitted boundary checks' own
+-- gate. The flag is process-wide and idempotent.
+__rt.__INT32 = true
+-- The actual-kind token of one host-crossing value (the pinned E8010
+-- projections' {actual}): the runtime carrier's own kind, never the Lua
+-- table spelling of a DEAL function or number carrier.
+local function __hostKindOf(v)
+  if v == nil or v == __NULL then return "null" end
+  local t = type(v)
+  if t ~= "table" then return t end
+  if v.__jn then return "number" end
+  return t
+end
+-- The declared parameter cell of a function-typed host position: the
+-- loaded matcher's own rule over the DEAL function carrier (byte-exact
+-- carried canonical descriptor) or a host-facing wrapper; the pinned
+-- E8010 text is the loaded wrapper's own parameter projection.
+local function __hostFnParam(desc, inner, index, v, origin)
+  if v == nil or v == __NULL then
+    if string.sub(desc, 1, 1) == "?" then return __rt.__NULL end
+    return error(__failExpr("E8010", "parameter "..index.." type mismatch: expected"
+      .." function", origin, desc, __hostKindOf(v)), 0)
+  end
+  local carried = nil
+  if type(v) == "table" then
+    if v.__csig ~= nil then carried = v.__csig
+    elseif v.__kind == "function" then carried = v.sig end
+  end
+  if carried == nil then
+    return error(__failExpr("E8010", "parameter "..index.." type mismatch: expected"
+      .." function", origin, desc, __hostKindOf(v)), 0)
+  end
+  if carried ~= inner then
+    return error(__failExpr("E8010", "parameter "..index.." type mismatch: function"
+      .." signature mismatch: expected "..inner..", got "..carried, origin, desc,
+      __hostKindOf(v)), 0)
+  end
+  return v
+end
+-- The declared parameter cell of one host call: the loaded runtime's own
+-- matcher (the wrapper's cell), projected through the pinned E8010
+-- parameter template at the call origin. The crossing normalizes the
+-- chunk's language-null sentinel to the deployed runtime's own (the two
+-- sentinels are distinct values) and back on the return path.
+local function __hostParamCell(desc, index, v, origin)
+  if v == __NULL then v = __rt.__NULL end
+  local ok, checked = pcall(__rt.check_type, desc, v)
+  if ok then return checked end
+  local inner = type(checked) == "table" and checked.message or tostring(checked)
+  return error(__failExpr("E8010", "parameter "..index.." type mismatch: "..inner,
+    origin, desc, __hostKindOf(v)), 0)
+end
+-- The declared return cell of one host call: the loaded wrapper's own
+-- return rule, projected through the pinned E8010 return template, then
+-- the host-to-DEAL projection of the admitted value (the language-null
+-- sentinel and a declared array position's shared array carrier).
+local function __hostToDealArray(v)
+  if type(v) ~= "table" or v.__a then return v end
+  local out = {__a = true, __n = 0, __nK = {}}
+  local n = 0
+  for i = 1, #v do
+    local element = v[i]
+    if element == __rt.__NULL then element = __NULL end
+    out[i] = element
+    n = i
+  end
+  out.__n = n
+  return out
+end
+local function __hostReturnCell(desc, v, origin, nothing)
+  if nothing and v == nil then
+    return error(__failExpr("E8010", "return value 1 type mismatch: expected "..desc
+      ..", got nothing", origin, desc, "nothing"), 0)
+  end
+  local ok, checked = pcall(__rt.check_type, desc, v)
+  if not ok then
+    local inner = type(checked) == "table" and checked.message or tostring(checked)
+    return error(__failExpr("E8010", "return value 1 type mismatch: "..inner, origin,
+      desc, __hostKindOf(v)), 0)
+  end
+  if checked == __rt.__NULL then return nil end
+  if string.sub(desc, 1, 1) == "[" or string.sub(desc, 1, 2) == "?[" then
+    return __hostToDealArray(checked)
+  end
+  return checked
+end
+-- The DEAL function value call the host performs through the declared
+-- function bridge: the carrier's own body runs (its own return cell
+-- applies), an adapter carrier runs the D15 protocol.
+local function __dealFnValue(w, ...)
+  if w.__mode ~= nil then return __adaptInvoke(w, "-", ...) end
+  return w.__fn(...)
+end
+-- The host-facing projection of one declared function position (H7): the
+-- declared host wrapper class's LuaJIT twin — a plain Lua function the
+-- host calls; a host-facing wrapper passes through unadapted and anything
+-- else is left to the parameter cell.
+local function __hostFnArg(desc, inner, v)
+  if type(v) ~= "table" then return v end
+  if v.__kind == "function" then return v end
+  if v.__fn == nil then return v end
+  local carrier = v
+  return {__kind = "function", sig = inner,
+          f = function(...) return __dealFnValue(carrier, ...) end}
+end
+-- The declared host-facing projection of one checked parameter: a
+-- declared function position is bridged, every other position's carrier
+-- is the Lua value itself (the shared Lua table in both directions). The
+-- crossing normalizes the chunk's language-null sentinel to the
+-- deployed runtime's own for the loaded matcher.
+local function __hostProjectArg(desc, inner, v)
+  if v == __NULL then return __rt.__NULL end
+  if v == __rt.__NULL then return v end
+  if v == nil then return v end
+  if inner ~= nil and (string.sub(inner, 1, 1) == "("
+      or string.sub(inner, 1, 9) == "async(") then
+    return __hostFnArg(desc, inner, v)
+  end
+  return v
+end
+-- The canonical DEAL error table of one host-boundary failure: the
+-- loaded runtime raises the DEALRuntimeError shape ({code, message,
+-- file, line, column, expected, actual}); the emitted chunk speaks the
+-- __d-tagged carrier every consumer projects, so the host arm converts
+-- it once at the boundary and rethrows the identical code, message,
+-- expected, actual, and origin.
+local function __hostError(e, origin)
+  if type(e) ~= "table" then return e end
+  if e.__d then return e end
+  if e.code == nil or e.message == nil then return e end
+  local o = origin
+  if e.file ~= nil then
+    o = tostring(e.file)..":"..tostring(e.line)..":"..tostring(e.column)
+  end
+  return __failExpr(e.code, e.message, o, e.expected, e.actual)
+end
+""";
     private static final String PRELUDE = """
 -- ==== shared runtime prelude ====
 local __MISSING = setmetatable({}, {__tostring = function() return "missing" end})
