@@ -511,7 +511,8 @@ public final class SemanticOracle {
         permits Value.NullValue, Value.MissingValue, Value.BoolValue, Value.IntValue,
                 Value.NumValue, Value.StrValue, Value.TableValue, Value.ArrayValue,
                 Value.FuncValue, Value.AdapterValue, Value.IntrinsicValue, Value.ErrorValue,
-                Value.SlotValue, Value.ClassValue, Value.StdlibCallableValue {
+                Value.SlotValue, Value.ClassValue, Value.StdlibCallableValue,
+                Value.HostEntryValue {
 
         enum NullValue implements Value { INSTANCE }
 
@@ -568,6 +569,31 @@ public final class SemanticOracle {
 
         /** A {@code FUNCTION_ADAPT} adapter value (target signature). */
         record AdapterValue(RuntimeDescriptor.Func signature) implements Value {
+        }
+
+        /**
+         * The loaded host surface entry of a declared function export —
+         * the value a HOST {@code EXPORT_READ} publishes
+         * ({@code host-module-load-and-host-call-realization} H5 and the
+         * host value-read invocation contract; ISSUE-0653). The seamed
+         * load ({@code HostResponder.loadedExport}) supplies it the same
+         * way it supplies the call terminals: the oracle runs no host
+         * code, so the entry is a boundary-shaped host callable carrying
+         * only the declared function descriptor — the oracle's twin of
+         * the target-side loaded entry (the JVM host load's published
+         * {@code JvmRuntime.FunctionValue} carrier and the LuaJIT loaded
+         * wrapper's declared canonical signature). The value is memoized
+         * per {@code (module, export)} by the read arm, so every read of
+         * one export publishes the identical value; its boundary view is
+         * its declared signature, so a function-typed read row crosses it
+         * exactly like the target-side entry, and its atom is its own
+         * allocation (a heap value with reference identity).
+         */
+        record HostEntryValue(RuntimeDescriptor.Func descriptor) implements Value {
+
+            public HostEntryValue {
+                Objects.requireNonNull(descriptor, "descriptor must not be null");
+            }
         }
 
         /**
@@ -1108,6 +1134,7 @@ public final class SemanticOracle {
                 case Value.AdapterValue adapter -> allocate(adapter);
                 case Value.ClassValue classValue -> allocate(classValue);
                 case Value.StdlibCallableValue callable -> allocate(callable);
+                case Value.HostEntryValue entry -> allocate(entry);
             };
         }
 
@@ -2438,6 +2465,8 @@ public final class SemanticOracle {
                     new ClassOpsExecutor.Value.Function(adapter.signature());
                 case Value.StdlibCallableValue callable ->
                     new ClassOpsExecutor.Value.Function(callable.descriptor());
+                case Value.HostEntryValue entry ->
+                    new ClassOpsExecutor.Value.Function(entry.descriptor());
                 case Value.ClassValue classValue ->
                     new ClassOpsExecutor.Value.Class(classValue.classId(),
                         classValue.fields().stream()
@@ -3051,6 +3080,8 @@ public final class SemanticOracle {
                         RuntimeDescriptor.Number.INSTANCE, false));
                 case Value.StdlibCallableValue callable ->
                     BoundaryValueView.ofFunction(callable.descriptor());
+                case Value.HostEntryValue entry ->
+                    BoundaryValueView.ofFunction(entry.descriptor());
                 case Value.ArrayValue array -> {
                     List<BoundaryValueView> elements = new ArrayList<>();
                     for (Value element : array.elements()) {
@@ -4579,6 +4610,7 @@ public final class SemanticOracle {
                 case Value.AdapterValue ignored -> "function";
                 case Value.IntrinsicValue ignored -> "function";
                 case Value.StdlibCallableValue ignored -> "function";
+                case Value.HostEntryValue ignored -> "function";
                 case Value.ErrorValue ignored -> "class:@builtin/Error";
                 case Value.ClassValue classValue -> "class:" + classValue.classId().text();
                 case Value.MissingValue ignored -> "missing";
@@ -4721,6 +4753,8 @@ public final class SemanticOracle {
                 case Value.IntrinsicValue ignored ->
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
                 case Value.StdlibCallableValue ignored ->
+                    new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
+                case Value.HostEntryValue ignored ->
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
                 case Value.ErrorValue ignored -> new SharedStdlibSemantics.Value.Other(
                     ActualKind.CLASS, "@builtin/Error");

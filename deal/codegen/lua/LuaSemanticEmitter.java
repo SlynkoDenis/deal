@@ -586,6 +586,37 @@ public final class LuaSemanticEmitter {
             return "unknown";
         }
 
+        /**
+         * The emitted prelude boundary check of one descriptor over one
+         * value: {@code __bcheck(desc, kind, value)} — plus, when the
+         * descriptor carries a function position, the descriptor's
+         * canonical spec text as the trailing argument, so the function
+         * row can compare a host ABI wrapper's declared canonical
+         * signature (the loaded host surface entry's own metadata — the
+         * read value of ISSUE-0653's HOST read; the {@code desc}
+         * spelling stays the DEAL carrier's internal text). The text of
+         * every non-function check is emitted unchanged.
+         */
+        static String bcheckExpr(RuntimeDescriptor descriptor, String value) {
+            String check = "__bcheck(" + luaString(descriptorText(descriptor)) + ", "
+                + luaString(staticKind(descriptor)) + ", " + value;
+            if (containsFunction(descriptor)) {
+                check += ", " + luaString(descriptor.canonicalSpecText());
+            }
+            return check + ")";
+        }
+
+        /** Whether one descriptor carries a function position (recursively). */
+        static boolean containsFunction(RuntimeDescriptor descriptor) {
+            return switch (descriptor) {
+                case RuntimeDescriptor.Func ignored -> true;
+                case RuntimeDescriptor.Nullable nullable ->
+                    containsFunction(nullable.inner());
+                case RuntimeDescriptor.Array array -> containsFunction(array.element());
+                default -> false;
+            };
+        }
+
         // -- lua literals -----------------------------------------------------------
 
         static String luaString(String text) {
@@ -1548,10 +1579,9 @@ public final class LuaSemanticEmitter {
                 SemanticOp boundary = opsById.get(boundaryId);
                 ValueId input = payload.values().get(i);
                 emitBoundaryStart(boundary, slot(input), payload.elementDescriptor());
-                out.append("__chk = __bcheck(")
-                    .append(luaString(descriptorText(payload.elementDescriptor())))
-                    .append(", ").append(luaString(staticKind(payload.elementDescriptor())))
-                    .append(", ").append(slot(input)).append(")\n");
+                out.append("__chk = ")
+                    .append(bcheckExpr(payload.elementDescriptor(), slot(input)))
+                    .append("\n");
                 out.append(target).append("[").append(i + 1)
                     .append("] = __chk == nil and __NULL or __chk\n");
                 out.append("__numKey(").append(target).append(", ")
@@ -2194,10 +2224,9 @@ public final class LuaSemanticEmitter {
                 .append(luaString(op.contract().canonicalDigest())).append(", ")
                 .append(luaString(parentKey(op.origin().parentOpId())))
                 .append(", {}, nil, nil)\n");
-            out.append("__chk = __bcheck(")
-                .append(luaString(descriptorText(payload.descriptor()))).append(", ")
-                .append(luaString(staticKind(payload.descriptor()))).append(", ")
-                .append(slot(payload.input())).append(")\n");
+            out.append("__chk = ")
+                .append(bcheckExpr(payload.descriptor(), slot(payload.input())))
+                .append("\n");
             if (op.result() instanceof ValueId valueId) {
                 out.append(slot(valueId)).append(" = __chk\n");
                 emitBoundarySuccess(op, slot(valueId), payload.descriptor());
@@ -2573,11 +2602,8 @@ public final class LuaSemanticEmitter {
                 }
                 default -> {
                     emitBoundaryStart(boundary, input, payload.descriptor());
-                    out.append("__chk = __bcheck(")
-                        .append(luaString(descriptorText(payload.descriptor())))
-                        .append(", ")
-                        .append(luaString(staticKind(payload.descriptor())))
-                        .append(", ").append(input).append(")\n");
+                    out.append("__chk = ")
+                        .append(bcheckExpr(payload.descriptor(), input)).append("\n");
                     emitBoundarySuccess(boundary, "__chk", payload.descriptor());
                 }
             }
@@ -2663,11 +2689,10 @@ public final class LuaSemanticEmitter {
                     (KindPayload.BoundaryPayload) boundary.payload();
                 emitBoundaryStart(boundary, slot(boundaryPayload.input()),
                     boundaryPayload.descriptor());
-                out.append("__chk = __bcheck(")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(slot(boundaryPayload.input())).append(")\n");
+                out.append("__chk = ")
+                    .append(bcheckExpr(boundaryPayload.descriptor(),
+                        slot(boundaryPayload.input())))
+                    .append("\n");
                 emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
             }
             switch (binding) {
@@ -3881,10 +3906,9 @@ public final class LuaSemanticEmitter {
             String value = payload.value() == null ? "nil" : slot(payload.value());
             out.append("__rvT = ").append(value).append("\n");
             emitBoundaryStart(boundary, "__rvT", boundaryPayload.descriptor());
-            out.append("__rvcT = __bcheck(")
-                .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ").append(luaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __rvT)\n");
+            out.append("__rvcT = ")
+                .append(bcheckExpr(boundaryPayload.descriptor(), "__rvT"))
+                .append("\n");
             emitBoundarySuccess(boundary, "__rvcT", boundaryPayload.descriptor());
             emitPlainSuccess(op);
             if (tryDepth > 0) {
@@ -3962,11 +3986,10 @@ public final class LuaSemanticEmitter {
                     (KindPayload.BoundaryPayload) boundary.payload();
                 emitBoundaryStart(boundary, slot(payload.value()),
                     boundaryPayload.descriptor());
-                out.append("__chk = __bcheck(")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(slot(payload.value())).append(")\n");
+                out.append("__chk = ")
+                    .append(bcheckExpr(boundaryPayload.descriptor(),
+                        slot(payload.value())))
+                    .append("\n");
                 emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
             }
             out.append("__exportSurfaces[")
@@ -4325,12 +4348,10 @@ public final class LuaSemanticEmitter {
                         (KindPayload.BoundaryPayload) boundary.payload();
                     emitBoundaryStart(boundary, slot(boundaryPayload.input()),
                         boundaryPayload.descriptor());
-                    out.append("__chk = __bcheck(")
-                        .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(luaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(slot(boundaryPayload.input()))
-                        .append(")\n");
+                    out.append("__chk = ")
+                        .append(bcheckExpr(boundaryPayload.descriptor(),
+                            slot(boundaryPayload.input())))
+                        .append("\n");
                     emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
                     out.append("S.__sa").append(op.opId().id())
                         .append("[#S.__sa").append(op.opId().id())
@@ -6374,7 +6395,7 @@ local function __failExpr(code, msg, o, e, a)
   return {__d = true, code = code, m = msg, o = o, e = e, a = a, f = __framesText(),
           cause = nil}
 end
-local function __bcheck(desc, staticKind, v)
+local function __bcheck(desc, staticKind, v, csig)
   local actual = __actualOf(staticKind, v)
   local function fail(expected)
     return error(__failExpr("E8001", "expected "..expected..", got "..actual,
@@ -6455,12 +6476,16 @@ local function __bcheck(desc, staticKind, v)
   elseif string.sub(desc, 1, 6) == "array(" then
     if type(v) == "table" and v.__a then
       local inner = string.sub(desc, 7, -2)
+      local innerSig = nil
+      if csig ~= nil and string.sub(csig, 1, 1) == "[" then
+        innerSig = string.sub(csig, 2, -2)
+      end
       for i = 1, v.__n do
         local elem = v[i]
         if elem == __NULL then elem = nil
         elseif elem == nil then elem = __MISSING end
         local ok, checked = pcall(__bcheck, inner,
-          (elem == __MISSING) and "missing" or inner, elem)
+          (elem == __MISSING) and "missing" or inner, elem, innerSig)
         if not ok then
           local expected = inner
           local actualKind = __actualOf((elem == __MISSING) and "missing" or inner, elem)
@@ -6473,7 +6498,11 @@ local function __bcheck(desc, staticKind, v)
     return fail("array")
   elseif string.sub(desc, 1, 9) == "nullable(" then
     if v == nil or v == __MISSING then return nil end
-    return __bcheck(string.sub(desc, 10, -2), staticKind, v)
+    local innerSig = csig
+    if innerSig ~= nil and string.sub(innerSig, 1, 1) == "?" then
+      innerSig = string.sub(innerSig, 2)
+    end
+    return __bcheck(string.sub(desc, 10, -2), staticKind, v, innerSig)
   elseif string.sub(desc, 1, 9) == "function(" then
     if type(v) == "function" then
       local carried = v.__sig or ""
@@ -6488,6 +6517,20 @@ local function __bcheck(desc, staticKind, v)
       return error(__failExpr("E8010",
         "function signature mismatch: expected "..desc..", got "..carried,
         "-", desc, carried), 0)
+    end
+    if type(v) == "table" and v.__kind == "function" then
+      -- The host ABI wrapper — the loaded host surface entry a HOST
+      -- EXPORT_READ publishes (ISSUE-0653; host-module-load-and-host-call-
+      -- realization H5's read value). The entry's own sig metadata is its
+      -- declared canonical signature, so the row compares it byte-exact
+      -- against the boundary's declared canonical descriptor (the
+      -- emitter-supplied csig; the desc spelling is the DEAL carrier's
+      -- internal text).
+      local wanted = csig or desc
+      if v.sig == wanted then return v end
+      return error(__failExpr("E8010",
+        "function signature mismatch: expected "..wanted..", got "
+          ..tostring(v.sig or "nil"), "-", wanted, v.sig), 0)
     end
     return fail("function")
   end
@@ -6784,7 +6827,10 @@ end
 -- with the active frames (the check runs before any source-frame push).
 local function __fncheck(v, expected, origin)
   local carried = ""
-  if type(v) == "table" then carried = v.__csig or "" end
+  -- A DEAL carrier carries its canonical spec text in __csig; a loaded
+  -- host surface entry (the host ABI wrapper a HOST read publishes,
+  -- ISSUE-0653) carries its declared canonical signature in sig.
+  if type(v) == "table" then carried = v.__csig or v.sig or "" end
   if type(v) == "function" then carried = v.__csig or "" end
   if carried == expected then return v end
   return error(__failExpr("E8010", "function signature mismatch: expected "..expected

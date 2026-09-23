@@ -717,4 +717,28 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # fail-closed seeds, and the combined trace-mode oracle agreement drive
   # (one load, a sync host call, an async host start and its await).
   'fg|=== Running Async Host Realization Tests (ISSUE-0652) ===|java -ea -cp build deal.test.AsyncHostRealizationTest'
+  # ISSUE-0653 registration: the host value-position export read invocation
+  # (host-module-load-and-host-call-realization H5 and the host value-read
+  # invocation contract; semantic-ir-construct-coverage-cutover K2's
+  # exactly-one HostFunction registration; module-export-reads-and-in-
+  # project-class-construction M1/M5 read-only; sequencing step 3): the sync
+  # form (let f: (…) => … = host.<export>; f(args)) and the async form
+  # (let op: async () => string = host.fetchValue; await op()) lower through
+  # the reads child's exactly one EXPORT_READ per source occurrence plus its
+  # exactly one HostFunction registration, and execute through this epic's
+  # static host arms — CALL(INDIRECT) and ASYNC_START(HOST) on the same
+  # registration — on both targets and through the oracle with the same
+  # cells, texts, origins, and effects the direct CALL(HOST) carries; neither
+  # form produces or uses a CallCallee.Dynamic shape, the read is consumed
+  # (never re-produced, re-registered, or re-checked), the corpus fixture
+  # host-abi/host-async-shape-value keeps its pinned call-site E8010 (line 10
+  # column 31) through the static route, the host load runs once per program
+  # with the pinned E8011 checks holding in the drive, and a registration
+  # whose module identity has no loaded surface fails closed. The LuaJIT
+  # function row accepts the loaded host surface entry's own declared
+  # canonical signature (the host ABI wrapper's sig metadata, beside the
+  # DEAL carrier's internal text), and the oracle's closed value model gains
+  # the loaded host entry value, so the read publishes the loaded entry on
+  # every consumer.
+  'fg|=== Running Host Value-Position Read Invocation Tests (ISSUE-0653) ===|java -ea -cp build deal.test.HostValueReadInvocationTest'
 )
