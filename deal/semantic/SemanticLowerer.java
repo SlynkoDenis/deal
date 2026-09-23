@@ -9886,10 +9886,24 @@ public final class SemanticLowerer {
          * records the checked value without re-checking. The E7 surface
          * admits any number of call sites per callee (recursion
          * included).
+         *
+         * <p>A callee whose hoisted invocation shape is the exported
+         * function's {@code EXTERNAL_ENTRY} (ISSUE-0654) has exactly one
+         * return boundary — the single {@code EXTERNAL_RETURN} run by its
+         * {@code RETURN} — so a source call of it realizes the closed
+         * {@code CALL(EXTERNAL)} {@code SHARED_BODY} cell
+         * ({@code EXTERNAL_PARAMETER} parameters, no caller-side return
+         * boundary, the callee's entry as the external entry ref) instead
+         * of claiming a second invocation shape the closed machine
+         * rejects. The body keeps exactly one invocation identity and
+         * one return boundary; no new op kind, boundary kind, or policy
+         * is introduced.</p>
          */
         private ValueId lowerDirectCall(CallExpr call, ValueId slot, IdentifierExpr identifier,
                                         FunctionContext context) {
-            if (e7Calls) {
+            boolean entryInvocation = e7Calls
+                && context.shape == InvocationShape.EXTERNAL_ENTRY_SHAPE;
+            if (e7Calls && !entryInvocation) {
                 context.assignShape(InvocationShape.SOURCE_CALL, context.callSiteOpId);
             }
             // The audited callee evaluation: the identifier loads the
@@ -9929,18 +9943,29 @@ public final class SemanticLowerer {
             List<SemanticOp> parameterBoundaryOps = new ArrayList<>();
             List<OpId> parameterBoundaryIds = new ArrayList<>();
             for (int i = 0; i < args.size(); i++) {
-                SemanticOp boundary = buildChildBoundary(BoundaryKind.FUNCTION_PARAMETER,
+                SemanticOp boundary = buildChildBoundary(
+                    entryInvocation ? BoundaryKind.EXTERNAL_PARAMETER
+                        : BoundaryKind.FUNCTION_PARAMETER,
                     context.signature.paramTypes().get(i), args.get(i), call.span(),
                     callOpId);
                 parameterBoundaryOps.add(boundary);
                 parameterBoundaryIds.add(boundary.opId());
             }
             emit(buildOp(callOpId, SemanticOpKind.CALL,
-                new KindPayload.CallPayload(CallMode.DIRECT,
-                    new KindPayload.CallCallee.Static(new FunctionExecutionBinding.LoweredBody(
-                        context.functionId, context.bodyBlock)),
-                    context.signature, parameterBoundaryIds, context.returnBoundaryOpId,
-                    null, context.bodyBlock, null),
+                entryInvocation
+                    ? new KindPayload.CallPayload(CallMode.EXTERNAL,
+                        new KindPayload.CallCallee.Static(
+                            new FunctionExecutionBinding.ExternalFunction(module,
+                                identifier.name(), context.signature,
+                                ExternalExecutionOwner.SHARED_BODY)),
+                        context.signature, parameterBoundaryIds, null, null, null,
+                        context.shapeOpId)
+                    : new KindPayload.CallPayload(CallMode.DIRECT,
+                        new KindPayload.CallCallee.Static(
+                            new FunctionExecutionBinding.LoweredBody(
+                                context.functionId, context.bodyBlock)),
+                        context.signature, parameterBoundaryIds,
+                        context.returnBoundaryOpId, null, context.bodyBlock, null),
                 result, resultType, args, argTypes,
                 FailurePolicyId.NO_DEAL_FAILURE, origin));
             for (SemanticOp boundary : parameterBoundaryOps) {

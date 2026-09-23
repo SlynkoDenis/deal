@@ -1418,9 +1418,13 @@ public class FoundationIntegrationTest {
                     + "(CALLS not promoted — the parent verification-3 reroute, "
                     + "never E6005)");
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the dual-shape fixture closed with E6005
-            // CONSTRUCT_UNLOWERED and publishes nothing.
+            // ISSUE-0654: the release-owned production invocation realizes
+            // the dual-shape fixture — the exported function called from
+            // source runs its recorded EXTERNAL_ENTRY (the closed
+            // CALL(EXTERNAL) SHARED_BODY cell) inside the one project
+            // artifact — so it compiles and publishes its one artifact
+            // while the harness invocation above keeps the plan-time
+            // reroute subject.
             CompilationOrchestrator dualProduction = new CompilationOrchestrator(
                 dualSrc.resolve("main.deal").toAbsolutePath(),
                 tmp.resolve("build-dual-production"), false, false, false,
@@ -1430,18 +1434,20 @@ public class FoundationIntegrationTest {
                 CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
                     ReleaseConfiguration.releaseCapabilityRegistry()));
             boolean dualProductionOk = dualProduction.compile();
-            check(!dualProductionOk,
-                "the release-owned production invocation fails the dual-shape "
-                    + "fixture closed");
+            check(dualProductionOk && dualProduction.diagnostics().isEmpty(),
+                "the release-owned production invocation compiles the "
+                    + "dual-shape fixture: " + dualProduction.diagnostics());
             check(dualProduction.routePlan() == null,
                 "the production dual-shape compile consults no route plan");
-            check(dualProduction.diagnostics().stream()
-                    .anyMatch(d -> "E6005".equals(d.code())
-                        && d.message().contains("CONSTRUCT_UNLOWERED")),
-                "the production dual-shape failure names the construct rule: "
-                    + dualProduction.diagnostics());
-            check(!Files.exists(tmp.resolve("build-dual-production/main.lua")),
-                "the production dual-shape failure stages no artifact");
+            check(dualProductionOk
+                    && dualProduction.semanticEmissionCount() == 1
+                    && dualProduction.retainedEmissionCount() == 0,
+                "the production dual-shape compile emits one project artifact "
+                    + "and no retained artifact: semantic="
+                    + dualProduction.semanticEmissionCount() + " retained="
+                    + dualProduction.retainedEmissionCount());
+            check(Files.exists(tmp.resolve("build-dual-production/main.lua")),
+                "the production dual-shape compile stages its project artifact");
 
             // An internal V1_2_ACTIVE construction over the all-SHADOW
             // release default derives DEAL_V1_2_INT32 (the A1 row).

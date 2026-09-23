@@ -124,6 +124,21 @@ public final class JvmRuntime {
         return callable;
     }
 
+    /**
+     * The program-scoped active-function markers of the re-entrant
+     * invocation-state save (ISSUE-0654): the function ids whose body is
+     * currently executing. An invoking arm that finds its callee body
+     * already active (recursion) preserves the callee body's own slots and
+     * {@code DIRECT} cells across the invocation — the per-invocation
+     * semantics the semantic oracle models with its cell overlays — while
+     * a plain call leaves the artifact's flat state observable, exactly
+     * like the LuaJIT chunk-global markers. Hosted with the runtime's
+     * program state ({@link #TASKS}, {@link #EXPORT_SURFACES}) so the
+     * per-unit classes of one program share it.
+     */
+    public static final java.util.HashSet<Long> BODY_ACTIVE =
+        new java.util.HashSet<>();
+
     /** A string-keyed table with explicit key presence. */
     public static final class Table {
         public final LinkedHashMap<String, Object> entries = new LinkedHashMap<>();

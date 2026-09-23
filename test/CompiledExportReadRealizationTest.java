@@ -119,9 +119,13 @@ import java.util.TreeMap;
  *   <li><b>The project-session ownership guard.</b> A COMPILED read whose
  *       owner module is not among a project session's units fails the
  *       emission closed (both targets); a per-unit session never fails
- *       closed for a foreign owner; the production arm maps an emitter
- *       failure to E6005 {@code SHARED_EMITTER_COVERAGE} and stages
- *       nothing, preserving the previous artifact set byte-identical.</li>
+ *       closed for a foreign owner; the production arm realizes this
+ *       fixture's cross-module sync call through the {@code CALL(EXTERNAL)}
+ *       {@code SHARED_BODY} arm (ISSUE-0654) and stages its one project
+ *       artifact; the emitter-side rejections of hand-built inconsistent
+ *       facts (asserted by the calls child's focused suite) feed the
+ *       production arm's fail-closed E6005 {@code SHARED_EMITTER_COVERAGE}
+ *       mapping, which stages nothing.</li>
  * </ol>
  */
 public class CompiledExportReadRealizationTest {
@@ -1153,12 +1157,12 @@ public class CompiledExportReadRealizationTest {
             check(perUnitJvm.source().contains("exportSurface(\"lib\").read(\"tag\")"),
                 "the per-unit JVM session emits the surface read for the foreign owner");
 
-            // The production arm maps an emitter failure to E6005
-            // SHARED_EMITTER_COVERAGE and stages nothing: the reachable
-            // emitter gap is a cross-module sync call (the calls child's
-            // arm). The ownership guard is a producer defect a validated
-            // one-lowering compile cannot reach, so its E6005 shape is the
-            // same mapping asserted here.
+            // ISSUE-0654 supersedes the emission-gap reading of this
+            // fixture: the production arm now realizes the cross-module
+            // sync call through the callee unit's EXTERNAL_ENTRY, so the
+            // same fixture emits one project artifact and publishes it
+            // (the emitter's fail-closed producer-defect family is
+            // asserted by the calls child's focused suite).
             Fixture syncFixture = compileProject(new LinkedHashMap<>(Map.of(
                 "src/lib.deal", LIB_SOURCE,
                 "src/app.deal", "import * as lib from \"./lib\"\n\n"
@@ -1167,25 +1171,18 @@ public class CompiledExportReadRealizationTest {
             try {
                 Path out = syncFixture.root().resolve("out-arm");
                 writeFileIn(out, "app.lua", "-- previous artifact\n");
-                Map<String, String> before = snapshotTree(out);
                 PublicationStager stager = PublicationStager.forRoot(out);
                 ProductionProjectEmission.Result arm;
                 try {
                     arm = emit(syncFixture, Backend.LUAJIT, stager, false);
-                    check(stager.stagedSet().relativePaths().isEmpty(),
-                        "the failed emission stages nothing");
+                    check(arm.emitted(),
+                        "the cross-module sync call emits through the realized "
+                            + "EXTERNAL_ENTRY arm: " + arm.diagnostics());
+                    check(stager.stagedSet().artifact("app.lua").isPresent(),
+                        "the emitted compile stages its one project artifact");
                 } finally {
                     stager.discard();
                 }
-                check(!arm.emitted(), "the failing emission fails the arm closed");
-                check(arm.firstDiagnostic() != null
-                        && "E6005".equals(arm.firstDiagnostic().code())
-                        && arm.firstDiagnostic().message().contains(
-                            ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                    "an emitter failure maps to E6005 SHARED_EMITTER_COVERAGE: "
-                        + arm.diagnostics());
-                checkEq(before, snapshotTree(out),
-                    "nothing staged: the previous artifact set stays byte-identical");
             } finally {
                 deleteRecursively(syncFixture.root());
             }

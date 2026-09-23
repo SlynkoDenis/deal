@@ -80,10 +80,10 @@ public class ProjectMigrationIntegrationTest {
      * Runs the same CLI-equivalent arguments through the test-scope
      * harness compile entry ({@link HarnessCompileEntry}; ISSUE-0643 P10
      * item 3, mechanism 1) with System.err captured; returns {exitCode,
-     * stderr}. This suite's fixtures carry cross-module calls and stdlib
-     * member calls the release-owned production invocation fails closed,
-     * while the suite's subject — the locator/resolution/identity stack —
-     * is arm-independent.
+     * stderr}. The suite drives the harness arm so its subject — the
+     * locator/resolution/identity stack — stays arm-independent, and
+     * ISSUE-0654 realizes this suite's cross-module call on the
+     * release-owned production invocation as well.
      */
     private static String[] runCliCapturingErr(String[] args) throws IOException {
         ByteArrayOutputStream err = new ByteArrayOutputStream();
@@ -198,24 +198,37 @@ public class ProjectMigrationIntegrationTest {
                         + " JVM: " + out);
             }
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails this suite's cross-module-call fixture
-            // closed with E6005 SHARED_EMITTER_COVERAGE (the shared.greet()
-            // call has no production emission arm — the calls child owns
-            // it) and stages nothing, while the harness invocation above
-            // keeps the locator/resolution/identity subject green.
+            // ISSUE-0654: the release-owned production invocation realizes
+            // this suite's cross-module-call fixture — the shared.greet()
+            // call runs the callee unit's EXTERNAL_ENTRY inside the one
+            // project artifact — so the production compile succeeds, emits
+            // one project artifact, and publishes it, while the harness
+            // invocation above keeps the locator/resolution/identity
+            // subject green.
             Path prodOut = root.resolve("out_prod_probe");
             String[] prod = runProductionCliCapturingErr(new String[]{
                 "compile", entry.toString(), "--output", prodOut.toString()});
-            check(!"0".equals(prod[0]),
-                "the release-owned production invocation fails the"
-                    + " cross-module call closed: " + prod[1]);
-            check(prod[1].contains("E6005")
-                    && prod[1].contains("SHARED_EMITTER_COVERAGE"),
-                "the production failure names E6005 SHARED_EMITTER_COVERAGE: "
-                    + prod[1]);
-            check(!Files.exists(prodOut),
-                "the production failure stages nothing under " + prodOut);
+            check("0".equals(prod[0]),
+                "the release-owned production invocation compiles the"
+                    + " cross-module call: " + prod[1]);
+            check(!prod[1].contains("E6005"),
+                "the production compile reports no emitter gap: " + prod[1]);
+            check(Files.exists(prodOut.resolve("main.lua")),
+                "the production compile publishes its one project artifact "
+                    + "under " + prodOut);
+            if (Files.exists(prodOut.resolve("main.lua"))) {
+                ProcessBuilder prodBuilder = new ProcessBuilder("luajit",
+                    "main.lua");
+                prodBuilder.directory(prodOut.toFile());
+                prodBuilder.redirectErrorStream(true);
+                Process prodProcess = prodBuilder.start();
+                String prodOutput = new String(
+                    prodProcess.getInputStream().readAllBytes(),
+                    StandardCharsets.UTF_8).trim();
+                check(prodProcess.waitFor() == 0 && prodOutput.equals("OK"),
+                    "the production cross-module call executes under LuaJIT: "
+                        + prodOutput);
+            }
         } finally {
             deleteRecursively(root);
         }

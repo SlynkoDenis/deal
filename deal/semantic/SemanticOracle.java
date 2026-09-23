@@ -3794,6 +3794,10 @@ public final class SemanticOracle {
                     + "externalEntryRef (producer defect)");
             }
             SemanticOp entry = opOf(entryOpId);
+            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY) {
+                throw new IllegalStateException("the externalEntryRef " + entryOpId
+                    + " does not resolve to a recorded EXTERNAL_ENTRY (producer defect)");
+            }
             UnitState state = stateOf(entryOpId);
             KindPayload.ExternalEntryPayload entryPayload =
                 (KindPayload.ExternalEntryPayload) entry.payload();
@@ -3816,8 +3820,19 @@ public final class SemanticOracle {
                 frames.add(0, entryPayload.function());
                 Value returned;
                 try {
-                    returned = runBodyBlock(function.body(),
-                        entryPayload.signature().paramTypes().size(), state);
+                    // The callee unit's state is the active one for the
+                    // whole entry invocation: the callee body's nested
+                    // structure blocks belong to the callee unit's
+                    // membership table (the caller's table has no row for
+                    // them), so the cross-unit run pushes it like the
+                    // owner's detached default block does.
+                    stateStack.push(state);
+                    try {
+                        returned = runBodyBlock(function.body(),
+                            entryPayload.signature().paramTypes().size(), state);
+                    } finally {
+                        stateStack.pop();
+                    }
                 } finally {
                     frames.remove(0);
                     popParamCells();
@@ -4256,8 +4271,15 @@ public final class SemanticOracle {
                 entryPayload.signature().paramTypes().size(), args);
             frames.add(0, entryPayload.function());
             try {
-                return runBodyBlock(function.body(),
-                    entryPayload.signature().paramTypes().size(), state);
+                // The callee unit's state is the active one for the whole
+                // entry body task (the async twin of the sync entry run).
+                stateStack.push(state);
+                try {
+                    return runBodyBlock(function.body(),
+                        entryPayload.signature().paramTypes().size(), state);
+                } finally {
+                    stateStack.pop();
+                }
             } finally {
                 frames.remove(0);
                 popParamCells();

@@ -268,6 +268,8 @@ public final class JvmSemanticEmitter {
         final Map<ClassId, ClassLayout> classLayouts = new LinkedHashMap<>();
         /** Each block id → its owning unit's membership table. */
         final Map<BlockId, StructuredBodyTable> blockTableOf = new LinkedHashMap<>();
+        /** Each op id → its single membership block (the transfer-closure source). */
+        final Map<OpId, BlockId> opBlock = new LinkedHashMap<>();
         final Map<OpId, SemanticOp> opsById = new HashMap<>();
         final Map<BindingId, BindingCellKind> cellKinds = new HashMap<>();
         /**
@@ -277,6 +279,8 @@ public final class JvmSemanticEmitter {
          * guess.
          */
         final Map<OpId, ModuleId> opModule = new HashMap<>();
+        /** One lowered body's private-state keys (the invocation save/restore). */
+        final Map<FunctionId, List<String>> bodyStateKeyCache = new HashMap<>();
         final java.util.Set<OpId> ownedChildren = new java.util.HashSet<>();
         /**
          * The payload-owned children only (closure computation excludes
@@ -444,6 +448,9 @@ public final class JvmSemanticEmitter {
             classLayouts.putAll(moduleUnit.classLayouts());
             for (Map.Entry<BlockId, List<OpId>> entry : moduleTable.blockOps().entrySet()) {
                 blockTableOf.put(entry.getKey(), moduleTable);
+                for (OpId memberId : entry.getValue()) {
+                    opBlock.putIfAbsent(memberId, entry.getKey());
+                }
             }
             for (SemanticOp op : moduleUnit.ops()) {
                 opsById.put(op.opId(), op);
@@ -656,6 +663,11 @@ public final class JvmSemanticEmitter {
             // (the compiled fixture runners reference the field).
             out.append("  static final java.util.LinkedHashMap<String, "
                 + "JvmRuntime.Table> EXPORT_SURFACES = JvmRuntime.EXPORT_SURFACES;\n");
+            // The program-scoped active-function markers of the re-entrant
+            // invocation-state save (ISSUE-0654): hosted by the runtime so
+            // the per-unit classes of one program share them.
+            out.append("  static final java.util.HashSet<Long> __bodyActive = "
+                + "JvmRuntime.BODY_ACTIVE;\n");
             out.append("\n  static JvmRuntime.Table exportSurface(String module) {\n");
             out.append("    return JvmRuntime.exportSurface(module);\n");
             out.append("  }\n");
@@ -1648,7 +1660,14 @@ public final class JvmSemanticEmitter {
             return null;
         }
 
-        /** The structure ancestors of a block, innermost first (static). */
+        /**
+         * The structure ancestors of a block, innermost first (static). The
+         * enclosing block of one structure op comes from *its own* unit's
+         * membership table ({@code blockTableOf}): a callee unit's nested
+         * blocks belong to the callee's table, never the entry module's, so
+         * a transfer inside a cross-module callee body closes exactly the
+         * structures it nests in.
+         */
         private List<SemanticOp> structureAncestors(BlockId block) {
             List<SemanticOp> result = new ArrayList<>();
             BlockId current = block;
@@ -1658,7 +1677,9 @@ public final class JvmSemanticEmitter {
                     break;
                 }
                 result.add(enclosing);
-                current = table.opBlocks().get(enclosing.opId());
+                StructuredBodyTable ownerTable = blockTableOf.get(current);
+                current = ownerTable == null ? null
+                    : ownerTable.opBlocks().get(enclosing.opId());
             }
             return result;
         }
@@ -1668,7 +1689,7 @@ public final class JvmSemanticEmitter {
          *  (its dispatch closes it). */
         private void emitTransferClosures(SemanticOp transferOp, SemanticOp targetLoop,
                                           boolean stopAtTry, int indent) {
-            BlockId block = table.opBlocks().get(transferOp.opId());
+            BlockId block = opBlock.get(transferOp.opId());
             for (SemanticOp ancestor : structureAncestors(block)) {
                 if (stopAtTry && ancestor.kind() == SemanticOpKind.TRY_CATCH) {
                     return;
@@ -2924,11 +2945,23 @@ public final class JvmSemanticEmitter {
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     FunctionId callee = body.functionId();
-                    out.append(indent(indent)).append("JvmRuntime.pushFrame(")
-                        .append(javaString(String.valueOf(callee.id()))).append(");\n");
+                    StateSlot savedState = emitInvocationStateSave(callee, op.opId(),
+                        indent);
+                    // The invocation's result lands in a method-local: the
+                    // callee's own private state is restored by the finally
+                    // below, and a recursive call shares the result slot's
+                    // name (the call site's slot belongs to the callee's
+                    // body too) — the assignment therefore happens after
+                    // the restore.
+                    String resultLocal = "__res_" + op.opId().id();
+                    out.append(indent(indent)).append("Object ").append(resultLocal)
+                        .append(" = null;\n");
                     out.append(indent(indent)).append("try {\n");
-                    out.append(indent(indent)).append("  ")
-                        .append(slot((ValueId) op.result()))
+                    out.append(indent(indent + 1)).append("JvmRuntime.pushFrame(")
+                        .append(javaString(String.valueOf(callee.id()))).append(");\n");
+                    out.append(indent(indent + 1)).append("try {\n");
+                    out.append(indent(indent + 1)).append("  ")
+                        .append(resultLocal)
                         .append(" = ").append(fnFactory(callee)).append("(");
                     deal.semantic.ir.LoweredFunction calleeFunction =
                         unit.functions().get(callee);
@@ -2951,13 +2984,19 @@ public final class JvmSemanticEmitter {
                             .input()));
                     }
                     out.append("});\n");
-                    out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
+                    out.append(indent(indent + 1))
+                        .append("} catch (JvmRuntime.DealError __e) {\n");
                     emitFailureEvent(op.opId(), op.kind().name(), op,
-                        "JvmRuntime.errtext(__e)", indent + 1);
-                    out.append(indent(indent)).append("  throw __e;\n");
+                        "JvmRuntime.errtext(__e)", indent + 2);
+                    out.append(indent(indent + 1)).append("  throw __e;\n");
+                    out.append(indent(indent + 1)).append("} finally {\n");
+                    out.append(indent(indent + 1)).append("  JvmRuntime.popFrame();\n");
+                    out.append(indent(indent + 1)).append("}\n");
                     out.append(indent(indent)).append("} finally {\n");
-                    out.append(indent(indent)).append("  JvmRuntime.popFrame();\n");
+                    emitInvocationStateRestore(callee, savedState, indent + 1);
                     out.append(indent(indent)).append("}\n");
+                    out.append(indent(indent)).append(slot((ValueId) op.result()))
+                        .append(" = ").append(resultLocal).append(";\n");
                 }
                 case FunctionExecutionBinding.AdapterBinding adapter -> {
                     // The D15 invocation protocol: resolve the source per
@@ -2992,12 +3031,379 @@ public final class JvmSemanticEmitter {
                     out.append(indent(indent)).append("  throw __e;\n");
                     out.append(indent(indent)).append("}\n");
                 }
+                case FunctionExecutionBinding.ExternalFunction external ->
+                    emitExternalCall(op, payload, external, indent);
                 default -> throw new IllegalStateException("CALL " + op.opId()
                     + " resolves a binding outside the statically-resolved slice: "
                     + binding);
             }
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The {@code ExternalFunction(SHARED_BODY)} CALL arm (ISSUE-0654;
+         * {@code cross-module-call-realization} X1/X4/X5 and the
+         * cross-module sync call contract): the callee unit's recorded
+         * {@code EXTERNAL_ENTRY} runs inside the one artifact under the
+         * callee module's context (the {@code MODULE} literal and the
+         * runtime's own module context), with the entry's trace events
+         * parented to the caller's {@code CALL} op, and the callee body's
+         * {@code RETURN} runs the callee's single {@code EXTERNAL_RETURN}
+         * boundary. The caller publishes the returned value without
+         * re-checking (its own {@code EXTERNAL_PARAMETER} cells ran
+         * exactly once above); the module context is restored on success
+         * and on failure.
+         */
+        private void emitExternalCall(SemanticOp op, KindPayload.CallPayload payload,
+                FunctionExecutionBinding.ExternalFunction external, int indent) {
+            if (external.executionOwner()
+                    != deal.semantic.ir.ExternalExecutionOwner.SHARED_BODY) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " resolves the external binding " + external.moduleId() + "."
+                    + external.exportName() + " with execution owner "
+                    + external.executionOwner() + " (a RETAINED_ABI external has no"
+                    + " production emission arm — producer defect)");
+            }
+            LoweredModuleUnit calleeUnit = units.get(external.moduleId());
+            if (calleeUnit == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " resolves the external callee module " + external.moduleId()
+                    + " outside the session's closure (producer defect)");
+            }
+            SemanticOp entry = resolveExternalEntry(op, payload, external, calleeUnit);
+            KindPayload.ExternalEntryPayload entryPayload =
+                (KindPayload.ExternalEntryPayload) entry.payload();
+            LoweredFunction calleeFunction =
+                calleeUnit.functions().get(entryPayload.function());
+            if (calleeFunction == null) {
+                throw new IllegalStateException("EXTERNAL_ENTRY " + entry.opId()
+                    + " resolves the missing lowered function "
+                    + entryPayload.function().id() + " (producer defect)");
+            }
+            String calleePath = calleeUnit.moduleId().path();
+            String prevMod = "__xmm_" + op.opId().id();
+            String prevRun = "__xmr_" + op.opId().id();
+            StringBuilder caps = new StringBuilder();
+            for (BindingId captureId : calleeFunction.captures()) {
+                if (caps.length() > 0) {
+                    caps.append(", ");
+                }
+                caps.append(cell(captureId, 0));
+            }
+            StringBuilder args = new StringBuilder();
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                if (args.length() > 0) {
+                    args.append(", ");
+                }
+                args.append(slot(((KindPayload.BoundaryPayload)
+                    opsById.get(boundaryId).payload()).input()));
+            }
+            // The saved module context lives in the enclosing block: the
+            // try/finally's finally and the caller-level catch below both
+            // restore from it (a try block's locals are not in the scope
+            // of its own finally), and the caller's CALL FAILURE must
+            // carry the caller's module (the oracle's own tagging) — the
+            // entry's own terminals carry the callee's.
+            out.append(indent(indent)).append("String ").append(prevMod)
+                .append(" = MODULE;\n");
+            out.append(indent(indent)).append("String ").append(prevRun)
+                .append(" = JvmRuntime.currentModule();\n");
+            // The invocation's result lands in a method-local: the
+            // callee's own private state is restored by the state finally
+            // below, and a recursive call shares the result slot's name
+            // (the call site's slot belongs to the callee's body too) —
+            // the assignment therefore happens after the restore.
+            String resultLocal = "__res_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(resultLocal)
+                .append(" = null;\n");
+            StateSlot savedState = emitInvocationStateSave(entryPayload.function(),
+                op.opId(), indent);
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append("try {\n");
+            out.append(indent(indent + 2)).append("MODULE = ")
+                .append(javaString(calleePath)).append(";\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
+            if (trace) {
+                out.append(indent(indent + 2)).append("JvmRuntime.ev(MODULE, ")
+                    .append(javaString(opKey(entry.opId())))
+                    .append(", \"START\", \"EXTERNAL_ENTRY\", ")
+                    .append(javaString(entry.contract().canonicalDigest()))
+                    .append(", ").append(javaString(opKey(op.opId())))
+                    .append(", List.of(), null, null);\n");
+            }
+            out.append(indent(indent + 2)).append("JvmRuntime.pushFrame(")
+                .append(javaString(String.valueOf(entryPayload.function().id())))
+                .append(");\n");
+            out.append(indent(indent + 2)).append("try {\n");
+            out.append(indent(indent + 3)).append("try {\n");
+            out.append(indent(indent + 4)).append(resultLocal)
+                .append(" = ").append(fnFactory(entryPayload.function()))
+                .append("(").append(caps).append(").fn.invoke(new Object[]{")
+                .append(args).append("});\n");
+            out.append(indent(indent + 3))
+                .append("} catch (JvmRuntime.DealError __ex) {\n");
+            if (trace) {
+                out.append(indent(indent + 4)).append("JvmRuntime.ev(MODULE, ")
+                    .append(javaString(opKey(entry.opId())))
+                    .append(", \"FAILURE\", \"EXTERNAL_ENTRY\", ")
+                    .append(javaString(entry.contract().canonicalDigest()))
+                    .append(", ").append(javaString(opKey(op.opId())))
+                    .append(", List.of(), null, JvmRuntime.errtext(__ex));\n");
+            }
+            out.append(indent(indent + 4)).append("throw __ex;\n");
+            out.append(indent(indent + 3)).append("}\n");
+            if (trace) {
+                out.append(indent(indent + 3)).append("JvmRuntime.ev(MODULE, ")
+                    .append(javaString(opKey(entry.opId())))
+                    .append(", \"SUCCESS\", \"EXTERNAL_ENTRY\", ")
+                    .append(javaString(entry.contract().canonicalDigest()))
+                    .append(", ").append(javaString(opKey(op.opId())))
+                    .append(", List.of(), JvmRuntime.atom(")
+                    .append(resultLocal).append(", ")
+                    .append(javaString(staticKind(
+                        entryPayload.signature().returnType())))
+                    .append("), null);\n");
+            }
+            out.append(indent(indent + 2)).append("} finally {\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 2)).append("}\n");
+            out.append(indent(indent + 1)).append("} finally {\n");
+            out.append(indent(indent + 2)).append("MODULE = ").append(prevMod)
+                .append(";\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(")
+                .append(prevRun).append(");\n");
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__e)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __e;\n");
+            out.append(indent(indent)).append("} finally {\n");
+            emitInvocationStateRestore(entryPayload.function(), savedState, indent + 1);
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append(slot((ValueId) op.result()))
+                .append(" = ").append(resultLocal).append(";\n");
+        }
+
+        /**
+         * The private state of one lowered body's invocation (ISSUE-0654):
+         * the value slots its ops produce or consume and its
+         * {@code DIRECT} cells (parameters, locals, and per-iteration
+         * cells) — the state an invocation owns. {@code SHARED_CELL}
+         * state (a captured binding, a group function binding, a module
+         * cell) is shared by identity and never saved or restored: a
+         * closure holds the cell table itself.
+         *
+         * <p>The session carries one field per slot and cell (the emitted
+         * bodies share the class' state), so a nested invocation of the
+         * same body would otherwise overwrite the enclosing invocation's
+         * own state: a recursive body (the
+         * {@code modules/imported-recursive-export} shape) would re-read
+         * its parameter cell and its half-computed slots after the nested
+         * call returned. The invoking arm therefore saves the callee
+         * body's private state before the invocation and restores it on
+         * every path — the per-invocation semantics the semantic oracle
+         * models with its cell overlays.</p>
+         */
+        private List<String> bodyStateKeys(FunctionId functionId) {
+            List<String> cached = bodyStateKeyCache.get(functionId);
+            if (cached != null) {
+                return cached;
+            }
+            LoweredFunction function = null;
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                LoweredFunction candidate = moduleUnit.functions().get(functionId);
+                if (candidate != null) {
+                    function = candidate;
+                    break;
+                }
+            }
+            java.util.LinkedHashSet<String> keys = new java.util.LinkedHashSet<>();
+            if (function != null) {
+                collectBodyStateKeys(function.body(), keys, new java.util.HashSet<>());
+            }
+            List<String> result = List.copyOf(keys);
+            bodyStateKeyCache.put(functionId, result);
+            return result;
+        }
+
+        private void collectBodyStateKeys(BlockId block, java.util.Set<String> keys,
+                                          java.util.Set<BlockId> seen) {
+            if (block == null || !seen.add(block)) {
+                return;
+            }
+            StructuredBodyTable ownerTable = blockTableOf.get(block);
+            List<OpId> opIds = ownerTable == null ? null : ownerTable.blockOps().get(block);
+            if (opIds == null) {
+                return;
+            }
+            for (OpId opId : opIds) {
+                SemanticOp op = opsById.get(opId);
+                if (op == null) {
+                    continue;
+                }
+                if (op.result() instanceof ValueId valueId) {
+                    keys.add(slot(valueId));
+                }
+                for (ValueId operand : op.operands()) {
+                    keys.add(slot(operand));
+                }
+                switch (op.payload()) {
+                    case KindPayload.BindingAllocPayload payload ->
+                        addCellStateKey(keys, payload.binding(), payload.generation());
+                    case KindPayload.BindingInitPayload payload ->
+                        addCellStateKey(keys, payload.binding(), payload.generation());
+                    case KindPayload.BindingLoadPayload payload ->
+                        addCellStateKey(keys, payload.binding(), payload.generation());
+                    case KindPayload.BindingStorePayload payload ->
+                        addCellStateKey(keys, payload.binding(), payload.generation());
+                    case KindPayload.RecursiveGroupInitPayload payload -> {
+                        for (BindingId binding : payload.bindings()) {
+                            addCellStateKey(keys, binding, 0);
+                        }
+                    }
+                    case KindPayload.ClosureNewPayload payload -> {
+                        for (BindingId binding : payload.captures()) {
+                            addCellStateKey(keys, binding, 0);
+                        }
+                    }
+                    case KindPayload.ModuleImportPayload payload -> {
+                        for (BindingId binding : payload.aliasCells()) {
+                            addCellStateKey(keys, binding, 0);
+                        }
+                    }
+                    case KindPayload.ForEachPayload payload -> {
+                        addCellStateKey(keys, payload.binding(), payload.generation());
+                        collectBodyStateKeys(payload.body(), keys, seen);
+                    }
+                    case KindPayload.TryCatchPayload payload -> {
+                        addCellStateKey(keys, payload.catchBinding(), 0);
+                        collectBodyStateKeys(payload.tryBlock(), keys, seen);
+                        collectBodyStateKeys(payload.catchBlock(), keys, seen);
+                    }
+                    case KindPayload.BranchPayload payload -> {
+                        collectBodyStateKeys(payload.selectedBlock(), keys, seen);
+                        collectBodyStateKeys(payload.alternateBlock(), keys, seen);
+                    }
+                    case KindPayload.LoopPayload payload -> {
+                        collectBodyStateKeys(payload.initBlock(), keys, seen);
+                        collectBodyStateKeys(payload.bodyBlock(), keys, seen);
+                        collectBodyStateKeys(payload.updateBlock(), keys, seen);
+                    }
+                    default -> {
+                    }
+                }
+            }
+        }
+
+        /** A body-private cell key: {@code DIRECT} cells only (shared state stays shared). */
+        private void addCellStateKey(java.util.Set<String> keys, BindingId binding,
+                                     long generation) {
+            if (cellKinds.getOrDefault(binding, BindingCellKind.DIRECT)
+                    == BindingCellKind.SHARED_CELL) {
+                return;
+            }
+            keys.add(cell(binding, generation));
+        }
+
+        /**
+         * The re-entrant invocation's private-state save, or {@code null}
+         * when the callee body has no private state. Only a nested
+         * invocation of the same body (recursion) can overwrite the
+         * enclosing invocation's own state, so the emitted arm records
+         * whether the body is already active and saves the state exactly
+         * then — a plain call keeps the flat observable state the
+         * artifact's slots always had.
+         */
+        private StateSlot emitInvocationStateSave(FunctionId callee, OpId invocation,
+                                                  int indent) {
+            List<String> keys = bodyStateKeys(callee);
+            if (keys.isEmpty()) {
+                return null;
+            }
+            String previous = "__pa_" + invocation.id();
+            String saved = "__sv_" + invocation.id();
+            out.append(indent(indent)).append("boolean ").append(previous)
+                .append(" = __bodyActive.contains(").append(callee.id())
+                .append("L);\n");
+            out.append(indent(indent)).append("Object[] ").append(saved)
+                .append(" = ").append(previous).append(" ? new Object[]{")
+                .append(String.join(", ", keys)).append("} : null;\n");
+            out.append(indent(indent)).append("__bodyActive.add(")
+                .append(callee.id()).append("L);\n");
+            return new StateSlot(previous, saved);
+        }
+
+        /** The matching re-entrant restore, executed on every path. */
+        private void emitInvocationStateRestore(FunctionId callee, StateSlot slot,
+                                                int indent) {
+            if (slot == null) {
+                return;
+            }
+            List<String> keys = bodyStateKeys(callee);
+            out.append(indent(indent)).append("if (").append(slot.previous())
+                .append(") {\n");
+            for (int i = 0; i < keys.size(); i++) {
+                out.append(indent(indent + 1)).append(keys.get(i)).append(" = ")
+                    .append(slot.saved()).append("[").append(i).append("];\n");
+            }
+            // A re-entrant invocation leaves the enclosing invocation's
+            // marker in place; only the outermost one clears it.
+            out.append(indent(indent)).append("} else {\n");
+            out.append(indent(indent + 1)).append("__bodyActive.remove(")
+                .append(callee.id()).append("L);\n");
+            out.append(indent(indent)).append("}\n");
+        }
+
+        /** One invocation's re-entrant state save: its flag and its saved array. */
+        private record StateSlot(String previous, String saved) {
+        }
+
+        /**
+         * The recorded callee-unit {@code EXTERNAL_ENTRY} of one
+         * {@code SHARED_BODY} external call: resolved by the payload's
+         * statically recorded {@code externalEntryRef} inside the callee
+         * module's unit (ISSUE-0634's accumulation). A missing unit, a
+         * ref outside the callee unit, a non-entry op, an async entry for
+         * a sync call, or a divergent export name is a fail-closed
+         * producer defect — never a silently missing invocation.
+         */
+        private SemanticOp resolveExternalEntry(SemanticOp op,
+                KindPayload.CallPayload payload,
+                FunctionExecutionBinding.ExternalFunction external,
+                LoweredModuleUnit calleeUnit) {
+            OpId entryRef = payload.externalEntryRef();
+            if (entryRef == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " carries a SHARED_BODY external binding without a recorded"
+                    + " externalEntryRef (producer defect)");
+            }
+            SemanticOp entry = null;
+            if (entryRef.module().equals(calleeUnit.moduleId())) {
+                for (SemanticOp candidate : calleeUnit.ops()) {
+                    if (candidate.opId().equals(entryRef)) {
+                        entry = candidate;
+                        break;
+                    }
+                }
+            }
+            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + "'s externalEntryRef " + entryRef + " does not resolve to a"
+                    + " recorded EXTERNAL_ENTRY of the callee module "
+                    + calleeUnit.moduleId() + " (producer defect)");
+            }
+            KindPayload.ExternalEntryPayload entryPayload =
+                (KindPayload.ExternalEntryPayload) entry.payload();
+            if (entryPayload.async() || !entryPayload.exportName()
+                    .equals(external.exportName())) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + "'s externalEntryRef " + entryRef + " names the "
+                    + (entryPayload.async() ? "async" : "sync") + " entry of export '"
+                    + entryPayload.exportName() + "' but the binding names the sync"
+                    + " export '" + external.exportName() + "' (producer defect)");
+            }
+            return entry;
         }
 
         /**

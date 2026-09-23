@@ -2082,17 +2082,45 @@ public class ReadValueIntegrationVerificationTest {
                 && !stdlibCall.contains("the value read fails lowering"),
             "no lowerer-side value-read guard assertion remains in the pin");
 
-        // The same-slice emitter-side guard stays asserted where the
-        // emission is driven (the project-session ownership guard), and the
-        // read arm's own invocation pin asserts the realized call-machine
-        // shape rather than a lowerer-side invocation guard.
+        // ISSUE-0654 retargets the sync-call emitter-gap pin of this file:
+        // the cross-module sync call now emits through the realized
+        // CALL(EXTERNAL) SHARED_BODY arm and stages its one project
+        // artifact, so the superseded fail-closed clauses are replaced by
+        // the emitted-and-staged clauses; the emitter-side
+        // SHARED_EMITTER_COVERAGE producer-defect family stays asserted
+        // where emission is driven (the project-session ownership guard in
+        // that file, the guard-level production-arm pins, and the calls
+        // child's focused suite).
         String compiledRead = Files.readString(
             root.resolve("test/CompiledExportReadRealizationTest.java"),
             StandardCharsets.UTF_8);
-        check(compiledRead.contains("SHARED_EMITTER_COVERAGE")
-                && compiledRead.contains("stages nothing"),
-            "the same-slice emitter-side SHARED_EMITTER_COVERAGE guard stays asserted "
-                + "where emission is driven");
+        check(compiledRead.contains("emits through the realized")
+                && compiledRead.contains(
+                    "the emitted compile stages its one project artifact"),
+            "the retargeted cross-module sync-call pin asserts the emitted-and-staged "
+                + "outcome where emission is driven");
+        check(!compiledRead.contains("the failed emission stages nothing")
+                && !compiledRead.contains("the failing emission fails the arm closed"),
+            "the superseded emission-gap clauses are replaced in the retargeted pin");
+        check(compiledRead.contains("fails closed for the same doctored project"),
+            "the project-session ownership guard stays asserted where emission is "
+                + "driven");
+        String productionEmission = Files.readString(
+            root.resolve("test/ProductionProjectEmissionTest.java"),
+            StandardCharsets.UTF_8);
+        check(productionEmission.contains("the guarded compile stages nothing")
+                && productionEmission.contains("SHARED_EMITTER_COVERAGE"),
+            "the fail-closed SHARED_EMITTER_COVERAGE family with nothing staged "
+                + "stays asserted where emission is driven");
+        String callsChild = Files.readString(
+            root.resolve("test/CrossModuleCallRealizationTest.java"),
+            StandardCharsets.UTF_8);
+        check(callsChild.contains("the LuaJIT rejection names the unresolved entry")
+                && callsChild.contains("the JVM rejection names the unresolved entry")
+                && callsChild.contains(
+                    "the production arm's E6005 SHARED_EMITTER_COVERAGE"),
+            "the calls child asserts the emitter rejections and the production "
+                + "E6005 SHARED_EMITTER_COVERAGE mapping");
         String importArm = Files.readString(
             root.resolve("test/ImportMemberReadArmTest.java"), StandardCharsets.UTF_8);
         check(importArm.contains("The typed-binding invocation of the read value lowers "

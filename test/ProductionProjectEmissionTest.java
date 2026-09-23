@@ -61,9 +61,10 @@ import java.util.Set;
  *       async call ({@code EXTERNAL_ASYNC_CALL}) while a
  *       {@code STDLIB}/{@code COMPILED}-only closure and a same-module
  *       async call stay accepted and execute under the real toolchains;</li>
- *   <li>a failing lowering (bytes) and a failing emission (a cross-module
- *       sync call) each stage nothing and leave the previous artifact set
- *       byte-identical;</li>
+ *   <li>a failing lowering (bytes) stages nothing and leaves the previous
+ *       artifact set byte-identical, while a cross-module sync call emits
+ *       through the realized {@code CALL(EXTERNAL)} {@code SHARED_BODY}
+ *       arm and stages its one project artifact (ISSUE-0654);</li>
  *   <li>the staged LuaJIT artifact executes under {@code luajit} and the
  *       staged JVM artifact compiles with {@code javac --release 25
  *       -proc:none} plus {@code java}.</li>
@@ -154,7 +155,7 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
-    /** The cross-module sync call: the emission covers no such arm. */
+    /** The cross-module sync call: the realized external-call arm. */
     private static final String SYNC_CALL_APP_SOURCE = """
         import * as lib from "./lib"
 
@@ -612,12 +613,14 @@ public class ProductionProjectEmissionTest {
     }
 
     // =========================================================================
-    // 4. Atomic failure: a failing lowering and a failing emission
+    // 4. Atomic failure: a failing lowering; the realized cross-module sync
+    //    call emits and stages
     // =========================================================================
 
     private static void testAtomicFailures() throws Exception {
-        System.out.println("-- a failing lowering and a failing emission each stage "
-            + "nothing and preserve the previous artifact set --");
+        System.out.println("-- a failing lowering stages nothing and preserves the "
+            + "previous artifact set; the cross-module sync call emits and "
+            + "stages --");
 
         // The failing lowering: the bytes-bearing fixture (a later slice's
         // construct) fails CONSTRUCT_UNLOWERED. The live root is
@@ -651,45 +654,45 @@ public class ProductionProjectEmissionTest {
             deleteRecursively(bytes.root());
         }
 
-        // The failing emission: a cross-module sync call lowers but the
-        // emission covers no external-call arm.
+        // ISSUE-0654: a cross-module sync call now emits through the
+        // realized CALL(EXTERNAL) SHARED_BODY arm — the callee unit's
+        // EXTERNAL_ENTRY runs inside the one project artifact — so the
+        // production run stages its one artifact over the previous set
+        // (the atomic staging property stays covered by the bytes-lowering
+        // case above, whose lowering fails before any emission).
         Fixture sync = twoModuleFixture(SYNC_CALL_APP_SOURCE);
         Path syncOut = sync.root().resolve("out-arm");
         try {
             writeFileIn(syncOut, "app.lua", "-- previous artifact\n");
             writeFileIn(syncOut, "deal/runtime.lua", "-- previous runtime\n");
-            Map<String, String> before = snapshotTree(syncOut);
             PublicationStager stager = PublicationStager.forRoot(syncOut);
             ProductionProjectEmission.Result result;
             try {
                 result = emit(sync, Backend.LUAJIT, stager, false);
+                check(result.emitted(),
+                    "the cross-module sync call emits: " + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the emitted cross-module sync call carries no diagnostic: "
+                        + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the cross-module sync call stages the entry module's chunk");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the cross-module sync call stages its one project artifact");
+                String chunk = new String(stager.stagedSet().artifact("app.lua")
+                    .orElseThrow().content(), StandardCharsets.UTF_8);
+                check(chunk.contains("__module = \"lib\"")
+                        && chunk.contains("__modStack[#__modStack + 1] = __module")
+                        && chunk.contains("pcall(F")
+                        && !chunk.contains("SharedM"),
+                    "the staged chunk runs the callee unit's entry under the "
+                        + "callee module context and references no per-module "
+                        + "artifact");
+                check(chunk.contains("__svStack"),
+                    "the staged chunk preserves the callee body's private "
+                        + "state across the invocation");
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the cross-module sync call fails closed");
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code()),
-                "the emitter gap maps to E6005: " + result.diagnostics());
-            check(result.firstDiagnostic() != null
-                    && result.firstDiagnostic().message()
-                        .contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the emitter gap carries the SHARED_EMITTER_COVERAGE rule: "
-                    + result.diagnostics());
-            check(result.firstDiagnostic() != null
-                    && result.firstDiagnostic().message()
-                        .contains("ProductionProjectEmission SHARED_EMITTER_COVERAGE ("),
-                "the failure is the mapped emitter gap, not a closure guard: "
-                    + result.diagnostics());
-            check(result.firstDiagnostic() != null
-                    && !result.firstDiagnostic().message()
-                        .contains(ProductionProjectEmission.HOST_MODULE_IMPORT)
-                    && !result.firstDiagnostic().message()
-                        .contains(ProductionProjectEmission.EXTERNAL_ASYNC_CALL),
-                "the sync-call failure carries no closure-guard token: "
-                    + result.diagnostics());
-            checkEq(before, snapshotTree(syncOut),
-                "the failing emission leaves the previous artifact set "
-                    + "byte-identical");
         } finally {
             deleteRecursively(sync.root());
         }

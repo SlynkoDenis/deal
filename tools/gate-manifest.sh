@@ -741,4 +741,26 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the loaded host entry value, so the read publishes the loaded entry on
   # every consumer.
   'fg|=== Running Host Value-Position Read Invocation Tests (ISSUE-0653) ===|java -ea -cp build deal.test.HostValueReadInvocationTest'
+
+  # ISSUE-0654 registration: the cross-module sync call realization
+  # through the callee unit's EXTERNAL_ENTRY
+  # (cross-module-call-realization X1/X4/X5, the cross-module sync call
+  # contract, and the entry record contract;
+  # luajit-jvm-single-lowering-production-cutover C2/C7;
+  # semantic-ir-construct-coverage-cutover K4): the six named corpus
+  # fixtures lower through the one project entry with exactly one
+  # EXTERNAL_PARAMETER child per argument in one-based order, no
+  # caller-side return boundary, the callee's single EXTERNAL_RETURN on
+  # the declared return descriptor, and the recorded externalEntryRef;
+  # the oracle and both conformance emitters agree event-for-event over
+  # the probe (a cross-module call, a same-module exported call, and
+  # recursion), the failing probe, and all six fixtures; the production
+  # artifacts execute on both targets with the pinned sidecar transcripts
+  # (luajit; javac --release 25 -proc:none + java); the entry events
+  # parent to the caller's CALL under the callee module with the caller's
+  # module restored on the success and the failure path; and the
+  # fail-closed seeds (an externalEntryRef naming a module outside the
+  # closure, an externalEntryRef resolving to a non-entry op) are rejected
+  # by both emitters and the oracle with nothing emitted.
+  'fg|=== Running Cross-Module Call Realization Tests (ISSUE-0654) ===|java -ea -cp build deal.test.CrossModuleCallRealizationTest'
 )

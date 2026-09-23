@@ -29,10 +29,10 @@ import java.util.regex.Pattern;
  * run through the whole-project pipeline — the test-scope harness compile
  * entry ({@link HarnessCompileEntry}; ISSUE-0643 P10 item 3, mechanism 1)
  * for the compile and artifact verdicts, the release-owned
- * {@link Main#run(String[])} CLI for the production-invocation
- * fail-closed probes of the three compile-ok gates (their fixtures carry
- * HOST-kind declaration imports and a cross-module call the production arm
- * does not realize at this boundary), and a real
+ * {@link Main#run(String[])} CLI for the production-invocation probes of
+ * the three compile-ok gates (their HOST-kind declaration imports fail
+ * closed, while the F4 capture's cross-module call is realized by the
+ * ISSUE-0654 {@code CALL(EXTERNAL)} {@code SHARED_BODY} arm), and a real
  * {@link ProjectLocator#locate(String, deal.project.CliOverrides)} call
  * for the F5 locate verdict — with every pin transcribed from the landed
  * emission, never hand-authored from a message pattern.
@@ -217,6 +217,39 @@ public class ProjectGraphFixturesGatesTest {
         check(!Files.exists(out),
             context + ": the production failure stages no artifact under "
                 + out);
+    }
+
+    /**
+     * The production-invocation emitted-and-staged assertion of one
+     * re-expressed gate fixture (ISSUE-0654): the release-owned
+     * {@link Main} compile exits 0, reports no emitter gap, and publishes
+     * exactly one project artifact for the entry module (whose identity is
+     * the generated private module id here, because the fixture entry is
+     * not contained by a configured root), plus the unchanged LuaJIT
+     * deployment copies — and no per-module sibling.
+     *
+     * @param args    the CLI arguments of the fixture
+     * @param out     the fixture's fresh output directory
+     * @param context the assertion context
+     */
+    private static void checkProductionEmits(String[] args, Path out,
+            String context) throws IOException {
+        String[] run = runProductionCliCapturingErr(args);
+        check("0".equals(run[0]),
+            context + ": the release-owned production invocation compiles"
+                + " (exit " + run[0] + "): " + run[1]);
+        check(!run[1].contains("E6005"),
+            context + ": the production compile reports no emitter gap: "
+                + run[1]);
+        List<String> artifacts = artifactFilesUnder(out);
+        long projectArtifacts = artifacts.stream()
+            .filter(p -> LUA_MODULE_ID.matcher(p).matches()).count();
+        check(projectArtifacts == 1,
+            context + ": the production compile publishes exactly one project"
+                + " artifact under " + out + ": " + artifacts);
+        check(!artifacts.contains("pkg/util.lua"),
+            context + ": the production compile publishes no per-module"
+                + " sibling: " + artifacts);
     }
 
     /** Deletes a temp tree. */
@@ -527,14 +560,15 @@ public class ProjectGraphFixturesGatesTest {
                 "F4 emits exactly one private module artifact, got "
                     + privateArtifacts + ": " + artifacts);
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same cross-module-call fixture closed
-            // with E6005 SHARED_EMITTER_COVERAGE (the emission arm; no
-            // closure-guard token) and stages nothing.
-            checkProductionFailClosed(new String[]{
+            // ISSUE-0654: the release-owned production invocation realizes
+            // the same cross-module call (Util.value()) through the callee
+            // unit's EXTERNAL_ENTRY inside the one project artifact, so the
+            // production compile succeeds and publishes the entry module's
+            // one project artifact.
+            checkProductionEmits(new String[]{
                 "compile", entry.toString(), "--output",
                 base.resolve("prod_out").toString()},
-                base.resolve("prod_out"), null,
+                base.resolve("prod_out"),
                 "F4 module-roots-bare-import fixture");
 
             // Negative control (scratch copy only): moduleRoots: [] —

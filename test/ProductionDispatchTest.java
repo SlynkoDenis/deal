@@ -50,14 +50,15 @@ import java.util.stream.Stream;
  *       no cross-module call) emits one artifact per target carrying the
  *       per-module export surfaces, and the entry {@code main} runs
  *       exactly once;</li>
- *   <li>a failing lowering (a later-slice construct) and a failing
- *       emission (a cross-module sync call) each publish nothing and leave
- *       the previous artifact set byte-identical;</li>
+ *   <li>a failing lowering (a later-slice construct) stages nothing and
+ *       leaves the previous artifact set byte-identical, while a
+ *       cross-module sync call emits through the realized
+ *       {@code CALL(EXTERNAL)} {@code SHARED_BODY} arm (ISSUE-0654) and
+ *       publishes its one project artifact;</li>
  *   <li>the fail-closed families: a HOST-kind import
  *       ({@code HOST_MODULE_IMPORT}), a cross-module async call
- *       ({@code EXTERNAL_ASYNC_CALL}), a cross-module sync call, bytes,
- *       and
- *       function-typed materializations each fail with their named E6005
+ *       ({@code EXTERNAL_ASYNC_CALL}), bytes, and function-typed
+ *       materializations each fail with their named E6005
  *       and publish nothing, while a {@code STDLIB}/{@code COMPILED}-only
  *       closure, the builtin Error construction (ISSUE-0619), the
  *       {@code time.nowMillis} coverage (ISSUE-0623: the emitted artifacts
@@ -205,7 +206,7 @@ public class ProductionDispatchTest {
         }
         """;
 
-    /** The cross-module sync call: the emission covers no such arm. */
+    /** The cross-module sync call: the realized external-call arm. */
     private static final String SYNC_CALL_SOURCE = """
         import * as lib from "./lib"
 
@@ -725,8 +726,9 @@ public class ProductionDispatchTest {
     // =========================================================================
 
     private static void testAtomicFailureThroughDispatch() throws Exception {
-        System.out.println("-- atomic failure: a failing lowering and a failing "
-            + "emission publish nothing and preserve the previous set --");
+        System.out.println("-- atomic failure: a failing lowering stages nothing "
+            + "and preserves the previous set; the cross-module sync call "
+            + "emits --");
 
         Path project = Files.createTempDirectory("production-dispatch-atomic-");
         try {
@@ -748,8 +750,12 @@ public class ProductionDispatchTest {
             checkTreeIdentical(before, out,
                 "the failing lowering preserves the previous set");
 
-            // The failing emission: a cross-module sync call lowers but the
-            // production emission covers no external-call arm.
+            // ISSUE-0654: the cross-module sync call now emits through the
+            // realized CALL(EXTERNAL) SHARED_BODY arm (the callee unit's
+            // EXTERNAL_ENTRY inside the one project artifact): the compile
+            // exits 0 and publishes the one project artifact (the atomic
+            // staging property stays covered by the bytes-lowering case
+            // above).
             Path sync = Files.createTempDirectory(
                 "production-dispatch-atomic-sync-");
             try {
@@ -757,20 +763,22 @@ public class ProductionDispatchTest {
                 write(sync, "src/lib.deal", LIB_SOURCE);
                 write(sync, "src/main.deal", SYNC_CALL_SOURCE);
                 Path syncOut = sync.resolve("out");
-                write(syncOut, "main.lua", "-- previous artifact\n");
-                write(syncOut, "lib.lua", "-- previous sibling\n");
-                Map<String, byte[]> syncBefore = snapshotTree(syncOut);
                 ProjectOutcome syncCompile = productionCompile(sync,
                     "src/main.deal", "out");
-                check(syncCompile.exitCode() != 0,
-                    "the cross-module sync call fails closed at emission");
-                check(syncCompile.stderr().contains("E6005")
-                        && syncCompile.stderr().contains(
-                            "SHARED_EMITTER_COVERAGE"),
-                    "the failing emission names the emitter-coverage rule: "
+                check(syncCompile.exitCode() == 0,
+                    "the cross-module sync call compiles: "
                         + syncCompile.stderr());
-                checkTreeIdentical(syncBefore, syncOut,
-                    "the failing emission preserves the previous set");
+                check(!syncCompile.stderr().contains("E6005"),
+                    "the cross-module sync call reports no emitter gap: "
+                        + syncCompile.stderr());
+                check(artifactFiles(syncOut).contains("main.lua")
+                        && !artifactFiles(syncOut).contains("lib.lua"),
+                    "the emit publishes the one project artifact and no "
+                        + "per-module sibling: " + artifactFiles(syncOut));
+                ProcessOutcome syncRun = runProcess(syncOut, "luajit", "main.lua");
+                check(syncRun.exitCode() == 0,
+                    "the published project artifact executes: "
+                        + syncRun.output());
             } finally {
                 deleteRecursively(sync);
             }

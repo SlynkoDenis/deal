@@ -211,6 +211,29 @@ public class SemanticProductionGateTest {
             context + ": the production failure stages no artifact");
     }
 
+    /**
+     * The production-invocation emitted-and-staged assertion of one
+     * fixture the realized production arm covers (ISSUE-0654): the
+     * release-owned compile succeeds, emits exactly one project artifact,
+     * retains none, and publishes its artifact set.
+     */
+    private static void checkProductionEmits(Path project, String entry,
+            String output, String context) throws IOException {
+        CompilationOrchestrator production =
+            compileProjectAllowingFailure(project, entry, output);
+        check(production.diagnostics().isEmpty(),
+            context + ": the release-owned production invocation compiles: "
+                + production.diagnostics());
+        check(production.semanticEmissionCount() == 1
+                && production.retainedEmissionCount() == 0,
+            context + ": the production compile emits one project artifact "
+                + "and no retained artifact: semantic="
+                + production.semanticEmissionCount() + " retained="
+                + production.retainedEmissionCount());
+        check(Files.exists(project.resolve(output)),
+            context + ": the production compile publishes its artifact set");
+    }
+
     private static void testEmitterSeam() {
         System.out.println("-- Production emitter seam: unit + table, never AST/CheckResult --");
 
@@ -489,12 +512,13 @@ public class SemanticProductionGateTest {
                 "import * as lib from \"./lib\"\n\n"
                     + "export function probe(): int {\n  return lib.value()\n}\n\n"
                     + "export function main(): null {\n  return null\n}\n");
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the cross-module-call closure closed with
-            // E6005 SHARED_EMITTER_COVERAGE (the realization belongs to the
-            // calls child) and stages nothing.
-            checkProductionFailClosed(project, "src/main.deal", "out",
-                "SHARED_EMITTER_COVERAGE", "the multi-module cross-module call");
+            // ISSUE-0654: the release-owned production invocation realizes
+            // the cross-module call through the callee unit's
+            // EXTERNAL_ENTRY inside the one project artifact, so the
+            // multi-module closure compiles and stages its one project
+            // artifact.
+            checkProductionEmits(project, "src/main.deal", "out",
+                "the multi-module cross-module call");
 
             // The retained all-LEGACY multi-module route stays the harness
             // subject: zero semantic/two retained artifacts, an all-LEGACY
@@ -525,14 +549,15 @@ public class SemanticProductionGateTest {
                     "export function add(x: int, y: int): int {\n  return x + y\n}\n\n"
                         + "export function main(): null {\n  add(2, 3)\n"
                         + "  return null\n}\n");
-                // ISSUE-0643 P10 item 2: the dual-shape module (an
-                // exported function called from source) is a later-slice
-                // shape — the statically-resolved slice admits exactly one
-                // invocation shape per function — so the release-owned
-                // production invocation fails it closed with
-                // CONSTRUCT_UNLOWERED and stages nothing.
-                checkProductionFailClosed(dualProject, "src/main.deal",
-                    "out", "CONSTRUCT_UNLOWERED", "the dual-shape module");
+                // ISSUE-0654: the dual-shape module (an exported function
+                // called from source) compiles through the release-owned
+                // production invocation — the source call runs the
+                // exported function's recorded EXTERNAL_ENTRY (the closed
+                // CALL(EXTERNAL) SHARED_BODY cell) — and stages its one
+                // project artifact instead of claiming a second invocation
+                // shape.
+                checkProductionEmits(dualProject, "src/main.deal", "out",
+                    "the dual-shape module");
             } finally {
                 deleteRecursively(dualProject);
             }

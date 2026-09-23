@@ -178,6 +178,30 @@ public class ProjectIntegrationGatesTest {
         }
     }
 
+    /**
+     * The production-invocation emitted-and-staged assertion of one
+     * fixture the realized production arm covers (ISSUE-0654): the
+     * release-owned {@code deal.Main} compile exits 0, reports no emitter
+     * gap, and publishes the entry module's one project artifact.
+     *
+     * @param args        the CLI arguments of the fixture
+     * @param artifactDir the fixture's output directory
+     * @param context     the assertion context
+     */
+    private static void checkProductionEmits(String[] args, Path artifactDir,
+            String context) throws IOException {
+        String[] run = runProductionCliCapturingErr(args);
+        check("0".equals(run[0]),
+            context + ": the release-owned production invocation compiles"
+                + " (exit " + run[0] + "): " + run[1]);
+        check(!run[1].contains("E6005"),
+            context + ": the production compile reports no emitter gap: "
+                + run[1]);
+        check(Files.exists(artifactDir.resolve("main.lua")),
+            context + ": the production compile publishes its one project"
+                + " artifact under " + artifactDir);
+    }
+
     /** One finished subprocess: exit code plus merged stdout/stderr. */
     private record ProcessOutcome(int exitCode, String output) {
     }
@@ -894,13 +918,14 @@ public class ProjectIntegrationGatesTest {
                     + " with the equivalent output semantics: "
                     + jvmRun.output());
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the cross-module-call fixture closed with
-            // E6005 SHARED_EMITTER_COVERAGE (the cross-module call is the
-            // calls child's) and stages nothing.
-            checkProductionFailClosed(new String[]{
+            // ISSUE-0654: the release-owned production invocation realizes
+            // the cross-module calls (shared.greet()/shared.word()) through
+            // the callee unit's EXTERNAL_ENTRY inside the one project
+            // artifact, so the production compile succeeds and publishes
+            // its one entry artifact plus the deployment copies.
+            checkProductionEmits(new String[]{
                 "compile", entry.toString(), "--output",
-                base.resolve("prod_out").toString()}, null,
+                base.resolve("prod_out").toString()},
                 base.resolve("prod_out"), "class-free out-of-root project");
 
             // Determinism: repeated compiles into fresh output

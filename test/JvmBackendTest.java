@@ -8768,13 +8768,15 @@ public class JvmBackendTest {
                     + "the real stored int32 mode");
         }
 
-        // ISSUE-0643 P4/P10: the default orchestrator invocation is the
-        // release-owned production invocation — it runs the production arm
-        // (no route plan, no per-module backend results), so the dual-shape
-        // fixture (an exported function called from source) fails closed
-        // with E6005 CONSTRUCT_UNLOWERED; the harness invocation of the
-        // same fixture keeps the int32-plumb evidence through the retained
-        // per-module backend.
+        // ISSUE-0643 P4/P10 + ISSUE-0654: the default orchestrator
+        // invocation is the release-owned production invocation — it runs
+        // the production arm (no route plan, no per-module backend
+        // results). The dual-shape fixture (an exported function called
+        // from source) is realized by that arm: the source call runs the
+        // exported function's recorded EXTERNAL_ENTRY through the closed
+        // CALL(EXTERNAL) SHARED_BODY cell, so exactly one project artifact
+        // stages; the harness invocation of the same fixture keeps the
+        // int32-plumb evidence through the retained per-module backend.
         writeFile("src/plumb_dual.deal",
             "export function run(): int { return 41 + 1; }\n"
                 + "export function main(): null { run() return null; }\n");
@@ -8785,9 +8787,9 @@ public class JvmBackendTest {
                 dualEntryFile, outputRoot, false, false, false, Backend.JVM,
                 null, roots, Path.of(".").toAbsolutePath().normalize());
         boolean defaultOk = defaultOrchestrator.compile();
-        check(!defaultOk,
-            "the release-owned production invocation fails the dual-shape "
-                + "fixture closed");
+        check(defaultOk,
+            "the release-owned production invocation compiles the dual-shape "
+                + "fixture: " + defaultOrchestrator.diagnostics());
         check(defaultOrchestrator.invocation().semanticProfile()
                 == SemanticProfile.DEAL_V1_2_INT32,
             "the orchestrator default invocation derives DEAL_V1_2_INT32 "
@@ -8796,11 +8798,19 @@ public class JvmBackendTest {
                 && defaultOrchestrator.jvmGeneratedResults().isEmpty(),
             "the production arm consults no route plan and populates no "
                 + "per-module backend results");
-        check(defaultOrchestrator.diagnostics().stream().anyMatch(d ->
-                "E6005".equals(d.code())
-                    && d.message().contains("CONSTRUCT_UNLOWERED")),
-            "the default production failure names the construct rule: "
-                + defaultOrchestrator.diagnostics());
+        check(defaultOk
+                && defaultOrchestrator.semanticEmissionCount() == 1
+                && defaultOrchestrator.retainedEmissionCount() == 0,
+            "the dual-shape fixture emits exactly one project artifact and "
+                + "zero retained artifacts: semantic="
+                + defaultOrchestrator.semanticEmissionCount() + " retained="
+                + defaultOrchestrator.retainedEmissionCount());
+        Path dualClass = outputRoot.resolve(
+            JvmBackend.classNameFor(dualEntryFile.getFileName().toString()
+                .replace(".deal", "")) + ".java");
+        check(Files.exists(dualClass),
+            "the dual-shape production compile stages its project class at "
+                + dualClass);
         CompilationOrchestrator defaultHarness = new CompilationOrchestrator(
             dualEntryFile, outputRoot, false, false, false, false, Backend.JVM,
             null, roots, Path.of(".").toAbsolutePath().normalize(), null,
@@ -18105,27 +18115,36 @@ module @<PROJECT>/modelb.deal:1:1-2:1
             check(irPinOk, "jvm-modules-slice :: jvm-mod-imported-direct-call: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the cross-module-call closure closed with
-            // E6005 SHARED_EMITTER_COVERAGE and stages nothing (the
-            // cross-module call is the calls child's).
+            // ISSUE-0654: the release-owned production invocation
+            // compiles the cross-module-call closure through the realized
+            // CALL(EXTERNAL) SHARED_BODY arm (the callee unit's
+            // EXTERNAL_ENTRY inside the one project class) and stages its
+            // one project artifact.
+            Path irPinProductionOut = irPinRoot.resolve("out-production");
             CompilationOrchestrator irPinCallProduction =
                 new CompilationOrchestrator(
-                    irPinEntry, irPinRoot.resolve("out-production"), false,
+                    irPinEntry, irPinProductionOut, false,
                     false, false, false, Backend.JVM, irPinExternals,
                     List.of(irPinRoot), null, null,
                     CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
                         ReleaseConfiguration.releaseCapabilityRegistry()));
-            check(!irPinCallProduction.compile()
-                    && irPinCallProduction.diagnostics().stream().anyMatch(d ->
-                        "E6005".equals(d.code())
-                            && d.message().contains("SHARED_EMITTER_COVERAGE")),
+            boolean irPinProductionOk = irPinCallProduction.compile();
+            check(irPinProductionOk
+                    && irPinCallProduction.diagnostics().isEmpty(),
                 "jvm-modules-slice :: jvm-mod-imported-direct-call: the "
-                    + "release-owned production invocation fails the closure "
-                    + "closed: " + irPinCallProduction.diagnostics());
-            check(!Files.exists(irPinRoot.resolve("out-production")),
+                    + "release-owned production invocation compiles the closure: "
+                    + irPinCallProduction.diagnostics());
+            check(irPinProductionOk
+                    && irPinCallProduction.semanticEmissionCount() == 1
+                    && irPinCallProduction.retainedEmissionCount() == 0,
                 "jvm-modules-slice :: jvm-mod-imported-direct-call: the "
-                    + "production failure stages no artifact");
+                    + "production compile emits one project artifact and no "
+                    + "retained artifact: semantic="
+                    + irPinCallProduction.semanticEmissionCount() + " retained="
+                    + irPinCallProduction.retainedEmissionCount());
+            check(Files.exists(irPinProductionOut.resolve("Main.java")),
+                "jvm-modules-slice :: jvm-mod-imported-direct-call: the "
+                    + "production compile stages the entry project class");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {
