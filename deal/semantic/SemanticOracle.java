@@ -742,9 +742,12 @@ public final class SemanticOracle {
          * published value per {@code (module, name)} of the run, written
          * exactly once by the owning module's {@code EXPORT_PUBLISH} — the
          * oracle's mirror of the artifacts' program-scoped export-surface
-         * registry. An absent surface or entry is the absent-slot
-         * projection ({@link Value.MissingValue}); the registry is never
-         * written by a read.
+         * registry. A HOST/FFI module's surface is its loaded module table
+         * (the entry the host-load surface and the FFI child's
+         * {@code load_ffi} surface record under the module identity), of
+         * which a read resolves the named entry. An absent surface or entry
+         * is the absent-slot projection ({@link Value.MissingValue}); the
+         * registry is never written by a read.
          */
         final Map<ModuleId, Map<String, Value>> exportSurfaces =
             new LinkedHashMap<>();
@@ -5018,19 +5021,25 @@ public final class SemanticOracle {
         }
 
         /**
-         * EXPORT_READ — the per-kind read resolution (M3): a COMPILED
+         * EXPORT_READ — the per-kind read resolution (M3/M5): a COMPILED
          * read publishes the value the owning module's {@code
          * EXPORT_PUBLISH} recorded into the per-run export-surface
-         * registry, and an absent surface or entry publishes {@link
-         * Value.MissingValue} (the landed partial-drive parity state, a
-         * state a full execution never reaches because a dependency's
-         * publication runs before any dependent's read). The STDLIB and
-         * HOST kinds keep their landed placeholder until their own leaves
-         * land (T4/T5), and so does a read whose unit records no import
-         * fact for its module — the test-only class-core carrier
-         * sessions, whose units carry no module-level import op; every
-         * production and conformance session records the resolved import
-         * facts, so a COMPILED read is never guessed from a path.
+         * registry, and a HOST/FFI read publishes that registry's entry
+         * for the export — for a HOST module the surface is the loaded
+         * module table (the entry the calls child's host load surface and
+         * the FFI child's {@code load_ffi} surface record under the module
+         * identity), so the read re-wraps nothing and runs no host code.
+         * An absent surface or entry publishes {@link
+         * Value.MissingValue} in both cases (the landed partial-drive
+         * parity state, a state a full execution never reaches because a
+         * dependency's publication — or its load — runs before any
+         * dependent's read). The STDLIB kind keeps its landed placeholder
+         * until its own leaf lands (T4), and so does a read whose unit
+         * records no import fact for its module — the test-only class-core
+         * carrier sessions, whose units carry no module-level import op;
+         * every production and conformance session records the resolved
+         * import facts, so a COMPILED or HOST read is never guessed from a
+         * path.
          *
          * <p>The read does not write the value-keyed binding map
          * (K11/M3): the published value already carries the owner's
@@ -5042,12 +5051,12 @@ public final class SemanticOracle {
         private String executeExportRead(SemanticOp op) {
             KindPayload.ExportReadPayload payload =
                 (KindPayload.ExportReadPayload) op.payload();
+            ModuleImportKind kind = importKindOf(stateOf(op.opId()), payload.module());
             Value value;
-            if (importKindOf(stateOf(op.opId()), payload.module())
-                    == ModuleImportKind.COMPILED) {
+            if (kind == ModuleImportKind.COMPILED || kind == ModuleImportKind.HOST) {
                 Map<String, Value> surface = exportSurfaces.get(payload.module());
-                Value published = surface == null ? null : surface.get(payload.name());
-                value = published == null ? Value.MissingValue.INSTANCE : published;
+                Value entry = surface == null ? null : surface.get(payload.name());
+                value = entry == null ? Value.MissingValue.INSTANCE : entry;
             } else {
                 value = new Value.IntrinsicValue("export:"
                     + payload.module().path() + "." + payload.name());

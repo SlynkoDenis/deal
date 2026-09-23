@@ -60,8 +60,9 @@ public final class JvmRuntime {
      * generated class of one program resolves the same per-module
      * surfaces — a per-unit class resolves the surface its owner class
      * published in the same program, exactly like the LuaJIT chunk-global
-     * registry. Written only by the owner's {@code EXPORT_PUBLISH} (and
-     * the session's per-module get-or-create); a read never writes it.
+     * registry. Written only by the owner's {@code EXPORT_PUBLISH}, a HOST
+     * module's load (the loaded module table's entries), and the session's
+     * per-module get-or-create; a read never writes it.
      */
     public static final LinkedHashMap<String, Table> EXPORT_SURFACES =
         new LinkedHashMap<>();

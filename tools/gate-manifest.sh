@@ -552,4 +552,40 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # emitter failure maps to E6005 SHARED_EMITTER_COVERAGE with nothing
   # staged and the previous artifact set byte-identical).
   'fg|=== Running Compiled Export Read Realization Tests (ISSUE-0646) ===|java -ea -cp build deal.test.CompiledExportReadRealizationTest'
+  # ISSUE-0648 registration: the HOST/FFI export-read execution
+  # realization across the three consumers (module-export-reads-and-
+  # in-project-class-construction M5, M3's HOST branch, M6, the host/FFI
+  # read boundary contract, and the read execution contract;
+  # semantic-ir-construct-coverage-cutover K15 item 1 — a HOST module's
+  # surface is the loaded module table; luajit-jvm-single-lowering-
+  # production-cutover C1/C2; sequencing step 6/T5): the checker-valid
+  # declaration-only fixtures lowered/validated/registered in both
+  # positions (exactly one EXPORT_READ with the declared function
+  # descriptor plus exactly one HostFunction registration keyed by the
+  # read result's allocation identity, and the composed project gate
+  # admitting the project); the emitted read in both project sessions and
+  # both modes of both targets (LuaJIT
+  # S.v<id> = __exportHostValue(<module>, <name>) — the program-scoped
+  # surface entry itself, absent -> __MISSING; JVM
+  # v<id> = exportSurface(<module>).read(<name>) — the uniform read,
+  # absent -> JvmRuntime.MISSING), the identical operation in the per-unit
+  # sessions, byte-identical repeats, and no placeholder arm; the oracle's
+  # per-kind resolution (an absent surface or entry projects
+  # Value.MissingValue, a surface holding the recorded entries resolves the
+  # entry itself — the publication's own creation atom — and no
+  # export:<module>.<name> placeholder atom remains), the read's
+  # registration addressable by its own allocation identity with the
+  # doctored zero-registration/re-keyed seeds failing R-FUNCTION-BINDING;
+  # the combined per-unit probe (the entry carries T3's compiled read and
+  # this leaf's HOST read) resolved consistently across the oracle and both
+  # per-unit artifacts under the real toolchains (luajit;
+  # javac --release 25 -proc:none + java), with the absent-slot projection,
+  # the compiled read's published-value identity, the pinned E8001 at the
+  # HOST read's function-typed binding boundary, and the surface-populated
+  # seeds resolving exactly the seeded entry; and the production arm's
+  # unchanged HOST_MODULE_IMPORT guard (E6005 SHARED_EMITTER_COVERAGE, the
+  # raw specifier and resolved module named, nothing staged, the previous
+  # artifact set byte-identical). No loader surface and no executable
+  # value-position drive are added.
+  'fg|=== Running Host Export Read Realization Tests (ISSUE-0648) ===|java -ea -cp build deal.test.HostExportReadRealizationTest'
 )

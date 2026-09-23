@@ -4620,20 +4620,22 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * {@code EXPORT_READ} — the per-kind read resolution (M2/M6): a
-         * COMPILED read is the uniform program-scoped surface lookup
-         * {@code exportSurface(module).read(name)}, whose landed
-         * {@code Table.read} projects {@code JvmRuntime.MISSING} for an
-         * absent key (the stored entry is the owner's published
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M5/M6):
+         * the read is the uniform program-scoped surface lookup
+         * {@code exportSurface(module).read(name)} for a COMPILED read
+         * (whose stored entry is the owner's published
          * {@code JvmRuntime.FunctionValue} carrier — the identical object
-         * for every read of one export in one program); the STDLIB and
-         * HOST kinds keep their landed placeholder until their own leaves
-         * land (T4/T5). The emitted read expression is identical in trace
-         * and production mode. In a project session a COMPILED read whose
-         * owner module is not among the closure's units is a producer
-         * defect and fails the emission closed; a per-unit session never
-         * fails closed for a foreign owner (the owner's own class
-         * publishes the surface of the same program).
+         * for every read of one export in one program) and for a HOST/FFI
+         * read (whose stored entry is the loaded module table's entry),
+         * and whose landed {@code Table.read} projects
+         * {@code JvmRuntime.MISSING} for an absent key; the STDLIB kind
+         * keeps its landed placeholder until its own leaf lands (T4). The
+         * emitted read expression is identical in trace and production
+         * mode. In a project session a COMPILED read whose owner module is
+         * not among the closure's units is a producer defect and fails the
+         * emission closed; a per-unit session never fails closed for a
+         * foreign owner (the owner's own class publishes the surface of
+         * the same program).
          */
         private void emitExportRead(SemanticOp op, int indent) {
             KindPayload.ExportReadPayload payload =
@@ -4642,8 +4644,8 @@ public final class JvmSemanticEmitter {
             // fact (M6). A module the session records no import fact for —
             // the test-only class-core carrier sessions, whose units carry
             // no module-level import op — keeps the landed interim
-            // realization (the STDLIB/HOST placeholder); the production
-            // and conformance sessions record every resolved import, so a
+            // realization (the STDLIB placeholder); the production and
+            // conformance sessions record every resolved import, so a
             // COMPILED read is never guessed from a path.
             ModuleImportKind kind = importKinds.get(payload.module());
             if (kind == ModuleImportKind.COMPILED && projectSession
@@ -4656,7 +4658,7 @@ public final class JvmSemanticEmitter {
             }
             emitStart(op, indent);
             out.append(indent(indent)).append(slot((ValueId) op.result()));
-            if (kind == ModuleImportKind.COMPILED) {
+            if (kind == ModuleImportKind.COMPILED || kind == ModuleImportKind.HOST) {
                 out.append(" = exportSurface(")
                     .append(javaString(payload.module().path())).append(").read(")
                     .append(javaString(payload.name())).append(");\n");

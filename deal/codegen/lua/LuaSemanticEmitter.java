@@ -4438,18 +4438,22 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * {@code EXPORT_READ} — the per-kind read resolution (M2/M6): a
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M5/M6): a
          * COMPILED read resolves the owning module's published value
          * through the chunk-global program-scoped export-surface registry
-         * (the entry's {@code __val} field, an absent surface or entry
-         * projecting the {@code __MISSING} sentinel); the STDLIB and HOST
-         * kinds keep their landed placeholder until their own leaves land
-         * (T4/T5). The emitted read expression is identical in trace and
-         * production mode. In a project session a COMPILED read whose
-         * owner module is not among the closure's units is a producer
-         * defect and fails the emission closed; a per-unit session never
-         * fails closed for a foreign owner (the owner's own chunk
-         * publishes the surface of the same program).
+         * (the entry's {@code __val} field); a HOST/FFI read resolves the
+         * same registry's entry itself — for a HOST module the surface is
+         * the loaded module table {@code __rt.load_host} returns, so the
+         * entry is the host ABI's value and the read never re-wraps it;
+         * an absent surface or entry projects the {@code __MISSING}
+         * sentinel in both cases. The STDLIB kind keeps its landed
+         * placeholder until its own leaf lands (T4). The emitted read
+         * expression is identical in trace and production mode. In a
+         * project session a COMPILED read whose owner module is not among
+         * the closure's units is a producer defect and fails the emission
+         * closed; a per-unit session never fails closed for a foreign
+         * owner (the owner's own chunk publishes the surface of the same
+         * program).
          */
         private void emitExportRead(SemanticOp op) {
             KindPayload.ExportReadPayload payload =
@@ -4458,8 +4462,8 @@ public final class LuaSemanticEmitter {
             // fact (M6). A module the session records no import fact for —
             // the test-only class-core carrier sessions, whose units carry
             // no module-level import op — keeps the landed interim
-            // realization (the STDLIB/HOST placeholder); the production
-            // and conformance sessions record every resolved import, so a
+            // realization (the STDLIB placeholder); the production and
+            // conformance sessions record every resolved import, so a
             // COMPILED read is never guessed from a path.
             ModuleImportKind kind = importKinds.get(payload.module());
             if (kind == ModuleImportKind.COMPILED && projectSession
@@ -4473,6 +4477,10 @@ public final class LuaSemanticEmitter {
             emitStart(op);
             if (kind == ModuleImportKind.COMPILED) {
                 out.append(slot((ValueId) op.result())).append(" = __exportValue(")
+                    .append(luaString(payload.module().path())).append(", ")
+                    .append(luaString(payload.name())).append(")\n");
+            } else if (kind == ModuleImportKind.HOST) {
+                out.append(slot((ValueId) op.result())).append(" = __exportHostValue(")
                     .append(luaString(payload.module().path())).append(", ")
                     .append(luaString(payload.name())).append(")\n");
             } else {
@@ -5315,6 +5323,21 @@ local function __exportValue(module, name)
   local value = entry.__val
   if value == nil then return __MISSING end
   return value
+end
+-- The host/FFI export read (M5): the module surface's entry itself. A
+-- HOST module's surface is the loaded module table the MODULE_IMPORT
+-- load publishes (__rt.load_host returns the wrapped export table), so
+-- the entry is the host ABI's value — the read re-wraps nothing, copies
+-- nothing, and runs no host code. An absent surface or entry (the load
+-- has not run in this execution) projects the __MISSING sentinel, which
+-- atomizes as "missing" — exactly the oracle's Value.MissingValue and the
+-- JVM runtime's MISSING.
+local function __exportHostValue(module, name)
+  local surface = __exportSurfaces[module]
+  if surface == nil then return __MISSING end
+  local entry = surface[name]
+  if entry == nil then return __MISSING end
+  return entry
 end
 -- The numeric value view of one operand: a JSON_PARSE carrier (the
 -- int/number-typed value the parsed graph carries) unwraps to its
