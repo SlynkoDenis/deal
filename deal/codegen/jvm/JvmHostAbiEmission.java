@@ -689,6 +689,48 @@ final class JvmHostAbiEmission {
                     + " producer defect)");
             }
         }
+        // The loaded module's surface is the host import's namespace
+        // value and the surface the reads child's EXPORT_READ resolves
+        // (ISSUE-0651; H1 and H2 item 1): the module table carries one
+        // production FunctionValue carrier per declared function export,
+        // bridging the emitted per-export wrapper (the host-to-DEAL half
+        // of H7's function crossing). The surface is written only after
+        // every load-time binding and defaults capture succeeded, so a
+        // failed load leaves no partial surface; a class export's entry
+        // is the declaration-owned construction child's.
+        List<Map.Entry<String, Type>> functionExports = new ArrayList<>();
+        for (Map.Entry<String, Type> export : module.facts().exports().entrySet()) {
+            if (export.getValue() instanceof Type.Func) {
+                functionExports.add(export);
+            }
+        }
+        if (!functionExports.isEmpty()) {
+            out.append("    JvmRuntime.Table __surf = exportSurface(")
+                .append(javaString(module.modulePath())).append(");\n");
+            for (Map.Entry<String, Type> export : functionExports) {
+                Type.Func func = (Type.Func) export.getValue();
+                StringBuilder surfaceArgs = new StringBuilder();
+                for (int i = 0; i < func.paramTypes().size(); i++) {
+                    surfaceArgs.append("__a[").append(i).append("], ");
+                }
+                surfaceArgs.append("\"-\", 0, 0");
+                // A declared null return emits a void wrapper: the
+                // surface entry's invoker runs it as a statement and
+                // yields the language null.
+                String invoker = func.returnType() instanceof Type.Null
+                    ? "__a -> { " + wrapperName(key, export.getKey()) + "("
+                        + surfaceArgs + "); return null; }"
+                    : "__a -> " + wrapperName(key, export.getKey()) + "("
+                        + surfaceArgs + ")";
+                out.append("    __surf.write(").append(javaString(export.getKey()))
+                    .append(", new JvmRuntime.FunctionValue(").append(invoker)
+                    .append(", ")
+                    .append(javaString(JvmSemanticEmitter.runtimeDescriptorText(
+                        DescriptorService.describe(func))))
+                    .append(", ")
+                    .append(javaString(descriptorText(func))).append(", null));\n");
+            }
+        }
         out.append("  }\n\n");
     }
 

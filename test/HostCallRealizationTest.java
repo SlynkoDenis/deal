@@ -15,7 +15,10 @@ import deal.semantic.CompilerProfileProvider;
 import deal.semantic.HostDeclarationSurface;
 import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
+import deal.semantic.SemanticOracle;
 import deal.semantic.SemanticRequirementManifest;
+import deal.semantic.SemanticRuntimeModel;
+import deal.semantic.SemanticTraceProtocol;
 import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.AnchorId;
 import deal.semantic.ir.BlockId;
@@ -115,6 +118,14 @@ import java.util.Set;
  *       protocol instead of the adapter's throwing stub, and by a plain
  *       DEAL-body carrier whose host-invoked error snapshot must carry the
  *       closure's own frame; the same fixture drives both targets.</li>
+ *   <li><b>The trace-mode oracle agreement.</b> The trace-mode project
+ *       sessions of both targets carry the compile's host declaration
+ *       surface (the {@code MODULE_IMPORT(HOST)} load and the host arms),
+ *       and the oracle resolves the loaded surface entry through the
+ *       host seam ({@code HostResponder.loadedExport}); the fixtures whose
+ *       three consumers agree are driven event-for-event (the trace events
+ *       and the pinned terminal snapshot fields), and the oracle's side of
+ *       the composite contextual read's deferral is asserted directly.</li>
  * </ol>
  */
 public class HostCallRealizationTest {
@@ -485,8 +496,14 @@ public class HostCallRealizationTest {
         String mode = field(json, "\"mode\"");
         String code = field(json, "\"code\"");
         String message = field(json, "\"message\"");
-        String expected = field(json, "\"expected\"");
-        String actual = field(json, "\"actual\"");
+        // The attained expected/actual pair lives in the sidecar's error
+        // object (a runtime-ok sidecar has none); the transcript's escaped
+        // copy of the same names must not be matched, so the search starts
+        // at the error key.
+        int errorAt = json.indexOf("\"error\"");
+        String errorBlock = errorAt < 0 ? "" : json.substring(errorAt);
+        String expected = field(errorBlock, "\"expected\"");
+        String actual = field(errorBlock, "\"actual\"");
         Integer line = number(json, "\"line\"");
         Integer column = number(json, "\"column\"");
         return new Expectation(mode, code, message,
@@ -575,6 +592,14 @@ public class HostCallRealizationTest {
             name + " (" + target + ") pinned origin column");
         check(origin.substring(0, prevColon).endsWith(name + ".deal"),
             name + " (" + target + ") pinned origin file: " + origin);
+        // The sidecar's attained expected/actual pair (the pinned
+        // snapshot fields): the probe prints the raised error's own pair
+        // and the assertion is null-aware (a row without an attained pair
+        // prints the "-" placeholder).
+        checkEq(expectation.expected(), "-".equals(parts[3]) ? null : parts[3],
+            name + " (" + target + ") pinned expected");
+        checkEq(expectation.actual(), "-".equals(parts[4]) ? null : parts[4],
+            name + " (" + target + ") pinned actual");
     }
 
     // =========================================================================
@@ -1333,16 +1358,18 @@ public class HostCallRealizationTest {
         return """
             local function emitError(e)
               if type(e) == "table" and e.__d then
-                print("ERR:" .. e.code .. "|" .. tostring(e.m) .. "|" .. tostring(e.o))
+                print("ERR:" .. e.code .. "|" .. tostring(e.m) .. "|" .. tostring(e.o)
+                  .. "|" .. tostring(e.e or "-") .. "|" .. tostring(e.a or "-"))
                 return
               end
               if type(e) == "table" and e.code ~= nil then
                 print("ERR:" .. e.code .. "|" .. tostring(e.message) .. "|"
                   .. tostring(e.file) .. ":" .. tostring(e.line) .. ":"
-                  .. tostring(e.column))
+                  .. tostring(e.column) .. "|" .. tostring(e.expected or "-") .. "|"
+                  .. tostring(e.actual or "-"))
                 return
               end
-              print("ERR:E9999|" .. tostring(e) .. "|-")
+              print("ERR:E9999|" .. tostring(e) .. "|-|-|-")
             end
             local chunk = dofile("%s")
             local ok, err = __dealMain()
@@ -1396,7 +1423,9 @@ public class HostCallRealizationTest {
 
               private static void report(deal.codegen.jvm.JvmRuntime.DealError error) {
                 System.out.println("ERR:" + error.code + "|" + error.msg + "|"
-                    + error.origin);
+                    + error.origin + "|" + (error.expected == null ? "-"
+                        : error.expected) + "|" + (error.actual == null ? "-"
+                        : error.actual));
               }
             }
             """.formatted(className, className, quoted(entryPath));
@@ -1784,6 +1813,485 @@ public class HostCallRealizationTest {
         Files.writeString(file, content, StandardCharsets.UTF_8);
     }
 
+    // =========================================================================
+    // 8. The trace-mode oracle agreement (the combined host drive)
+    // =========================================================================
+
+    /**
+     * The fixtures of the admitted sync host set whose host terminals the
+     * oracle's deterministic seam can express <em>and</em> whose three
+     * consumers' trace streams agree, with the reason of every exclusion
+     * (asserted, never silently skipped). Each exclusion below is either
+     * an expression limit of the oracle's seam/value model or a
+     * divergence between the oracle's landed projections and the
+     * corpus-pinned artifact texts — never a missing host-call arm: the
+     * excluded fixtures' host calls execute on both artifacts through the
+     * same arms, and their pinned outcomes are asserted by the fixture-set
+     * drives above. See the MR body's findings for the exact evidence.
+     */
+    private static final Map<String, String> TRACE_DRIVE_EXCLUSIONS = Map.ofEntries(
+        Map.entry("host-boundary-apply-function",
+            "the deployed host invokes the crossed DEAL closure; the oracle's "
+                + "HostResponder carries no invocation handle for a crossed function value"),
+        Map.entry("host-nullable-function-param",
+            "the deployed host invokes the crossed nullable-function closure (same "
+                + "missing invocation handle)"),
+        Map.entry("host-nullable-function-return-bad",
+            "the deployed host returns a raw host function value; every oracle value "
+                + "that is a function for the actual-kind projection also carries a "
+                + "signature, so the pinned raw-function rejection row is not "
+                + "expressible (the emitters pin it)"),
+        Map.entry("host-empty-return-bad",
+            "the deployed host returns zero results; the seam's SyncOutcome has no "
+                + "\"no value\" terminal and the oracle's closed value model has no "
+                + "nothing view"),
+        Map.entry("host-bytes-param-mismatch-e8010",
+            "the oracle's closed boundary projector has no bytes cell (the bytes "
+                + "representation is the sibling child's) — the contextual bytes read "
+                + "reaches it as a producer defect"),
+        Map.entry("host-bytes-return-mismatch-e8010",
+            "the declared bytes return cell reaches the same absent oracle boundary cell"),
+        Map.entry("host-invalid-utf8-e8010",
+            "the deployed host returns raw invalid UTF-8 bytes; the oracle's string "
+                + "value is a Java String (valid UTF-16), so the invalid-encoding "
+                + "classification is not expressible (the UTF-16 surrogate row is)"),
+        Map.entry("host-bad-return",
+            "the declared return cell fails inside the emitted wrapper (the single "
+                + "check authority), so the raw host value never reaches the arm: the "
+                + "oracle's return-boundary START input cannot be reproduced, and the "
+                + "oracle's HOST_SYNC_RETURN projection text differs from the "
+                + "corpus-pinned runtime text the artifacts produce"),
+        Map.entry("host-prewrapped-bad", "same return-cell failure path"),
+        Map.entry("host-null-return-bad", "same return-cell failure path"),
+        Map.entry("host-nullable-return-bad", "same return-cell failure path"),
+        Map.entry("host-surrogate-utf8-e8010",
+            "same return-cell failure path (the oracle also projects the invalid "
+                + "string as invalid-unicode, the pinned corpus text is the runtime's "
+                + "UTF-16 surrogate reason)"),
+        Map.entry("host-rest-bad",
+            "the oracle's landed HOST_PARAMETER projection text/actual (the shared "
+                + "closed-boundary row) differs from the corpus-pinned runtime text "
+                + "(\"expected array\" / actual number) the artifacts produce"),
+        Map.entry("host-nullable-function-param-bad",
+            "same parameter-cell projection text (the oracle's row vs the pinned "
+                + "runtime signature-mismatch text)"),
+        Map.entry("host-array-return-ok",
+            "the H7 per-crossing array materialization allocates a second value on "
+                + "LuaJIT, so the CALL SUCCESS identity atom differs from the "
+                + "oracle's single carrier value (the JVM crossing is compared)"));
+
+    /** The trace-drivable fixtures of the admitted set (declaration order). */
+    private static final List<String> TRACE_DRIVE_FIXTURES = traceDriveFixtures();
+
+    private static List<String> traceDriveFixtures() {
+        List<String> fixtures = new ArrayList<>();
+        for (String name : SYNC_FIXTURES) {
+            if (!TRACE_DRIVE_EXCLUSIONS.containsKey(name)) {
+                fixtures.add(name);
+            }
+        }
+        return List.copyOf(fixtures);
+    }
+
+    /**
+     * The trace-drive app source of one fixture: its own host-call body on
+     * the entry path, so the oracle's init walk and the trace-mode
+     * artifacts execute the identical host calls. A fixture whose host
+     * calls already sit in {@code main} keeps its source; a fixture whose
+     * calls sit in a {@code test_*} export has that function's body
+     * (statements unchanged) moved onto the entry path: the export prefix
+     * is dropped (an exported body invoked through both its external entry
+     * and a source call has no single invocation shape) and the original
+     * main invokes it.
+     */
+    private static String traceDriveSource(String rawApp) {
+        String app = stripDirectives(rawApp);
+        int at = app.indexOf("export function test_");
+        if (at < 0) {
+            return app;
+        }
+        int nameStart = at + "export function ".length();
+        String testName = app.substring(nameStart, app.indexOf('(', nameStart));
+        String unexported = app.substring(0, at) + "function "
+            + app.substring(nameStart);
+        String mainBody = "export function main(): null {\n  return null;\n}";
+        if (!unexported.contains(mainBody)) {
+            throw new IllegalStateException("the fixture carries no plain main: "
+                + unexported);
+        }
+        return unexported.replace(mainBody, "export function main(): null {\n  "
+            + testName + "();\n  return null;\n}");
+    }
+
+    /** One decoded trace protocol run: the ordered events and the terminal. */
+    private record TraceRun(java.util.List<String> events,
+        SemanticRuntimeModel.Terminal terminal) {
+    }
+
+    /** Decodes one artifact's protocol stream (events and the single terminal). */
+    private static TraceRun decodeTrace(String stderr) {
+        java.util.List<String> events = new ArrayList<>();
+        SemanticRuntimeModel.Terminal terminal = null;
+        for (String line : stderr.split("\n", -1)) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            Object decoded;
+            try {
+                decoded = SemanticTraceProtocol.decode(line);
+            } catch (RuntimeException exception) {
+                throw new IllegalStateException("the trace protocol does not decode '"
+                    + line + "': " + exception.getMessage());
+            }
+            if (decoded instanceof SemanticRuntimeModel.TraceEvent event) {
+                events.add(event.text());
+            } else if (decoded instanceof SemanticRuntimeModel.Terminal term) {
+                if (terminal != null) {
+                    throw new IllegalStateException("two terminal records: " + line);
+                }
+                terminal = term;
+            }
+        }
+        if (terminal == null) {
+            throw new IllegalStateException("the artifact published no terminal record");
+        }
+        return new TraceRun(java.util.List.copyOf(events), terminal);
+    }
+
+    /** The canonical text of one terminal (the pinned snapshot fields). */
+    private static String terminalText(SemanticRuntimeModel.Terminal terminal) {
+        return switch (terminal) {
+            case SemanticRuntimeModel.Terminal.Success success ->
+                "success:" + success.resultAtom();
+            case SemanticRuntimeModel.Terminal.DealFailure failure -> {
+                SemanticRuntimeModel.ErrorSnapshot error = failure.error();
+                yield "failure:" + error.code() + "|" + error.message() + "|"
+                    + error.origin() + "|" + error.expected() + "|" + error.actual();
+            }
+        };
+    }
+
+    /** Asserts one artifact trace equals the oracle's event-for-event. */
+    private static void checkTraceParity(String name, String target,
+            TraceRun oracle, TraceRun artifact) {
+        java.util.List<String> expected = oracle.events();
+        java.util.List<String> actual = artifact.events();
+        if (!expected.equals(actual)) {
+            failed++;
+            int limit = Math.min(expected.size(), actual.size());
+            for (int i = 0; i < limit; i++) {
+                if (!expected.get(i).equals(actual.get(i))) {
+                    System.err.println("FAIL: " + name + " (" + target
+                        + ") trace event " + i + " oracle [" + expected.get(i)
+                        + "] vs artifact [" + actual.get(i) + "]");
+                    return;
+                }
+            }
+            System.err.println("FAIL: " + name + " (" + target + ") trace length "
+                + expected.size() + " (oracle) vs " + actual.size() + " (artifact)");
+            return;
+        }
+        passed++;
+    }
+
+    // -- the scripted host terminals (the deployed host's own behavior) -------
+
+    private static SemanticOracle.Value str(String value) {
+        return new SemanticOracle.Value.StrValue(value);
+    }
+
+    private static SemanticOracle.Value intValue(long value) {
+        return new SemanticOracle.Value.IntValue(value);
+    }
+
+    private static SemanticOracle.Value nullValue() {
+        return SemanticOracle.Value.NullValue.INSTANCE;
+    }
+
+    private static String stringArg(List<SemanticOracle.Value> args, int index) {
+        return ((SemanticOracle.Value.StrValue) args.get(index)).value();
+    }
+
+    /** The joined text of the declared string[] argument (the rest_join host). */
+    private static String joinedParts(String separator, SemanticOracle.Value value) {
+        SemanticOracle.Value.ArrayValue parts =
+            (SemanticOracle.Value.ArrayValue) value;
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < parts.elements().size(); i++) {
+            if (i > 0) {
+                joined.append(separator);
+            }
+            joined.append(((SemanticOracle.Value.StrValue) parts.elements().get(i))
+                .value());
+        }
+        return joined.toString();
+    }
+
+    /**
+     * The scripted host seam of one trace drive: the deployed host
+     * implementation's own terminals (the values, the state transitions,
+     * and the loaded surface entries) expressed through the deterministic
+     * seam, so the oracle executes the identical host behavior the
+     * artifacts run against the real host module.
+     */
+    private static SemanticOracle.HostResponder traceHostResponder(String name) {
+        return new SemanticOracle.HostResponder() {
+            private final Map<String, SemanticOracle.Value> entries =
+                new LinkedHashMap<>();
+            private int nextValue = 0;
+
+            @Override
+            public SemanticOracle.Value loadedExport(ModuleId module, String export,
+                    RuntimeDescriptor descriptor) {
+                return entries.computeIfAbsent(module.path() + "." + export,
+                    key -> new SemanticOracle.Value.IntrinsicValue("host:" + key));
+            }
+
+            @Override
+            public SyncOutcome call(ModuleId module, String export,
+                    RuntimeDescriptor.Func descriptor,
+                    List<SemanticOracle.Value> args) {
+                String key = name + " " + module.path() + "." + export;
+                return switch (key) {
+                    case "host-bad-return host.bad_return.getNumber" ->
+                        new SyncOutcome.Returned(str("not a number"));
+                    case "host-prewrapped-bad host.prewrapped_bad.ping" ->
+                        new SyncOutcome.Returned(str("junk"));
+                    case "host-prewrapped-ok host.prewrapped_ok.greet" ->
+                        new SyncOutcome.Returned(str("hello " + stringArg(args, 0)));
+                    case "host-prewrapped-ok host.prewrapped_ok.ping" ->
+                        new SyncOutcome.Returned(nullValue());
+                    case "host-extra-export-ignored host.extra_export.ping" ->
+                        new SyncOutcome.Returned(str("pong"));
+                    case "host-boundary-boolean-roundtrip host.boundary.echoBoolean",
+                        "host-boundary-int-minimum-param host.boundary.echoInt",
+                        "host-boundary-null-narrowing host.boundary.echoString",
+                        "host-boundary-nullable-int-null-roundtrip host.boundary.nullableInt",
+                        "host-boundary-nullable-int-value-roundtrip host.boundary.nullableInt",
+                        "host-boundary-number-roundtrip host.boundary.echoNumber",
+                        "host-boundary-unicode-string-roundtrip host.boundary.echoString" ->
+                        new SyncOutcome.Returned(args.get(0));
+                    case "host-boundary-repeat-call host.boundary.nextValue" ->
+                        new SyncOutcome.Returned(intValue(++nextValue));
+                    case "host-null-return-bad host.nullreturn_bad.ping" ->
+                        new SyncOutcome.Returned(str("junk"));
+                    case "host-null-return-ok host.nullreturn_ok.ping" ->
+                        new SyncOutcome.Returned(nullValue());
+                    case "host-nullable-function-return-ok host.nullable_fn_return.getCallback" ->
+                        new SyncOutcome.Returned(nullValue());
+                    case "host-nullable-return-bad host.nullable_return.find" ->
+                        new SyncOutcome.Returned(intValue(42));
+                    case "host-nullable-return-ok host.nullable_return.find" ->
+                        "__NULL__".equals(stringArg(args, 0))
+                            ? new SyncOutcome.Returned(nullValue())
+                            : new SyncOutcome.Returned(args.get(0));
+                    case "host-rest-ok host.rest_join.join" ->
+                        new SyncOutcome.Returned(str(joinedParts(stringArg(args, 0),
+                            args.get(1))));
+                    case "host-array-return-ok host.array_return.split" ->
+                        new SyncOutcome.Returned(new SemanticOracle.Value.ArrayValue(
+                            List.of(str("a"), str("b"), str("c")),
+                            ((RuntimeDescriptor.Array) descriptor.returnType())
+                                .element()));
+                    case "host-surrogate-utf8-e8010 host.bad_string.surrogateString" ->
+                        new SyncOutcome.Returned(str("\uD800"));
+                    default -> throw new IllegalStateException(
+                        "the trace drive scripts no host terminal for '" + key
+                            + "' (a host call the deployed host never receives, or"
+                            + " an unscripted terminal)");
+                };
+            }
+        };
+    }
+
+    // -- the drive -----------------------------------------------------------
+
+    private static void testOracleTraceAgreement() throws Exception {
+        System.out.println("-- the trace-mode oracle agreement: the sync host calls run "
+            + "through the oracle and both trace-mode artifacts event-for-event --");
+        for (String name : TRACE_DRIVE_FIXTURES) {
+            SyncFixture fixture = syncFixture(name);
+            String rawApp = Files.readString(Path.of(fixture.corpusFixture()),
+                StandardCharsets.UTF_8);
+            Fixture compiled = compileWith(fixture.name(), fixture.hostStem(),
+                Files.readString(Path.of(fixture.corpusHost() + ".d.deal"),
+                    StandardCharsets.UTF_8),
+                traceDriveSource(rawApp));
+            Path workspace = Files.createTempDirectory("host-trace");
+            try {
+                SemanticLowerer.ProjectLoweringResult result = lower(compiled);
+                if (result.project() == null) {
+                    fail("the trace drive fixture '" + name + "' lowers: "
+                        + result.diagnostics());
+                    continue;
+                }
+                ExecutableLoweredProject project = result.project();
+                SemanticRuntimeModel.ConsumerRun oracleRun =
+                    SemanticOracle.executeProjectInits(project, result.tables(),
+                        result.registries(), traceHostResponder(name));
+                java.util.List<String> oracleEvents = new ArrayList<>();
+                for (SemanticRuntimeModel.TraceEvent event : oracleRun.trace()) {
+                    oracleEvents.add(event.text());
+                }
+                TraceRun oracle = new TraceRun(java.util.List.copyOf(oracleEvents),
+                    oracleRun.terminal());
+
+                // The LuaJIT trace artifact: the host module on package.path,
+                // the chunk's own init walk (the entry main drives the host
+                // calls), the trace protocol on stderr.
+                Path luaArtifact = workspace.resolve("project.lua");
+                Files.writeString(luaArtifact, LuaSemanticEmitter.emitProject(
+                    project, result.tables(), result.registries(),
+                    compiled.surface()), StandardCharsets.UTF_8);
+                deployRuntime(workspace);
+                deployHostLua(workspace, fixture);
+                Outcome luaOutcome = runProcess(List.of("luajit",
+                    luaArtifact.toAbsolutePath().toString()), workspace);
+                check(luaOutcome.exitCode() == 0, "the trace drive fixture '" + name
+                    + "' runs under luajit: " + escaped(luaOutcome.stderr()));
+                TraceRun lua = decodeTrace(luaOutcome.stderr());
+                checkTraceParity(name, "luajit", oracle, lua);
+                checkEq(terminalText(oracle.terminal()), terminalText(lua.terminal()),
+                    name + " (luajit) terminal parity");
+
+                // The JVM trace artifact: compiled with the deployed host
+                // implementation, the trace protocol on stderr.
+                JvmSemanticEmitter.EmissionResult jvmEmission =
+                    JvmSemanticEmitter.emitProject(project, result.tables(),
+                        result.registries(), compiled.surface());
+                String jvmClass = jvmEmission.className();
+                String hostClass = JvmBackend.classNameFor(fixture.hostSpecifier());
+                Files.writeString(workspace.resolve(jvmClass + ".java"),
+                    jvmEmission.source(), StandardCharsets.UTF_8);
+                Files.writeString(workspace.resolve(hostClass + ".java"),
+                    Files.readString(Path.of(fixture.corpusHost() + ".java")),
+                    StandardCharsets.UTF_8);
+                Path classes = workspace.resolve("classes");
+                Files.createDirectories(classes);
+                String classpath = absoluteClasspath();
+                Outcome javacRun = runProcess(List.of("javac", "--release", "25",
+                    "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                    jvmClass + ".java", hostClass + ".java"), workspace);
+                check(javacRun.exitCode() == 0, "the trace drive fixture '" + name
+                    + "' compiles under javac with the deployed host: "
+                    + javacRun.stdout() + javacRun.stderr());
+                if (javacRun.exitCode() != 0) {
+                    continue;
+                }
+                Outcome jvmOutcome = runProcess(List.of("java", "-cp",
+                    classpath + java.io.File.pathSeparator + classes, jvmClass),
+                    workspace);
+                check(jvmOutcome.exitCode() == 0, "the trace drive fixture '" + name
+                    + "' runs under java: exit=" + jvmOutcome.exitCode() + " "
+                    + escaped(jvmOutcome.stderr()));
+                TraceRun jvm = decodeTrace(jvmOutcome.stderr());
+                checkTraceParity(name, "java", oracle, jvm);
+                checkEq(terminalText(oracle.terminal()), terminalText(jvm.terminal()),
+                    name + " (java) terminal parity");
+            } finally {
+                deleteRecursively(workspace);
+                deleteRecursively(compiled.root());
+            }
+        }
+        for (Map.Entry<String, String> exclusion : TRACE_DRIVE_EXCLUSIONS.entrySet()) {
+            check(SYNC_FIXTURES.contains(exclusion.getKey())
+                    && !TRACE_DRIVE_FIXTURES.contains(exclusion.getKey()),
+                "the trace-drive exclusion '" + exclusion.getKey()
+                    + "' is a member of the admitted set: " + exclusion.getValue());
+        }
+    }
+
+    /**
+     * The composite contextual read's oracle parity (the ISSUE-0651
+     * deferral): a function/array contextual read whose value carries no
+     * matching shape passes through in the oracle exactly as it does in
+     * both emitted arms, so the consuming declared cell — the host
+     * parameter cell — carries the pinned E8010 at the call origin and the
+     * read never fails. The fixture's artifacts are driven by the fixture
+     * set's production probes (the pinned call-origin outcome); this check
+     * pins the oracle's side of the same run.
+     */
+    private static void testCompositeReadOracleDeferral() throws Exception {
+        System.out.println("-- the composite contextual read defers in the oracle exactly "
+            + "like both emitted arms: the wrong-kind value reaches the host "
+            + "parameter cell, never the read --");
+        for (String name : List.of("host-rest-bad")) {
+            SyncFixture fixture = syncFixture(name);
+            Fixture compiled = compileWith(fixture.name(), fixture.hostStem(),
+                Files.readString(Path.of(fixture.corpusHost() + ".d.deal"),
+                    StandardCharsets.UTF_8),
+                traceDriveSource(Files.readString(Path.of(fixture.corpusFixture()),
+                    StandardCharsets.UTF_8)));
+            try {
+                SemanticLowerer.ProjectLoweringResult result = lower(compiled);
+                if (result.project() == null) {
+                    fail("the composite-read fixture '" + name + "' lowers: "
+                        + result.diagnostics());
+                    continue;
+                }
+                ExecutableLoweredProject project = result.project();
+                SemanticRuntimeModel.ConsumerRun oracleRun =
+                    SemanticOracle.executeProjectInits(project, result.tables(),
+                        result.registries(), traceHostResponder(name));
+                java.util.List<String> events = new ArrayList<>();
+                for (SemanticRuntimeModel.TraceEvent event : oracleRun.trace()) {
+                    events.add(event.text());
+                }
+                // The read boundary's terminal is a SUCCESS (the value
+                // passed through; a failure there would have emitted a
+                // FAILURE with the read's origin).
+                boolean readPassed = false;
+                boolean readFailed = false;
+                for (SemanticRuntimeModel.TraceEvent event : oracleRun.trace()) {
+                    if (event.op().id() == compositeBoundaryOp(project)
+                            && event.phase() == SemanticRuntimeModel.Phase.SUCCESS) {
+                        readPassed = true;
+                    }
+                    if (event.op().id() == compositeBoundaryOp(project)
+                            && event.phase() == SemanticRuntimeModel.Phase.FAILURE) {
+                        readFailed = true;
+                    }
+                }
+                check(readPassed && !readFailed, "the oracle's composite contextual read "
+                    + "of '" + name + "' passes the wrong-kind value through (the "
+                    + "consuming declared cell carries the pinned projection); "
+                    + "events=" + events);
+            } finally {
+                deleteRecursively(compiled.root());
+            }
+        }
+    }
+
+    /** The op id of the one composite contextual-read boundary child of the entry. */
+    private static long compositeBoundaryOp(ExecutableLoweredProject project) {
+        LoweredModuleUnit unit = project.modules().get(project.entryModule());
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() != SemanticOpKind.MEMBER_READ
+                    && op.kind() != SemanticOpKind.OPTIONAL_READ) {
+                continue;
+            }
+            for (SemanticOp candidate : unit.ops()) {
+                if (!op.opId().equals(candidate.origin().parentOpId())) {
+                    continue;
+                }
+                if (candidate.kind() != SemanticOpKind.BOUNDARY
+                        || !(candidate.payload()
+                            instanceof KindPayload.BoundaryPayload boundary)) {
+                    continue;
+                }
+                RuntimeDescriptor descriptor = boundary.descriptor();
+                RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                    ? nullable.inner() : descriptor;
+                if (inner instanceof RuntimeDescriptor.Func
+                        || inner instanceof RuntimeDescriptor.Array
+                        || inner instanceof RuntimeDescriptor.Bytes) {
+                    return candidate.opId().id();
+                }
+            }
+        }
+        throw new IllegalStateException("the fixture carries no composite contextual read");
+    }
+
     private static void deleteRecursively(Path path) {
         if (path == null) {
             return;
@@ -1824,6 +2332,8 @@ public class HostCallRealizationTest {
         testFailClosedSeeds();
         testJvmHostFunctionValueCall();
         testLuaHostFunctionValueCall();
+        testOracleTraceAgreement();
+        testCompositeReadOracleDeferral();
         System.out.println();
         System.out.println("Passed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

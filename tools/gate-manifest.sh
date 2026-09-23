@@ -688,8 +688,12 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # array carriers with the normal-return copy-back, the declared-return
   # materialization), the bridge's carrier resolution (the D15 protocol
   # for a production JvmRuntime.AdapterValue and the carried function id
-  # pushed around a plain carrier invocation), and the admitted sync host
+  # pushed around a plain carrier invocation), the admitted sync host
   # fixture set executed end-to-end under luajit and javac --release 25
-  # -proc:none + java with the sidecar-pinned outcomes and origins.
+  # -proc:none + java with the sidecar-pinned outcomes and origins
+  # (including the sidecar's attained expected/actual pair), and the
+  # trace-mode oracle agreement drive (the trace-mode project sessions
+  # carrying the declaration surface, the oracle's seam-supplied loaded
+  # surface entry, and the event-for-event/terminal comparison).
   'fg|=== Running Sync Host Call Realization Tests (ISSUE-0651) ===|java -ea -cp build deal.test.HostCallRealizationTest'
 )

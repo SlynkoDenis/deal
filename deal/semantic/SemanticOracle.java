@@ -465,6 +465,30 @@ public final class SemanticOracle {
         default SyncOutcome completeAsync(String operationLabel) {
             return new SyncOutcome.Returned(Value.NullValue.INSTANCE);
         }
+
+        /**
+         * One loaded host surface entry (the E7 host seam's LOAD
+         * terminal, ISSUE-0651): the value the host module's declared
+         * export resolves to after the load — the entry an
+         * {@code EXPORT_READ} of a HOST module publishes. The oracle runs
+         * no host code, so the seamed load supplies the entry the same
+         * way it supplies the call terminals; a {@code null} return is
+         * the absent-slot projection ({@link Value.MissingValue}), the
+         * landed state where the seamed load has not run. The returned
+         * value is memoized per {@code (module, export)}, so every read
+         * of one export publishes the identical value (the loaded module
+         * table holds one entry per export).
+         *
+         * @param module     the owning host module; non-null
+         * @param export     the declared host export name; non-null
+         * @param descriptor the export's checked descriptor; non-null
+         * @return the loaded surface entry, or {@code null} when the seam
+         *         supplies none
+         */
+        default Value loadedExport(ModuleId module, String export,
+                                   RuntimeDescriptor descriptor) {
+            return null;
+        }
     }
 
     /**
@@ -1673,7 +1697,14 @@ public final class SemanticOracle {
         /**
          * MEMBER_READ: the missing-aware read, then its
          * CONTEXTUAL_TABLE_READ boundary child (missing→nullable-null /
-         * E8001 via the contextual decision).
+         * E8001 via the contextual decision). A contextual read of a
+         * composite descriptor (a function or array position,
+         * ISSUE-0651) defers the shape check to the consuming declared
+         * cell exactly like the emitted artifacts: the boundary cell
+         * passes the value through and the pinned projection surfaces at
+         * the consuming cell's origin (the corpus pins the call-origin
+         * E8010 for a wrong-kind host argument whose contextual read sits
+         * on the argument expression).
          */
         private String executeMemberRead(SemanticOp op) {
             KindPayload.MemberReadPayload payload = (KindPayload.MemberReadPayload) op.payload();
@@ -1688,6 +1719,9 @@ public final class SemanticOracle {
             }
             RuntimeDescriptor descriptor =
                 ((KindPayload.BoundaryPayload) boundary.payload()).descriptor();
+            if (defersContextualCheck(descriptor)) {
+                return publish(op, runDeferredBoundaryChild(boundary, read));
+            }
             Value checked = runBoundaryChild(boundary, read, BoundaryContext.none());
             return contextualReadDecision(op, checked, descriptor);
         }
@@ -1715,8 +1749,40 @@ public final class SemanticOracle {
             }
             RuntimeDescriptor descriptor =
                 ((KindPayload.BoundaryPayload) boundary.payload()).descriptor();
+            // The composite-descriptor deferral of ISSUE-0651 applies to
+            // the optional-read envelope too (the emitters' identical
+            // rule): a function/array position passes through and the
+            // consuming cell carries the pinned projection.
+            if (defersContextualCheck(descriptor)) {
+                return publish(op, runDeferredBoundaryChild(boundary, preMapped));
+            }
             Value checked = runBoundaryChild(boundary, preMapped, BoundaryContext.none());
             return contextualReadDecision(op, checked, descriptor);
+        }
+
+        /**
+         * Whether one contextual-read boundary descriptor defers its
+         * shape check to the consuming declared cell (ISSUE-0651: a
+         * function or array position — the emitters' identical rule).
+         */
+        private boolean defersContextualCheck(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Func
+                || inner instanceof RuntimeDescriptor.Array;
+        }
+
+        /**
+         * Executes one deferred contextual-read boundary child: the START
+         * and SUCCESS event pair with the input's own atom and the value
+         * unchanged — the emitters' pass-through arm (no executor call,
+         * no contextual decision; the consuming declared cell owns the
+         * projection).
+         */
+        private Value runDeferredBoundaryChild(SemanticOp boundary, Value input) {
+            emitStart(boundary, List.of(atomOf(input)));
+            emitSuccess(boundary, atomOf(input));
+            return input;
         }
 
         /**
@@ -5109,6 +5175,20 @@ public final class SemanticOracle {
                 case COMPILED, HOST -> {
                     Map<String, Value> surface = exportSurfaces.get(payload.module());
                     Value entry = surface == null ? null : surface.get(payload.name());
+                    if (entry == null && kind == ModuleImportKind.HOST && responder != null) {
+                        // The HOST read resolves the loaded module table's
+                        // entry (ISSUE-0651): the seamed load supplies it (the
+                        // oracle runs no host code), and the entry is memoized
+                        // so every read of one export publishes the identical
+                        // value. A seam without an entry keeps the absent-slot
+                        // projection.
+                        entry = responder.loadedExport(payload.module(), payload.name(),
+                            payload.descriptor());
+                        if (entry != null) {
+                            exportSurfaces.computeIfAbsent(payload.module(),
+                                ignored -> new LinkedHashMap<>()).put(payload.name(), entry);
+                        }
+                    }
                     value = entry == null ? Value.MissingValue.INSTANCE : entry;
                 }
                 case STDLIB -> value = stdlibCallableOf(op, payload);

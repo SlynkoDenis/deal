@@ -123,7 +123,41 @@ public final class LuaSemanticEmitter {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
-        return new Session(project, tables, registries, true).emit();
+        return new Session(project, tables, registries, true, null).emit();
+    }
+
+    /**
+     * Emits the combined trace artifact of a validated executable
+     * project with the compile's host declaration surface (ISSUE-0651;
+     * the differential drive of the sync host call realization): the
+     * trace-mode project session of {@link #emitProject} additionally
+     * carries the declared map and the host-boundary prelude, so a
+     * {@code MODULE_IMPORT(HOST)} emits its {@code __rt.load_host} load
+     * in the trace walk and a host {@code CALL}/{@code CALLBACK_INVOKE}
+     * arm resolves the loaded surface entry — the oracle-agreement drive
+     * (“the oracle matches event-for-event in trace mode”) then
+     * compares one event stream from the oracle and both targets.
+     *
+     * @param project            the validated executable closure; non-null
+     * @param tables             each module's block-membership table;
+     *                           non-null
+     * @param registries         each module's class-factory registry;
+     *                           non-null
+     * @param declarationSurface the declaration surface covering every
+     *                           declaration import of the compile; non-null
+     * @return the combined trace artifact source text
+     */
+    public static String emitProject(ExecutableLoweredProject project,
+                                     Map<ModuleId, StructuredBodyTable> tables,
+                                     Map<ModuleId, ClassFactoryRegistry> registries,
+                                     HostDeclarationSurface declarationSurface) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(tables, "tables must not be null");
+        Objects.requireNonNull(registries, "registries must not be null");
+        Objects.requireNonNull(declarationSurface,
+            "declarationSurface must not be null");
+        return new Session(project, tables, registries, true,
+            declarationSurface).emit();
     }
 
     /**
@@ -327,12 +361,12 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * The project-mode session of the production project entry: the
+         * The project-mode session of the production project entry (and,
+         * since ISSUE-0651, of the host-aware trace project entry): the
          * combined closure plus the compile's host declaration surface
          * (the declared-map source of the {@code MODULE_IMPORT(HOST)}
-         * load). A trace-mode project session carries no host surface
-         * (the declared-map load is a production realization; the
-         * conformance trace session keeps the landed no-op arm).
+         * load). A trace-mode project session without the surface keeps
+         * the landed no-op arm.
          */
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
@@ -1610,7 +1644,18 @@ public final class LuaSemanticEmitter {
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
                 out.append(target).append(" = __chkB\n");
-                emitBoundarySuccess(boundary, target, boundaryPayload.descriptor());
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    // The deferred composite read's SUCCESS atom renders
+                    // the value's own kind (the pass-through left a
+                    // possibly wrong-kind value in place; the oracle's
+                    // atomOf uses the value's own kind too).
+                    emitBoundarySuccessAtom(boundary, "__rawArgAtom("
+                        + luaString(staticKind(boundaryPayload.descriptor()))
+                        + ", " + target + ")");
+                } else {
+                    emitBoundarySuccess(boundary, target,
+                        boundaryPayload.descriptor());
+                }
                 emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
                 return;
             }
@@ -1701,36 +1746,17 @@ public final class LuaSemanticEmitter {
                 // boundary FAILURE and the op FAILURE events with the
                 // boundary origin (a wrong present kind fails the
                 // differential verdict even with coincidental output).
-                // A function-typed contextual position (ISSUE-0651) admits
-                // the closed function carriers — the DEAL carrier and the
-                // host-facing wrapper — whose declared-signature authority
-                // is the crossing cell (the pinned E8010 parameter text at
-                // the call origin), never this contextual read; a
-                // non-function value still fails the row's E8001.
-                if (isFunctionDescriptor(boundaryPayload.descriptor())
-                        || isArrayDescriptor(boundaryPayload.descriptor())) {
-                    // The contextual read of a composite value (ISSUE-0651):
-                    // the closed function/array carriers pass through, and
-                    // the consuming declared cell carries the pinned E8010
-                    // projection at its own origin (the corpus pins the
-                    // call-origin failure for a wrong-kind argument whose
-                    // contextual read sits on the argument expression).
-                    out.append("if ").append(target)
-                        .append(" == nil or ").append(target)
-                        .append(" == __NULL or (type(").append(target)
-                        .append(") == \"table\" and (").append(target)
-                        .append(".__fn ~= nil or ").append(target)
-                        .append(".__kind == \"function\")) or type(")
-                        .append(target).append(") == \"table\" then\n");
-                    out.append("  __okB, __chkB = true, ").append(target)
+                // A composite contextual position (ISSUE-0651) — the
+                // function and array carriers — passes through: the
+                // consuming declared cell carries the pinned E8010
+                // projection at its own origin (the corpus pins the
+                // call-origin failure for a wrong-kind argument whose
+                // contextual read sits on the argument expression),
+                // exactly the oracle's identical deferral. Every other
+                // descriptor keeps the strict row.
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    out.append("__okB, __chkB = true, ").append(target)
                         .append("\n");
-                    out.append("else\n");
-                    out.append("  __okB, __chkB = pcall(__bcheck, ")
-                        .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(luaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(target).append(")\n");
-                    out.append("end\n");
                 } else {
                     out.append("__okB, __chkB = pcall(__bcheck, ")
                         .append(luaString(descriptorText(boundaryPayload.descriptor())))
@@ -1748,7 +1774,14 @@ public final class LuaSemanticEmitter {
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
                 out.append(target).append(" = __chkB\n");
-                emitBoundarySuccess(boundary, target, boundaryPayload.descriptor());
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    emitBoundarySuccessAtom(boundary, "__rawArgAtom("
+                        + luaString(staticKind(boundaryPayload.descriptor()))
+                        + ", " + target + ")");
+                } else {
+                    emitBoundarySuccess(boundary, target,
+                        boundaryPayload.descriptor());
+                }
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
         }
@@ -2790,7 +2823,9 @@ public final class LuaSemanticEmitter {
                     "__errtext(__chkB)");
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
-                emitBoundarySuccess(boundary, "__chkB", boundaryPayload.descriptor());
+                emitBoundarySuccessAtom(boundary, "__hostAtom("
+                    + luaString(staticKind(boundaryPayload.descriptor()))
+                    + ", __chkB)");
                 out.append("__hbT[").append(index).append("] = __hostProjectArg(")
                     .append(luaString(desc)).append(", ")
                     .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
@@ -2820,7 +2855,11 @@ public final class LuaSemanticEmitter {
                 : ((KindPayload.BoundaryPayload) returnBoundary.payload())
                     .descriptor().canonicalSpecText();
             if (returnBoundary != null) {
-                emitBoundaryStartAtom(returnBoundary, "__atom("
+                // The boundary events' atoms are the DEAL-null-aware host
+                // atom (the deployed runtime's null sentinel is the
+                // language null, so a null return atomizes as "null"
+                // exactly like the oracle's NullValue).
+                emitBoundaryStartAtom(returnBoundary, "__hostAtom("
                     + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
                         .payload()).descriptor())) + ", __resT)");
                 out.append("__okB, __chkB = pcall(__hostReturnCell, ")
@@ -2833,9 +2872,9 @@ public final class LuaSemanticEmitter {
                     "__errtext(__chkB)");
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
-                emitBoundarySuccess(returnBoundary, "__resT",
-                    ((KindPayload.BoundaryPayload) returnBoundary.payload())
-                        .descriptor());
+                emitBoundarySuccessAtom(returnBoundary, "__hostAtom("
+                    + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
+                        .payload()).descriptor())) + ", __resT)");
             }
             String result = slot((ValueId) op.result());
             out.append(result).append(" = ")
@@ -4190,6 +4229,15 @@ public final class LuaSemanticEmitter {
                 .append(luaString(boundary.contract().canonicalDigest())).append(", ")
                 .append(luaString(parentKey(boundary.origin().parentOpId())))
                 .append(", {").append(atomExpr).append("}, nil, nil)\n");
+        }
+
+        /** A boundary SUCCESS event with a raw output atom expression. */
+        private void emitBoundarySuccessAtom(SemanticOp boundary, String atomExpr) {
+            out.append("__ev(").append(luaString(opKey(boundary.opId())))
+                .append(", \"SUCCESS\", \"BOUNDARY\", ")
+                .append(luaString(boundary.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(boundary.origin().parentOpId())))
+                .append(", {}, ").append(atomExpr).append(", nil)\n");
         }
 
         /** The nested source ASYNC_START parented to an adapter-over-async op. */
@@ -5712,10 +5760,21 @@ end
 local function __hostParamCell(desc, index, v, origin)
   if v == __NULL then v = __rt.__NULL end
   local ok, checked = pcall(__rt.check_type, desc, v)
-  if ok then return checked end
+  if ok then
+    if checked == __rt.__NULL then return __NULL end
+    return checked
+  end
   local inner = type(checked) == "table" and checked.message or tostring(checked)
   return error(__failExpr("E8010", "parameter "..index.." type mismatch: "..inner,
     origin, desc, __hostKindOf(v)), 0)
+end
+-- The DEAL-null-aware event atom of one host-crossing value: the
+-- deployed runtime's null sentinel and the chunk's own sentinel are the
+-- language null, so every host boundary event atomizes a null position
+-- as "null" exactly like the oracle's NullValue.
+local function __hostAtom(kind, v)
+  if v == nil or v == __NULL or v == __rt.__NULL then return "null" end
+  return __atom(kind, v)
 end
 -- The declared return cell of one host call: the loaded wrapper's own
 -- return rule, projected through the pinned E8010 return template, then

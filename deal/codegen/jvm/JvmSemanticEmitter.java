@@ -122,6 +122,43 @@ public final class JvmSemanticEmitter {
     }
 
     /**
+     * Emits the combined trace artifact of a validated executable
+     * project with the compile's host declaration surface (ISSUE-0651;
+     * the differential drive of the sync host call realization): the
+     * trace-mode project session of {@link #emitProject} additionally
+     * carries the JVM host ABI emission surface, so a
+     * {@code MODULE_IMPORT(HOST)} emits its module load entry and a host
+     * {@code CALL}/{@code CALLBACK_INVOKE} arm resolves the emitted
+     * per-export wrapper — the oracle-agreement drive (“the oracle
+     * matches event-for-event in trace mode”) then compares one event
+     * stream from the oracle and both targets. The trace session keeps
+     * the shared conformance class name (the {@code $DealRt} scope's
+     * bridges delegate to {@code __hostProjectArg}/{@code __hostToDeal}
+     * of it).
+     *
+     * @param project            the validated executable closure; non-null
+     * @param tables             each module's block-membership table;
+     *                           non-null
+     * @param registries         each module's class-factory registry;
+     *                           non-null
+     * @param declarationSurface the declaration surface covering every
+     *                           declaration import of the compile; non-null
+     * @return the emitted combined trace artifact
+     */
+    public static EmissionResult emitProject(ExecutableLoweredProject project,
+                                             Map<ModuleId, StructuredBodyTable> tables,
+                                             Map<ModuleId, ClassFactoryRegistry> registries,
+                                             HostDeclarationSurface declarationSurface) {
+        Objects.requireNonNull(project, "project must not be null");
+        Objects.requireNonNull(tables, "tables must not be null");
+        Objects.requireNonNull(registries, "registries must not be null");
+        Objects.requireNonNull(declarationSurface,
+            "declarationSurface must not be null");
+        return new Session(project, tables, registries, true, null,
+            declarationSurface).emit();
+    }
+
+    /**
      * Emits the production JVM project artifact for the validated
      * executable closure (the production counterpart of
      * {@link #emitProject}; {@code production-project-emission-and-atomic-cutover}
@@ -201,6 +238,18 @@ public final class JvmSemanticEmitter {
     // =========================================================================
     // Session
     // =========================================================================
+
+    /**
+     * The runtime-side descriptor text of one descriptor (the closed
+     * {@code null|boolean|int|number|string|table|array(INNER)|
+     * nullable(INNER)|function(PARAMS;RETURN)} form the runtime checks
+     * dispatch on): the single producer of the text the emitted boundary
+     * rows, the host ABI cell checks, and a bridged host surface entry's
+     * carried signature all use.
+     */
+    static String runtimeDescriptorText(RuntimeDescriptor descriptor) {
+        return Session.descriptorText(descriptor);
+    }
 
     private static final class Session {
         final LoweredModuleUnit unit;
@@ -326,18 +375,28 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * The project-mode session of the production project entry: the
+         * The project-mode session of the production project entry (and,
+         * since ISSUE-0651, of the host-aware trace project entry): the
          * combined closure plus the compile's host declaration surface
-         * (the JVM host ABI emission surface). A trace-mode or unit
-         * session carries no host surface (the host ABI emission surface
-         * is a production realization).
+         * (the JVM host ABI emission surface). A session without the
+         * surface carries no host ABI (the unit sessions and the
+         * host-free trace project session).
          */
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
                 String className, HostDeclarationSurface hostSurface) {
+            // The artifact class name is resolved before the host ABI
+            // construction: the emitted $DealRt scope's bridges delegate
+            // to the artifact class's crossing helpers, so a trace-mode
+            // project session (the shared conformance name) carries the
+            // resolved name too (ISSUE-0651).
+            String resolvedClassName = className != null ? className
+                : sharedClassName(project.modules().containsKey(project.entryModule())
+                    ? project.modules().get(project.entryModule()).moduleId().path()
+                    : project.entryModule().path());
             this.hostAbi = hostSurface == null ? null
                 : new JvmHostAbiEmission(JvmHostAbiEmission.collect(
-                    project, hostSurface), className);
+                    project, hostSurface), resolvedClassName);
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -350,8 +409,7 @@ public final class JvmSemanticEmitter {
             // A production project entry passes its class name verbatim
             // (the JvmBackend.classNameFor(entry path) derivation); the
             // trace project session keeps the shared conformance name.
-            this.className = className != null ? className
-                : sharedClassName(this.unit.moduleId().path());
+            this.className = resolvedClassName;
             for (Map.Entry<ModuleId, LoweredModuleUnit> entry
                     : project.modules().entrySet()) {
                 registerUnit(entry.getValue(), tables.get(entry.getKey()),
@@ -1502,6 +1560,20 @@ public final class JvmSemanticEmitter {
                 .append(javaString(staticKind(descriptor))).append("), null);\n");
         }
 
+        /** A boundary SUCCESS event with a raw output atom expression. */
+        private void emitBoundarySuccessAtom(SemanticOp boundary, String atomExpr,
+                                             int indent) {
+            if (!trace) {
+                return;
+            }
+            out.append(indent(indent)).append("JvmRuntime.ev(MODULE, ")
+                .append(javaString(opKey(boundary.opId()))).append(", \"SUCCESS\", ")
+                .append("\"BOUNDARY\", ")
+                .append(javaString(boundary.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(boundary.origin().parentOpId())))
+                .append(", List.of(), ").append(atomExpr).append(", null);\n");
+        }
+
         private void emitResultSuccess(SemanticOp op, String valueExpr,
                                        RuntimeDescriptor resultDescriptor, int indent) {
             if (!trace) {
@@ -1821,9 +1893,16 @@ public final class JvmSemanticEmitter {
                     .append(boundary.opId().id()).append(";\n");
                 out.append(indent(indent)).append("  try {\n");
                 if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    // A composite contextual read (ISSUE-0651): the
+                    // function/array carriers pass through unchanged — the
+                    // consuming declared cell carries the pinned E8010
+                    // projection at its own origin, exactly the oracle's
+                    // identical deferral and the LuaJIT arm's identical
+                    // condition. The SUCCESS atom renders the value's own
+                    // kind (the oracle's atomOf).
                     out.append(indent(indent)).append("    __mr_")
                         .append(boundary.opId().id()).append(" = ")
-                        .append("true ? ").append(target).append(" : null;\n");
+                        .append(target).append(";\n");
                 } else {
                     out.append(indent(indent)).append("    __mr_")
                         .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
@@ -1848,7 +1927,15 @@ public final class JvmSemanticEmitter {
                 out.append(indent(indent)).append("  }\n");
                 out.append(indent(indent)).append(target).append(" = __mr_")
                     .append(boundary.opId().id()).append(";\n");
-                emitBoundarySuccess(boundary, target, boundaryPayload.descriptor(), indent);
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    emitBoundarySuccessAtom(boundary, "JvmRuntime.rawAtom("
+                        + target + ", "
+                        + javaString(staticKind(boundaryPayload.descriptor())) + ")",
+                        indent);
+                } else {
+                    emitBoundarySuccess(boundary, target,
+                        boundaryPayload.descriptor(), indent);
+                }
                 emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
                 return;
             }
@@ -1943,30 +2030,23 @@ public final class JvmSemanticEmitter {
                 // boundary FAILURE and the op FAILURE events with the
                 // boundary origin (a wrong present kind fails the
                 // differential verdict even with coincidental output).
-                // A function-typed contextual position (ISSUE-0651) admits
-                // the closed function carriers — the production
-                // FunctionValue/AdapterValue carrier and the host-facing
-                // wrapper — whose declared-signature authority is the
-                // crossing cell (the pinned E8010 parameter text at the
-                // call origin), never this contextual read; a non-function
-                // value still fails the row's E8001.
+                // A composite contextual position (ISSUE-0651) — the
+                // function and array carriers — passes through: the
+                // consuming declared cell carries the pinned E8010
+                // projection at its own origin (the corpus pins the
+                // call-origin failure for a wrong-kind argument whose
+                // contextual read sits on the argument expression),
+                // exactly the oracle's identical deferral and the LuaJIT
+                // arm's identical condition. Every other descriptor keeps
+                // the strict row.
                 String checkedName = "__orb_" + boundary.opId().id();
                 String errorName = "__obe_" + boundary.opId().id();
                 String rebuiltName = "__obe2_" + boundary.opId().id();
                 out.append(indent(indent)).append("try {\n");
-                if (isFunctionDescriptor(boundaryPayload.descriptor())) {
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
                     out.append(indent(indent + 1)).append("Object ")
-                        .append(checkedName).append(" = (").append(target)
-                        .append(" == null || ").append(target)
-                        .append(" instanceof JvmRuntime.FunctionValue")
-                        .append(hostAbi == null ? ""
-                            : " || " + target + " instanceof $DealRt.FnValue")
-                        .append(") ? ").append(target)
-                        .append(" : JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(target).append(");\n");
+                        .append(checkedName).append(" = ").append(target)
+                        .append(";\n");
                 } else {
                     out.append(indent(indent + 1)).append("Object ")
                         .append(checkedName).append(" = JvmRuntime.bcheck(")
@@ -1993,7 +2073,15 @@ public final class JvmSemanticEmitter {
                 out.append(indent(indent + 1)).append("throw ").append(rebuiltName)
                     .append(";\n");
                 out.append(indent(indent)).append("}\n");
-                emitBoundarySuccess(boundary, target, boundaryPayload.descriptor(), indent);
+                if (defersContextualCheck(boundaryPayload.descriptor())) {
+                    emitBoundarySuccessAtom(boundary, "JvmRuntime.rawAtom("
+                        + target + ", "
+                        + javaString(staticKind(boundaryPayload.descriptor())) + ")",
+                        indent);
+                } else {
+                    emitBoundarySuccess(boundary, target,
+                        boundaryPayload.descriptor(), indent);
+                }
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
         }
@@ -3142,7 +3230,11 @@ public final class JvmSemanticEmitter {
             }
             SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
                 : opsById.get(payload.returnBoundaryOpId());
-            if (returnBoundary != null && !(declaredReturn instanceof Type.Null)) {
+            if (returnBoundary != null) {
+                // The return boundary's event pair runs for every declared
+                // return position, a declared null included (the oracle's
+                // return cell emits the same pair over the language null),
+                // so the differential comparison stays event-for-event.
                 KindPayload.BoundaryPayload boundaryPayload =
                     (KindPayload.BoundaryPayload) returnBoundary.payload();
                 emitBoundaryStart(returnBoundary, result,
@@ -5119,10 +5211,13 @@ public final class JvmSemanticEmitter {
             emitStart(op, indent);
             if (payload.kind() == deal.semantic.ir.ModuleImportKind.HOST
                     && hostAbi != null) {
-                // The host load is a production project realization; a
-                // unit/trace session (no host ABI surface) keeps the landed
-                // no-op arm — its host path is the landed scenario seam,
-                // which the production path never reaches.
+                // The host load is the production/trace project session's
+                // realization; a unit session or a host-free project
+                // session (no host ABI surface) keeps the landed no-op arm
+                // — its host path is the landed scenario seam, which the
+                // production path never reaches (ISSUE-0651: the
+                // host-aware trace project entry carries the surface too,
+                // so the oracle-agreement drive loads the same surface).
                 SourceSpan span = op.origin().span();
                 if (span == null) {
                     throw new IllegalStateException("the host import " + op.opId()
