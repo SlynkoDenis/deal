@@ -487,7 +487,7 @@ public final class SemanticOracle {
         permits Value.NullValue, Value.MissingValue, Value.BoolValue, Value.IntValue,
                 Value.NumValue, Value.StrValue, Value.TableValue, Value.ArrayValue,
                 Value.FuncValue, Value.AdapterValue, Value.IntrinsicValue, Value.ErrorValue,
-                Value.SlotValue, Value.ClassValue {
+                Value.SlotValue, Value.ClassValue, Value.StdlibCallableValue {
 
         enum NullValue implements Value { INSTANCE }
 
@@ -519,8 +519,27 @@ public final class SemanticOracle {
                          Map<BindingId, Cell> captures) implements Value {
         }
 
-        /** An intrinsic/export function value (int()/number(), stdlib exports). */
+        /** An intrinsic function value (int()/number() as first-class values). */
         record IntrinsicValue(String name) implements Value {
+        }
+
+        /**
+         * The in-target cataloged stdlib callable (M3/M4): one memoized
+         * value per catalog row per module per run — the read of a
+         * cataloged STDLIB export publishes this value, carrying the row tag
+         * and the row's declared signature (the read's checked descriptor),
+         * so a function-typed boundary sees the row's signature, never the
+         * reading site's. The value is keyed once in
+         * {@code bindingsByValue} at its creation (the read arm's
+         * registration) and a read never re-keys it.
+         */
+        record StdlibCallableValue(StdlibFunctionId function,
+                                   RuntimeDescriptor.Func descriptor) implements Value {
+
+            public StdlibCallableValue {
+                Objects.requireNonNull(function, "function must not be null");
+                Objects.requireNonNull(descriptor, "descriptor must not be null");
+            }
         }
 
         /** A {@code FUNCTION_ADAPT} adapter value (target signature). */
@@ -750,6 +769,16 @@ public final class SemanticOracle {
          * registry is never written by a read.
          */
         final Map<ModuleId, Map<String, Value>> exportSurfaces =
+            new LinkedHashMap<>();
+        /**
+         * The per-run cataloged-callable registry (M3/M4): one memoized
+         * {@link Value.StdlibCallableValue} per catalog row per
+         * {@code (module, name)} of the run, created through the one
+         * accessor — the oracle's mirror of the artifacts' program-scoped
+         * catalog memoization. Written once per row and never rewritten, so
+         * two reads of one cataloged export publish the identical value.
+         */
+        final Map<String, Value.StdlibCallableValue> stdlibCallables =
             new LinkedHashMap<>();
         /**
          * The payload-owned children: ops referenced by an owner payload's
@@ -1054,6 +1083,7 @@ public final class SemanticOracle {
                 case Value.IntrinsicValue intrinsic -> allocate(intrinsic);
                 case Value.AdapterValue adapter -> allocate(adapter);
                 case Value.ClassValue classValue -> allocate(classValue);
+                case Value.StdlibCallableValue callable -> allocate(callable);
             };
         }
 
@@ -2327,6 +2357,8 @@ public final class SemanticOracle {
                     new ClassOpsExecutor.Value.Function(func.signature());
                 case Value.AdapterValue adapter ->
                     new ClassOpsExecutor.Value.Function(adapter.signature());
+                case Value.StdlibCallableValue callable ->
+                    new ClassOpsExecutor.Value.Function(callable.descriptor());
                 case Value.ClassValue classValue ->
                     new ClassOpsExecutor.Value.Class(classValue.classId(),
                         classValue.fields().stream()
@@ -2938,6 +2970,8 @@ public final class SemanticOracle {
                 case Value.IntrinsicValue intrinsic ->
                     BoundaryValueView.ofFunction(new RuntimeDescriptor.Func(List.of(),
                         RuntimeDescriptor.Number.INSTANCE, false));
+                case Value.StdlibCallableValue callable ->
+                    BoundaryValueView.ofFunction(callable.descriptor());
                 case Value.ArrayValue array -> {
                     List<BoundaryValueView> elements = new ArrayList<>();
                     for (Value element : array.elements()) {
@@ -4465,6 +4499,7 @@ public final class SemanticOracle {
                 case Value.FuncValue ignored -> "function";
                 case Value.AdapterValue ignored -> "function";
                 case Value.IntrinsicValue ignored -> "function";
+                case Value.StdlibCallableValue ignored -> "function";
                 case Value.ErrorValue ignored -> "class:@builtin/Error";
                 case Value.ClassValue classValue -> "class:" + classValue.classId().text();
                 case Value.MissingValue ignored -> "missing";
@@ -4605,6 +4640,8 @@ public final class SemanticOracle {
                 case Value.AdapterValue ignored ->
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
                 case Value.IntrinsicValue ignored ->
+                    new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
+                case Value.StdlibCallableValue ignored ->
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
                 case Value.ErrorValue ignored -> new SharedStdlibSemantics.Value.Other(
                     ActualKind.CLASS, "@builtin/Error");
@@ -5021,47 +5058,104 @@ public final class SemanticOracle {
         }
 
         /**
-         * EXPORT_READ — the per-kind read resolution (M3/M5): a COMPILED
+         * EXPORT_READ — the per-kind read resolution (M3/M4/M5): a COMPILED
          * read publishes the value the owning module's {@code
          * EXPORT_PUBLISH} recorded into the per-run export-surface
-         * registry, and a HOST/FFI read publishes that registry's entry
-         * for the export — for a HOST module the surface is the loaded
-         * module table (the entry the calls child's host load surface and
-         * the FFI child's {@code load_ffi} surface record under the module
-         * identity), so the read re-wraps nothing and runs no host code.
-         * An absent surface or entry publishes {@link
-         * Value.MissingValue} in both cases (the landed partial-drive
-         * parity state, a state a full execution never reaches because a
-         * dependency's publication — or its load — runs before any
-         * dependent's read). The STDLIB kind keeps its landed placeholder
-         * until its own leaf lands (T4), and so does a read whose unit
-         * records no import fact for its module — the test-only class-core
-         * carrier sessions, whose units carry no module-level import op;
-         * every production and conformance session records the resolved
-         * import facts, so a COMPILED or HOST read is never guessed from a
-         * path.
+         * registry; a HOST/FFI read publishes that registry's entry for the
+         * export — for a HOST module the surface is the loaded module table
+         * (the entry the calls child's host load surface and the FFI child's
+         * {@code load_ffi} surface record under the module identity), so the
+         * read re-wraps nothing and runs no host code; an absent surface or
+         * entry publishes {@link Value.MissingValue} in both cases (the
+         * landed partial-drive parity state, a state a full execution never
+         * reaches because a dependency's publication — or its load — runs
+         * before any dependent's read). A STDLIB read publishes the closed
+         * catalog row's memoized callable ({@link Value.StdlibCallableValue};
+         * see {@link #stdlibCallableOf}) — the same catalog entry and the
+         * same algorithm authority the direct {@code STDLIB_CALL} arm uses,
+         * never a host responder. A read whose unit records no import fact
+         * for its module — the test-only class-core carrier sessions, whose
+         * units carry no module-level import op — keeps the landed
+         * placeholder; every production and conformance session records the
+         * resolved import facts, so a read is never guessed from a path.
          *
          * <p>The read does not write the value-keyed binding map
          * (K11/M3): the published value already carries the owner's
          * registration, so re-keying it would replace the owner-side
-         * {@code LoweredBody} resolution; the read's own registration
-         * stays addressable by the read result's allocation identity
-         * ({@link #bindingOf}).</p>
+         * {@code LoweredBody} resolution; a STDLIB read's own created
+         * callable is keyed once at its creation and never re-keyed; the
+         * read's own registration stays addressable by the read result's
+         * allocation identity ({@link #bindingOf}).</p>
          */
         private String executeExportRead(SemanticOp op) {
             KindPayload.ExportReadPayload payload =
                 (KindPayload.ExportReadPayload) op.payload();
             ModuleImportKind kind = importKindOf(stateOf(op.opId()), payload.module());
             Value value;
-            if (kind == ModuleImportKind.COMPILED || kind == ModuleImportKind.HOST) {
-                Map<String, Value> surface = exportSurfaces.get(payload.module());
-                Value entry = surface == null ? null : surface.get(payload.name());
-                value = entry == null ? Value.MissingValue.INSTANCE : entry;
-            } else {
-                value = new Value.IntrinsicValue("export:"
+            switch (kind) {
+                case COMPILED, HOST -> {
+                    Map<String, Value> surface = exportSurfaces.get(payload.module());
+                    Value entry = surface == null ? null : surface.get(payload.name());
+                    value = entry == null ? Value.MissingValue.INSTANCE : entry;
+                }
+                case STDLIB -> value = stdlibCallableOf(op, payload);
+                case null -> value = new Value.IntrinsicValue("export:"
                     + payload.module().path() + "." + payload.name());
             }
             return publish(op, value);
+        }
+
+        /**
+         * The cataloged callable of one STDLIB export read (M3/M4): the
+         * closed {@link StdlibFunctionCatalog} is the resolution authority —
+         * the read's checked descriptor must be the row's declared
+         * descriptor, and an out-of-catalog member or a descriptor mismatch
+         * is a fail-closed producer defect (the lowering guards reject both,
+         * so a produced unit never reaches this arm). The callable is
+         * memoized once per run per {@code (module, name)}: two reads of one
+         * cataloged export publish the identical value, and the read's own
+         * registration keys that value exactly once at its creation — a
+         * later read never re-keys the value-keyed map (a differing existing
+         * binding is a producer defect, never a silent overwrite).
+         */
+        private Value stdlibCallableOf(SemanticOp op, KindPayload.ExportReadPayload payload) {
+            StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                .lookup(payload.module().path(), payload.name())
+                .orElseThrow(() -> new IllegalStateException("the STDLIB export read '"
+                    + payload.module().path() + "#" + payload.name() + "' resolves no"
+                    + " closed catalog row (the catalog is the STDLIB kind's"
+                    + " resolution authority — a producer defect)"));
+            if (!(payload.descriptor() instanceof RuntimeDescriptor.Func descriptor)
+                    || !row.declaredDescriptor().equals(descriptor)) {
+                throw new IllegalStateException("the STDLIB export read '"
+                    + payload.module().path() + "#" + payload.name() + "' carries "
+                    + payload.descriptor().canonicalSpecText() + " but the closed catalog"
+                    + " row declares " + row.declaredDescriptor().canonicalSpecText()
+                    + " (the row's declared descriptor is the read's own — a producer"
+                    + " defect)");
+            }
+            String key = payload.module().path() + '\u0001' + payload.name();
+            Value.StdlibCallableValue callable = stdlibCallables.get(key);
+            FunctionExecutionBinding readBinding = op.result() instanceof ValueId valueId
+                ? bindingOf(valueId) : null;
+            if (callable == null) {
+                callable = new Value.StdlibCallableValue(row.function(), descriptor);
+                stdlibCallables.put(key, callable);
+                if (readBinding != null) {
+                    // The read arm creates the carrier: it is keyed once at
+                    // its creation, by the read's own registration.
+                    bindingsByValue.put(callable, readBinding);
+                }
+                return callable;
+            }
+            FunctionExecutionBinding existing = bindingsByValue.get(callable);
+            if (existing != null && readBinding != null && !existing.equals(readBinding)) {
+                throw new IllegalStateException("the cataloged callable of '"
+                    + payload.module().path() + "#" + payload.name() + "' already"
+                    + " carries the value-keyed binding " + existing + " (a read never"
+                    + " re-keys the value-keyed map — a producer defect)");
+            }
+            return callable;
         }
 
         /**

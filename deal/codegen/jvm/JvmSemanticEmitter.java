@@ -1,6 +1,7 @@
 package deal.codegen.jvm;
 
 import deal.semantic.HostDeclarationSurface;
+import deal.semantic.StdlibFunctionCatalog;
 import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
@@ -703,6 +704,7 @@ public final class JvmSemanticEmitter {
                 out.append("    exportSurface(")
                     .append(javaString(moduleUnit.moduleId().path())).append(");\n");
             }
+            emitStdlibSurfacePopulation(2);
             emitProjectWalk(2);
             out.append("  }\n");
             // main.
@@ -3451,47 +3453,24 @@ public final class JvmSemanticEmitter {
             }
             SemanticOp returnBoundary = stdlibReturnBoundary(op);
             String target = slot((ValueId) op.result());
-            if (payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_LOG
-                    || payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_ERROR) {
-                StringBuilder textExpr = new StringBuilder();
-                for (int i = 0; i < payload.args().size(); i++) {
-                    if (i > 0) {
-                        textExpr.append(" + \" \" + ");
-                    }
-                    textExpr.append("((String) ").append(slot(payload.args().get(i)))
-                        .append(")");
+            // Every row runs the one row invoker the cataloged callable also
+            // runs (M4: the two console rows' single-effect write included),
+            // so the direct arm and the callable share one realization and
+            // the direct arm's observable is unchanged.
+            out.append(indent(indent)).append(target)
+                .append(" = JvmRuntime.stdlibInvoke(")
+                .append(javaString(payload.function().name())).append(", ")
+                .append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(javaString(originOf(op))).append(", new Object[]{");
+            for (int i = 0; i < payload.args().size(); i++) {
+                if (i > 0) {
+                    out.append(", ");
                 }
-                if (textExpr.length() == 0) {
-                    textExpr.append("\"\"");
-                }
-                if (payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_LOG) {
-                    out.append(indent(indent)).append("JvmRuntime.console(")
-                        .append(textExpr).append(");\n");
-                } else {
-                    out.append(indent(indent)).append("JvmRuntime.consoleError(")
-                        .append(textExpr).append(");\n");
-                }
-                out.append(indent(indent)).append(target).append(" = null;\n");
-            } else {
-                // The in-target stdlib algorithm over the
-                // boundary-admitted carriers: an algorithm failure
-                // publishes the op FAILURE event and raises the exact
-                // closed projection at the call origin (JvmRuntime.stdlib
-                // converts it through the raise surface).
-                out.append(indent(indent)).append(target).append(" = JvmRuntime.stdlib(")
-                    .append(javaString(payload.function().name())).append(", ")
-                    .append(javaString(opKey(op.opId()))).append(", ")
-                    .append(javaString(op.contract().canonicalDigest())).append(", ")
-                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
-                    .append(javaString(originOf(op))).append(", new Object[]{");
-                for (int i = 0; i < payload.args().size(); i++) {
-                    if (i > 0) {
-                        out.append(", ");
-                    }
-                    out.append(slot(payload.args().get(i)));
-                }
-                out.append("});\n");
+                out.append(slot(payload.args().get(i)));
             }
+            out.append("});\n");
             if (returnBoundary != null) {
                 KindPayload.BoundaryPayload boundaryPayload =
                     (KindPayload.BoundaryPayload) returnBoundary.payload();
@@ -4620,22 +4599,99 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * {@code EXPORT_READ} — the per-kind read resolution (M2/M5/M6):
+         * The cataloged callable surfaces of the session's STDLIB imports
+         * (M4/K15 item 1): one surface entry per catalog row of every
+         * imported STDLIB module, in catalog order, created through the one
+         * memoized accessor ({@code JvmRuntime.stdlibCallable}) — the
+         * whole-surface population and the read resolve the identical
+         * carrier per row, and the surface is written only by this
+         * session-scoped catalog memoization (never re-derived per read).
+         */
+        private void emitStdlibSurfacePopulation(int indent) {
+            for (Map.Entry<ModuleId, ModuleImportKind> imported : importKinds.entrySet()) {
+                if (imported.getValue() != ModuleImportKind.STDLIB) {
+                    continue;
+                }
+                String modulePath = imported.getKey().path();
+                List<StdlibFunctionCatalog.Entry> rows = stdlibRowsOf(modulePath);
+                if (rows.isEmpty()) {
+                    throw new IllegalStateException("the STDLIB import of module '"
+                        + modulePath + "' resolves no closed catalog row (the catalog"
+                        + " is the resolution authority — a producer defect)");
+                }
+                for (StdlibFunctionCatalog.Entry row : rows) {
+                    out.append(indent(indent)).append("exportSurface(")
+                        .append(javaString(modulePath)).append(").write(")
+                        .append(javaString(row.exportName()))
+                        .append(", JvmRuntime.stdlibCallable(")
+                        .append(stdlibRowArgs(row)).append("));\n");
+                }
+            }
+        }
+
+        /**
+         * The closed catalog rows of one imported stdlib module, in catalog
+         * order (the pinned declaration order of the one catalog authority);
+         * an unimported or unknown module has none.
+         */
+        private static List<StdlibFunctionCatalog.Entry> stdlibRowsOf(String modulePath) {
+            List<StdlibFunctionCatalog.Entry> rows = new java.util.ArrayList<>();
+            for (StdlibFunctionCatalog.Entry row : StdlibFunctionCatalog.entries()) {
+                if (row.modulePath().equals(modulePath)) {
+                    rows.add(row);
+                }
+            }
+            return rows;
+        }
+
+        /**
+         * The one catalog row of one {@code (module path, export name)} pair,
+         * or a producer defect: the lowering's STDLIB guard already rejects an
+         * out-of-catalog member, so an emitted read always names a row.
+         */
+        private static StdlibFunctionCatalog.Entry stdlibRowOf(String modulePath,
+                                                              String exportName) {
+            return StdlibFunctionCatalog.lookup(modulePath, exportName)
+                .orElseThrow(() -> new IllegalStateException("the STDLIB export read '"
+                    + modulePath + "#" + exportName + "' resolves no closed catalog row"
+                    + " (the catalog is the STDLIB kind's resolution authority — a"
+                    + " producer defect)"));
+        }
+
+        /**
+         * The interning argument list of one cataloged callable
+         * ({@code JvmRuntime.stdlibCallable(module, name, rowTag, signature,
+         * spec)}): the row's declared descriptor text and its canonical spec
+         * text — the row's declared signature, never the reading site's.
+         */
+        private static String stdlibRowArgs(StdlibFunctionCatalog.Entry row) {
+            return javaString(row.modulePath()) + ", " + javaString(row.exportName())
+                + ", " + javaString(row.function().name()) + ", "
+                + javaString(descriptorText(row.declaredDescriptor())) + ", "
+                + javaString(row.declaredDescriptor().canonicalSpecText());
+        }
+
+        /**
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M4/M5/M6):
          * the read is the uniform program-scoped surface lookup
          * {@code exportSurface(module).read(name)} for a COMPILED read
          * (whose stored entry is the owner's published
          * {@code JvmRuntime.FunctionValue} carrier — the identical object
          * for every read of one export in one program) and for a HOST/FFI
          * read (whose stored entry is the loaded module table's entry),
-         * and whose landed {@code Table.read} projects
-         * {@code JvmRuntime.MISSING} for an absent key; the STDLIB kind
-         * keeps its landed placeholder until its own leaf lands (T4). The
-         * emitted read expression is identical in trace and production
-         * mode. In a project session a COMPILED read whose owner module is
-         * not among the closure's units is a producer defect and fails the
-         * emission closed; a per-unit session never fails closed for a
-         * foreign owner (the owner's own class publishes the surface of
-         * the same program).
+         * whose landed {@code Table.read} projects
+         * {@code JvmRuntime.MISSING} for an absent key; a STDLIB read
+         * publishes the in-target cataloged callable of the closed catalog
+         * row (the one memoized carrier per row per module per program —
+         * the identical object the whole-surface population writes,
+         * carrying the row's declared signature and canonical spec text); a
+         * read whose unit records no import fact keeps the landed
+         * placeholder. The emitted read expression is identical in trace
+         * and production mode. In a project session a COMPILED read whose
+         * owner module is not among the closure's units is a producer
+         * defect and fails the emission closed; a per-unit session never
+         * fails closed for a foreign owner (the owner's own class
+         * publishes the surface of the same program).
          */
         private void emitExportRead(SemanticOp op, int indent) {
             KindPayload.ExportReadPayload payload =
@@ -4662,6 +4718,15 @@ public final class JvmSemanticEmitter {
                 out.append(" = exportSurface(")
                     .append(javaString(payload.module().path())).append(").read(")
                     .append(javaString(payload.name())).append(");\n");
+            } else if (kind == ModuleImportKind.STDLIB) {
+                // The read publishes the catalog row's callable carrier
+                // itself (M4): the memoized accessor the whole-surface
+                // population uses, so the read and the surface hold the
+                // identical object and the read never builds a per-read
+                // value.
+                out.append(" = JvmRuntime.stdlibCallable(")
+                    .append(stdlibRowArgs(stdlibRowOf(payload.module().path(),
+                        payload.name()))).append(");\n");
             } else {
                 out.append(" = new JvmRuntime.Intrinsic();\n");
             }

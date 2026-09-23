@@ -84,6 +84,46 @@ public final class JvmRuntime {
         return surface;
     }
 
+    /**
+     * The program-scoped cataloged-callable registry (M4): one memoized
+     * carrier per catalog row per module per program, keyed by the module
+     * identity and the export name. Hosted with the runtime's existing
+     * program state ({@link #TASKS}, {@link #MODULE_STATES}, and
+     * {@link #EXPORT_SURFACES}), so every generated class of one program
+     * resolves the same callable object — a read before any surface
+     * population and the later whole-surface population observe one
+     * callable per row. Written only by the memoized accessor; never by a
+     * read.
+     */
+    public static final LinkedHashMap<String, StdlibFunctionValue> STDLIB_CALLABLES =
+        new LinkedHashMap<>();
+
+    /**
+     * The memoized accessor of the program-scoped cataloged callables (M4):
+     * the existing carrier of one catalog row, or a freshly created one
+     * (a repeated drive never replaces a resolved callable). The carrier
+     * carries the row's declared signature text and canonical spec text —
+     * never the reading site's descriptor.
+     *
+     * @param module    the resolved stdlib module path (the registry key)
+     * @param name      the export name (the row key)
+     * @param rowId     the catalog row tag ({@code StdlibFunctionId} name)
+     * @param signature the row's declared descriptor text
+     * @param spec      the row's canonical spec text
+     * @return the program's callable of that catalog row; never null
+     */
+    public static StdlibFunctionValue stdlibCallable(String module, String name,
+                                                     String rowId, String signature,
+                                                     String spec) {
+        String key = module + '\u0001' + name;
+        StdlibFunctionValue callable = STDLIB_CALLABLES.get(key);
+        if (callable == null) {
+            callable = new StdlibFunctionValue(rowId, signature, spec);
+            STDLIB_CALLABLES.put(key, callable);
+        }
+        return callable;
+    }
+
     /** A string-keyed table with explicit key presence. */
     public static final class Table {
         public final LinkedHashMap<String, Object> entries = new LinkedHashMap<>();
@@ -237,6 +277,48 @@ public final class JvmRuntime {
         @Override public String toString() {
             return "intrinsic";
         }
+    }
+
+    /**
+     * The in-target cataloged stdlib callable (M4): a {@link FunctionValue}
+     * carrier holding the catalog row tag, the row's declared descriptor
+     * text (the landed function row's carried signature), and the row's
+     * canonical spec text, with a null frame id. One memoized object per
+     * catalog row per module per program ({@link #stdlibCallable}); its
+     * {@code fn} is the row's invoker ({@link #stdlibInvoke}), and the
+     * invoking call's context travels through
+     * {@link #invokeStdlibCallable}.
+     */
+    public static final class StdlibFunctionValue extends FunctionValue {
+        /** The catalog row tag ({@code StdlibFunctionId} name). */
+        public final String rowId;
+
+        StdlibFunctionValue(String rowId, String signature, String spec) {
+            super(args -> stdlibInvoke(rowId, (String) args[0], (String) args[1],
+                (String) args[2], (String) args[3],
+                java.util.Arrays.copyOfRange(args, 4, args.length)), signature, spec,
+                null);
+            this.rowId = rowId;
+        }
+    }
+
+    /**
+     * Invokes one cataloged stdlib callable under the invoking call's
+     * context (M4): the trace key, contract digest, parent key, and origin
+     * pack the leading four array entries, the boundary-admitted call
+     * arguments follow — the same context the direct {@code STDLIB_CALL}
+     * arm passes to {@link #stdlibInvoke}.
+     */
+    public static Object invokeStdlibCallable(StdlibFunctionValue callable, String opKey,
+                                              String digest, String parent, String origin,
+                                              Object[] args) {
+        Object[] packed = new Object[args.length + 4];
+        packed[0] = opKey;
+        packed[1] = digest;
+        packed[2] = parent;
+        packed[3] = origin;
+        System.arraycopy(args, 0, packed, 4, args.length);
+        return callable.fn.invoke(packed);
     }
 
     /** A function value: the invoker plus its carried signature text. */
@@ -1442,8 +1524,8 @@ public final class JvmRuntime {
      * {@code TIME_NOW_MILLIS} reads the target clock
      * ({@link System#currentTimeMillis()}) and its single terminal is the
      * declared int {@code STDLIB_RETURN} boundary, never an algorithm
-     * failure. Console ids are emitted inline by the emitters (the
-     * byte-exact one-effect contract), never through this surface.
+     * failure. The two console ids are the row invoker's
+     * ({@link #stdlibInvoke}), never this surface's.
      */
     public static Object stdlib(String fn, String opKey, String digest, String parent,
                                 String origin, Object[] args) {
@@ -1612,6 +1694,49 @@ public final class JvmRuntime {
                 failure.expected, failure.actual);
             return null; // unreachable: raise throws
         }
+    }
+
+    /**
+     * The one row invoker of the closed stdlib catalog (M4): the single
+     * callable realization per catalog row, shared by the direct
+     * {@code STDLIB_CALL} arm and the cataloged callable's {@code fn}. The
+     * two console rows run the row's single-effect write through
+     * {@link #console}/{@link #consoleError} (the direct arm's text
+     * projection); every algorithmic row delegates to {@link #stdlib} with
+     * the same row identity and the same invoking-call context — one
+     * algorithm authority, never two.
+     */
+    public static Object stdlibInvoke(String fn, String opKey, String digest, String parent,
+                                      String origin, Object[] args) {
+        switch (fn) {
+            case "CONSOLE_LOG" -> {
+                console(consoleText(args));
+                return null;
+            }
+            case "CONSOLE_ERROR" -> {
+                consoleError(consoleText(args));
+                return null;
+            }
+            default -> {
+                return stdlib(fn, opKey, digest, parent, origin, args);
+            }
+        }
+    }
+
+    /**
+     * The text projection of one console invocation: the boundary-admitted
+     * argument texts in declared order joined by one space; zero arguments
+     * project the empty string.
+     */
+    private static String consoleText(Object[] args) {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) {
+                text.append(' ');
+            }
+            text.append((String) args[i]);
+        }
+        return text.toString();
     }
 
     /** An int parameter carrier: a Long or an in-range integral Double (unchanged). */

@@ -2,6 +2,7 @@ package deal.codegen.lua;
 
 import deal.semantic.DescriptorService;
 import deal.semantic.HostDeclarationSurface;
+import deal.semantic.StdlibFunctionCatalog;
 import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
@@ -612,6 +613,14 @@ public final class LuaSemanticEmitter {
             out.append("local __modStack = {}\n");
             out.append("__allocIds = __allocIds or {}\n");
             out.append("__allocNext = __allocNext or 1\n");
+            // The mode flag of the prelude's console realization (M4): the
+            // row invoker's single-effect write branches on it, so the
+            // direct STDLIB_CALL arm and the cataloged callable share one
+            // console realization in both modes. Chunk-local (like __module),
+            // so a second chunk of one process never changes this chunk's
+            // mode.
+            out.append("local __traceMode = ").append(trace ? "true" : "false")
+                .append("\n");
             out.append(PRELUDE);
             out.append(JSON_PRELUDE);
             if (!trace) {
@@ -633,6 +642,13 @@ public final class LuaSemanticEmitter {
             // valid Lua too (production-only is the entry-surface return
             // terminal, not the declaration).
             out.append("__exportSurfaces = __exportSurfaces or {}\n");
+            // The program-scoped cataloged-callable registry (M4): one
+            // carrier per catalog row per module per program, so a read
+            // before any surface population and the later whole-surface
+            // population observe one callable object; chunk-global exactly
+            // like the surface registry (a second chunk of the same
+            // process resolves the same callables).
+            out.append("__stdlibEntries = __stdlibEntries or {}\n");
             // The host-module loader of the production chunk (ISSUE-0650): a
             // chunk with a HOST-kind import requires the deployed runtime's
             // landed loader (__rt.load_host); the binding is emitted exactly
@@ -646,6 +662,7 @@ public final class LuaSemanticEmitter {
                     .append("] = __exportSurfaces[").append(moduleKey)
                     .append("] or {}\n");
             }
+            emitStdlibSurfacePopulation();
             // The host-driven callback dispatch table (CALLBACK_INVOKE):
             // a chunk-global in both modes — the per-unit dispatch entries
             // and the two host-seam helpers are the scenario host's
@@ -885,6 +902,82 @@ public final class LuaSemanticEmitter {
                 }
             }
             return false;
+        }
+
+        /**
+         * The cataloged callable surfaces of the session's STDLIB imports
+         * (M4/K15 item 1): one surface entry per catalog row of every
+         * imported STDLIB module, in catalog order, created through the one
+         * memoized accessor ({@code __stdlibEntry}) — the whole-surface
+         * population and the read resolve the identical callable object per
+         * row, and the surface is written only by this session-scoped
+         * catalog memoization (never re-derived per read).
+         */
+        private void emitStdlibSurfacePopulation() {
+            for (Map.Entry<ModuleId, ModuleImportKind> imported : importKinds.entrySet()) {
+                if (imported.getValue() != ModuleImportKind.STDLIB) {
+                    continue;
+                }
+                String modulePath = imported.getKey().path();
+                List<StdlibFunctionCatalog.Entry> rows = stdlibRowsOf(modulePath);
+                if (rows.isEmpty()) {
+                    throw new IllegalStateException("the STDLIB import of module '"
+                        + modulePath + "' resolves no closed catalog row (the catalog"
+                        + " is the resolution authority — a producer defect)");
+                }
+                String key = luaString(modulePath);
+                out.append("__exportSurfaces[").append(key).append("] = ")
+                    .append("__exportSurfaces[").append(key).append("] or {}\n");
+                for (StdlibFunctionCatalog.Entry row : rows) {
+                    out.append("__exportSurfaces[").append(key).append("][")
+                        .append(luaString(row.exportName())).append("] = ")
+                        .append("__stdlibEntry(")
+                        .append(stdlibRowArgs(row)).append(")\n");
+                }
+            }
+        }
+
+        /**
+         * The closed catalog rows of one imported stdlib module, in catalog
+         * order (the pinned declaration order of the one catalog authority);
+         * an unimported or unknown module has none.
+         */
+        private static List<StdlibFunctionCatalog.Entry> stdlibRowsOf(String modulePath) {
+            List<StdlibFunctionCatalog.Entry> rows = new ArrayList<>();
+            for (StdlibFunctionCatalog.Entry row : StdlibFunctionCatalog.entries()) {
+                if (row.modulePath().equals(modulePath)) {
+                    rows.add(row);
+                }
+            }
+            return rows;
+        }
+
+        /**
+         * The one catalog row of one {@code (module path, export name)} pair,
+         * or a producer defect: the lowering's STDLIB guard already rejects an
+         * out-of-catalog member, so an emitted read always names a row.
+         */
+        private static StdlibFunctionCatalog.Entry stdlibRowOf(String modulePath,
+                                                              String exportName) {
+            return StdlibFunctionCatalog.lookup(modulePath, exportName)
+                .orElseThrow(() -> new IllegalStateException("the STDLIB export read '"
+                    + modulePath + "#" + exportName + "' resolves no closed catalog row"
+                    + " (the catalog is the STDLIB kind's resolution authority — a"
+                    + " producer defect)"));
+        }
+
+        /**
+         * The interning argument list of one cataloged callable
+         * ({@code __stdlibEntry(module, name, rowTag, signature, spec)}): the
+         * row's declared descriptor text ({@code __sig}) and its canonical
+         * spec text ({@code __csig}) — the row's declared signature, never
+         * the reading site's.
+         */
+        private static String stdlibRowArgs(StdlibFunctionCatalog.Entry row) {
+            return luaString(row.modulePath()) + ", " + luaString(row.exportName())
+                + ", " + luaString(row.function().name()) + ", "
+                + luaString(descriptorText(row.declaredDescriptor())) + ", "
+                + luaString(row.declaredDescriptor().canonicalSpecText());
         }
 
         /**
@@ -2614,51 +2707,30 @@ public final class LuaSemanticEmitter {
             String target = slot((ValueId) op.result());
             if (payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_LOG
                     || payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_ERROR) {
-                StringBuilder textExpr = new StringBuilder();
-                for (int i = 0; i < payload.args().size(); i++) {
-                    if (i > 0) {
-                        textExpr.append("..\" \"..");
-                    }
-                    textExpr.append(slot(payload.args().get(i)));
+                // The direct arm runs the same row invoker the cataloged
+                // callable does (M4): the console rows' single-effect
+                // write is one realization, never a second statement-level
+                // copy — the result is the row invoker's null and the
+                // effect is exactly one write on the row's channel with
+                // the direct arm's text projection.
+                out.append(target).append(" = __stdlibInvoke(")
+                    .append(luaString(payload.function().name())).append(", ")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(originOf(op)));
+                for (ValueId arg : payload.args()) {
+                    out.append(", ").append(slot(arg));
                 }
-                if (textExpr.length() == 0) {
-                    textExpr.append("\"\"");
-                }
-                if (payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_LOG) {
-                    // The STDOUT channel: the real effect bytes on stdout
-                    // plus, in trace mode, the protocol record on the
-                    // dedicated trace stream — the two never collide.
-                    out.append("io.write(").append(textExpr).append("..\"\\n\")\n");
-                    out.append("io.stdout:flush()\n");
-                    if (trace) {
-                        out.append("io.stderr:write(\"F|CONSOLE_WRITE|STDOUT|\"..__esc(")
-                            .append(textExpr).append(")..\"\\n\")\n");
-                        out.append("io.stderr:flush()\n");
-                    }
-                } else {
-                    // The STDERR channel shares the trace stream, so the
-                    // trace protocol stays decode-clean: trace mode
-                    // publishes only the protocol record (the effect's
-                    // exact scalar text plus its channel), production mode
-                    // (no protocol) publishes the exact effect bytes.
-                    if (trace) {
-                        out.append("io.stderr:write(\"F|CONSOLE_WRITE|STDERR|\"..__esc(")
-                            .append(textExpr).append(")..\"\\n\")\n");
-                        out.append("io.stderr:flush()\n");
-                    } else {
-                        out.append("io.stderr:write(").append(textExpr)
-                            .append("..\"\\n\")\n");
-                        out.append("io.stderr:flush()\n");
-                    }
-                }
-                out.append(target).append(" = nil\n");
+                out.append(")\n");
             } else {
                 // The in-target stdlib algorithm over the
-                // boundary-admitted carriers: an algorithm failure
+                // boundary-admitted carriers, through the same row invoker
+                // the cataloged callable runs (M4): an algorithm failure
                 // publishes the op FAILURE event and raises the exact
                 // closed projection at the call origin (the __stdlib
                 // helper converts it through the fail-closed pattern).
-                out.append(target).append(" = __stdlib(")
+                out.append(target).append(" = __stdlibInvoke(")
                     .append(luaString(payload.function().name())).append(", ")
                     .append(luaString(opKey(op.opId()))).append(", ")
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
@@ -4438,22 +4510,24 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * {@code EXPORT_READ} — the per-kind read resolution (M2/M5/M6): a
-         * COMPILED read resolves the owning module's published value
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M4/M5/M6):
+         * a COMPILED read resolves the owning module's published value
          * through the chunk-global program-scoped export-surface registry
          * (the entry's {@code __val} field); a HOST/FFI read resolves the
          * same registry's entry itself — for a HOST module the surface is
          * the loaded module table {@code __rt.load_host} returns, so the
-         * entry is the host ABI's value and the read never re-wraps it;
-         * an absent surface or entry projects the {@code __MISSING}
-         * sentinel in both cases. The STDLIB kind keeps its landed
-         * placeholder until its own leaf lands (T4). The emitted read
-         * expression is identical in trace and production mode. In a
-         * project session a COMPILED read whose owner module is not among
-         * the closure's units is a producer defect and fails the emission
-         * closed; a per-unit session never fails closed for a foreign
-         * owner (the owner's own chunk publishes the surface of the same
-         * program).
+         * entry is the host ABI's value and the read never re-wraps it; an
+         * absent surface or entry projects the {@code __MISSING} sentinel
+         * in both cases; a STDLIB read publishes the in-target cataloged
+         * callable of the closed catalog row (the one memoized accessor's
+         * entry — the identical object the whole-surface population writes,
+         * carrying the row's declared signature and canonical spec text,
+         * never the reading site's). The emitted read expression is
+         * identical in trace and production mode. In a project session a
+         * COMPILED read whose owner module is not among the closure's units
+         * is a producer defect and fails the emission closed; a per-unit
+         * session never fails closed for a foreign owner (the owner's own
+         * chunk publishes the surface of the same program).
          */
         private void emitExportRead(SemanticOp op) {
             KindPayload.ExportReadPayload payload =
@@ -4483,6 +4557,14 @@ public final class LuaSemanticEmitter {
                 out.append(slot((ValueId) op.result())).append(" = __exportHostValue(")
                     .append(luaString(payload.module().path())).append(", ")
                     .append(luaString(payload.name())).append(")\n");
+            } else if (kind == ModuleImportKind.STDLIB) {
+                // The read publishes the catalog row's callable entry itself
+                // (M4): the memoized accessor the whole-surface population
+                // uses, so the read and the surface hold the identical
+                // object and the read never builds a per-read value.
+                out.append(slot((ValueId) op.result())).append(" = __stdlibEntry(")
+                    .append(stdlibRowArgs(stdlibRowOf(payload.module().path(),
+                        payload.name()))).append(")\n");
             } else {
                 out.append(slot((ValueId) op.result())).append(" = __intrinsicFn()\n");
             }
@@ -6767,6 +6849,77 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
     return os.time() * 1000
   end
   __sfail("E8001", "unknown stdlib call "..tostring(fn), nil, nil)
+end
+-- The mode-gated console effect of the two cataloged console rows (M4):
+-- the row invoker's single-effect write, shared by the direct
+-- STDLIB_CALL arm and the cataloged callable. STDOUT always carries the
+-- real effect bytes (plus, in trace mode, the protocol record on the
+-- dedicated trace stream — the two never collide); the STDERR channel
+-- shares the trace stream, so trace mode publishes only the protocol
+-- record (the effect's exact scalar text plus its channel) and
+-- production mode the exact effect bytes.
+local function __consoleEffect(channel, text)
+  if channel == "STDOUT" then
+    io.write(text.."\\n")
+    io.stdout:flush()
+    if __traceMode then
+      io.stderr:write("F|CONSOLE_WRITE|STDOUT|"..__esc(text).."\\n")
+      io.stderr:flush()
+    end
+  else
+    if __traceMode then
+      io.stderr:write("F|CONSOLE_WRITE|STDERR|"..__esc(text).."\\n")
+    else
+      io.stderr:write(text.."\\n")
+    end
+    io.stderr:flush()
+  end
+end
+-- The text projection of one console invocation: the argument texts in
+-- declared order joined by one space (the direct arm's projection
+-- verbatim); zero arguments project the empty string.
+local function __consoleText(...)
+  local n = select("#", ...)
+  if n == 0 then return "" end
+  local parts = {}
+  for i = 1, n do parts[i] = tostring((select(i, ...))) end
+  return table.concat(parts, " ")
+end
+-- The one row invoker of the closed catalog (M4): the single callable
+-- realization per catalog row, shared by the direct STDLIB_CALL arm and
+-- the cataloged callable. The two console rows run the single-effect
+-- write through __consoleEffect; every algorithmic row delegates to
+-- __stdlib (the row identity and the invoking call's context travel
+-- through unchanged — one algorithm authority, never two).
+local function __stdlibInvoke(fn, opKey, digest, parent, origin, ...)
+  if fn == "CONSOLE_LOG" then
+    __consoleEffect("STDOUT", __consoleText(...))
+    return nil
+  elseif fn == "CONSOLE_ERROR" then
+    __consoleEffect("STDERR", __consoleText(...))
+    return nil
+  end
+  return __stdlib(fn, opKey, digest, parent, origin, ...)
+end
+-- The memoized cataloged callable of one catalog row (M4): one carrier
+-- per catalog row per module per program — {__fn = the row invoker,
+-- __sig = the row's declared descriptor text, __csig = the row's
+-- canonical spec text, __fid = nil, __sid = the row tag}, admissible by
+-- the landed function row. Creation goes through this one accessor, so
+-- a read before any surface population and the later whole-surface
+-- population observe one callable object. The registry is chunk-global
+-- (one program), exactly like the export-surface registry.
+local function __stdlibEntry(module, name, sid, sig, csig)
+  local key = module..string.char(1)..name
+  local entry = __stdlibEntries[key]
+  if entry == nil then
+    entry = {__fn = function(opKey, digest, parent, origin, ...)
+        return __stdlibInvoke(sid, opKey, digest, parent, origin, ...)
+      end,
+      __sig = sig, __csig = csig, __fid = nil, __sid = sid}
+    __stdlibEntries[key] = entry
+  end
+  return entry
 end
 """;
 }

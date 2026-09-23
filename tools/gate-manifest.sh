@@ -607,4 +607,28 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # hand-built dynamic-cell/record negatives. The class lives in
   # package deal.semantic to reach the package-internal project walk.
   'fg|=== Running Dynamic Call Shape Production Tests (ISSUE-0657) ===|java -ea -cp build deal.semantic.DynamicCallLoweringTest'
+  # ISSUE-0647 registration: the spec-stdlib import-read realization in
+  # the three consumers (module-export-reads-and-in-project-class-
+  # construction M4, the cataloged stdlib callable contract, and M3's
+  # STDLIB branch; semantic-ir-construct-coverage-cutover K2/K7;
+  # luajit-jvm-single-lowering-production-cutover C2): the probe project
+  # whose entry reads a std.console export (value and callee positions)
+  # and a std.string algorithmic row into function-typed bindings lowers
+  # through the one project entry and validates; the LuaJIT
+  # __stdlibEntry accessor and the JVM JvmRuntime.stdlibCallable carrier
+  # reads in both project sessions, the one surface entry per catalog row
+  # of each imported STDLIB module in catalog order with the row's
+  # canonical spec text, the one shared row invoker
+  # (__stdlibInvoke/JvmRuntime.stdlibInvoke) of the direct STDLIB_CALL
+  # arm with the console rows' single-effect write factored in, the
+  # oracle's memoized Value.StdlibCallableValue per catalog row (the
+  # carried signature admitted by the function-typed binding boundary,
+  # the read registered once at its creation, a doctored differing
+  # registration and a doctored differing descriptor both failing
+  # closed), the direct arm's unchanged observable (exactly one console
+  # effect write, the null result, the call-expression origin), the
+  # three-consumer parity matrix, the combined compiled + stdlib read
+  # composition over both production artifacts under the real toolchains,
+  # and the per-unit session read emission.
+  'fg|=== Running Stdlib Export Read Realization Tests (ISSUE-0647) ===|java -ea -cp build deal.test.StdlibExportReadRealizationTest'
 )

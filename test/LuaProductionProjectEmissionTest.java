@@ -387,8 +387,28 @@ public class LuaProductionProjectEmissionTest {
                 "the trace event helper is the production no-op");
             check(!lua.contains("io.stderr:write(\"R|"),
                 "the artifact carries no R| terminal writer");
-            check(!lua.contains("io.stderr:write(\"F|"),
-                "the artifact carries no F| event writer");
+            // The only F| writers of the production chunk are the mode-gated
+            // console records of the shared row invoker (M4): the chunk's mode
+            // flag is false, so no record reaches stderr at run time.
+            check(lua.contains("__traceMode = false"),
+                "the production chunk's mode flag is false");
+            int consoleEffectAt = lua.indexOf("local function __consoleEffect(channel, "
+                + "text)");
+            int consoleTextAt = lua.indexOf("local function __consoleText(...)");
+            int consoleRecordWriters = 0;
+            for (int at = lua.indexOf("io.stderr:write(\"F|"); at >= 0;
+                    at = lua.indexOf("io.stderr:write(\"F|", at + 1)) {
+                if (consoleEffectAt >= 0 && at > consoleEffectAt
+                        && consoleTextAt > at) {
+                    consoleRecordWriters++;
+                    continue;
+                }
+                fail("the production artifact carries an unguarded F| event writer at "
+                    + at);
+            }
+            checkEq(2, consoleRecordWriters,
+                "every F| writer of the production chunk is the mode-gated console "
+                    + "record of the row invoker");
             check(!lua.contains("\"R|success|null\""),
                 "the artifact carries no success terminal text");
             String trace = LuaSemanticEmitter.emitProject(project, result.tables(),
@@ -413,12 +433,19 @@ public class LuaProductionProjectEmissionTest {
             checkEq(1, countOccurrences(lua,
                     "__exportSurfaces = __exportSurfaces or {}\n"),
                 "the chunk declares the chunk-global registry exactly once");
-            checkEq(List.of(
-                    "__exportSurfaces[\"lib\"] = __exportSurfaces[\"lib\"] or {}",
-                    "__exportSurfaces[\"app\"] = __exportSurfaces[\"app\"] or {}"),
-                luaSurfaceCreations(lua),
-                "one surface per closure module keyed by the dotted module path, in "
-                    + "closure order");
+            // One surface per closure module in closure order, then one per
+            // imported STDLIB module (the cataloged callable surface, M4/K15):
+            // every surface is keyed by the dotted module path.
+            List<String> expectedSurfaces = new ArrayList<>();
+            for (ModuleId moduleId : project.modules().keySet()) {
+                expectedSurfaces.add("__exportSurfaces[\"" + moduleId.path()
+                    + "\"] = __exportSurfaces[\"" + moduleId.path() + "\"] or {}");
+            }
+            expectedSurfaces.add("__exportSurfaces[\"std.console\"] = "
+                + "__exportSurfaces[\"std.console\"] or {}");
+            checkEq(expectedSurfaces, luaSurfaceCreations(lua),
+                "one surface per closure module plus the imported STDLIB module, keyed "
+                    + "by the dotted module path, in closure order");
             List<String> expectedWrites = new ArrayList<>();
             for (ModuleId moduleId : project.modules().keySet()) {
                 for (ExportEntry entry : exportsOf(project.modules().get(moduleId))) {
