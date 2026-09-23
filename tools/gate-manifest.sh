@@ -629,6 +629,10 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # effect write, the null result, the call-expression origin), the
   # three-consumer parity matrix, the combined compiled + stdlib read
   # composition over both production artifacts under the real toolchains,
-  # and the per-unit session read emission.
+  # the per-unit session read emission, and the reviewed comparison
+  # correction (the cataloged callable integrated into the oracle's closed
+  # comparison operand view; a checker-valid console.log === console.log /
+  # console.log === console.error program driving the oracle and both
+  # production artifacts to the identical identity outcomes).
   'fg|=== Running Stdlib Export Read Realization Tests (ISSUE-0647) ===|java -ea -cp build deal.test.StdlibExportReadRealizationTest'
 )

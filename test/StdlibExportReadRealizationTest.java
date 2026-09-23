@@ -107,6 +107,17 @@ import java.util.Set;
  *       and the direct console call writes exactly one effect.</li>
  *   <li><b>The per-unit sessions.</b> A per-unit session emits the same
  *       surface-resolving read in trace and production mode.</li>
+ *   <li><b>The compared read values.</b> A checker-valid
+ *       function-identity comparison of stdlib read values
+ *       ({@code console.log === console.log} and
+ *       {@code console.log === console.error}) lowers and validates, and
+ *       runs through the oracle and both production artifacts: the
+ *       cataloged callable is integrated into the oracle's closed
+ *       comparison operand view as the memoized allocation's identity
+ *       (two reads of one row compare equal, two distinct rows compare
+ *       unequal), the artifacts compare the identical memoized object,
+ *       and the effects the comparisons gate are the same in all three
+ *       consumers.</li>
  * </ol>
  */
 public class StdlibExportReadRealizationTest {
@@ -186,6 +197,31 @@ public class StdlibExportReadRealizationTest {
         }
         """;
 
+    // The compared read values (the review-cycle correction): a
+    // function-identity comparison over the cataloged callables.
+
+    private static final String COMPARISON_SOURCE = """
+        import * as console from "std/console"
+
+        export function main(): null {
+          let same: boolean = console.log === console.log
+          let different: boolean = console.log === console.error
+          if (same) {
+            console.log("same")
+          }
+          if (different) {
+            console.log("different")
+          }
+          return null
+        }
+        """;
+    /** The source line of {@code console.log === console.log}. */
+    private static final int SAME_COMPARISON_LINE = 4;
+    /** The source line of {@code console.log === console.error}. */
+    private static final int DIFFERENT_COMPARISON_LINE = 5;
+    private static final String SAME_EFFECT = "same";
+    private static final String DIFFERENT_EFFECT = "different";
+
     private record Fixture(
         Path root,
         CheckedProjectInput checkedProject,
@@ -246,6 +282,11 @@ public class StdlibExportReadRealizationTest {
         sources.put("src/lib.deal", COMPANION_SOURCE);
         sources.put("src/app.deal", COMBINED_SOURCE);
         return compileProject(sources);
+    }
+
+    private static Fixture comparisonFixture() throws Exception {
+        return compileProject(
+            new LinkedHashMap<>(Map.of("src/app.deal", COMPARISON_SOURCE)));
     }
 
     private static SemanticLowerer.ProjectLoweringResult lower(Fixture fixture) {
@@ -1064,6 +1105,311 @@ public class StdlibExportReadRealizationTest {
     }
 
     // =========================================================================
+    // 2c. The compared read values: the cataloged callable is a comparison
+    //     operand in all three consumers
+    // =========================================================================
+
+    /**
+     * The review-cycle correction (review MR-0519 cycle 1, finding 1): the
+     * new {@code Value.StdlibCallableValue} is integrated into the oracle's
+     * closed comparison operand view. A checker-valid function-identity
+     * comparison of stdlib read values ({@code console.log === console.log}
+     * lowers to {@code REFERENCE_EQ}; {@code ComparisonSelectorLowering})
+     * lowers and validates, so the oracle must compare the memoized
+     * callables by their allocation identity — exactly as both artifacts
+     * compare the identical memoized object. The probe drives that program
+     * through the oracle and both production artifacts under the real
+     * toolchains: two reads of one row compare equal, two distinct rows
+     * compare unequal, and the effects the comparisons gate are the same in
+     * all three consumers.
+     */
+    static void testStdlibCallableComparison() throws Exception {
+        System.out.println("-- the compared stdlib read values: the memoized catalog "
+            + "callable is a comparison operand in the oracle and both artifacts --");
+        Fixture fixture = comparisonFixture();
+        Path workspace = Files.createTempDirectory("stdlib-read-comparison");
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(fixture);
+            check(!result.hasErrors() && result.project() != null,
+                "the comparison project lowers: " + result.diagnostics());
+            if (result.project() == null) {
+                return;
+            }
+            ExecutableLoweredProject project = result.project();
+            checkEq(Optional.empty(), SemanticIrValidator.validate(project, facts(fixture)),
+                "the comparison project passes the closed project gate");
+            LoweredModuleUnit appUnit = project.modules().get(APP);
+            check(appUnit != null, "the closure carries the entry module");
+            if (appUnit == null) {
+                return;
+            }
+            List<SemanticOp> sameReads = readsAt(readsOf(appUnit), CONSOLE_MODULE,
+                CONSOLE_ROW, SAME_COMPARISON_LINE);
+            List<SemanticOp> distinctReads = readsAt(readsOf(appUnit), CONSOLE_MODULE,
+                "error", DIFFERENT_COMPARISON_LINE);
+            checkEq(2, sameReads.size(),
+                "`console.log === console.log` carries one catalog read per side");
+            checkEq(1, distinctReads.size(),
+                "the distinct-row comparison reads console.error");
+            if (sameReads.size() != 2 || distinctReads.size() != 1) {
+                return;
+            }
+            List<SemanticOp> comparedReads = new ArrayList<>(sameReads);
+            comparedReads.addAll(distinctReads);
+            SemanticOp sameComparison = null;
+            SemanticOp differentComparison = null;
+            int referenceEqualities = 0;
+            for (SemanticOp op : opsOfKind(appUnit, SemanticOpKind.BINARY)) {
+                KindPayload.BinaryPayload payload = (KindPayload.BinaryPayload) op.payload();
+                if (payload.selector() != deal.semantic.ir.BinarySelector.REFERENCE_EQ) {
+                    continue;
+                }
+                referenceEqualities++;
+                int line = op.origin().span().startLine();
+                if (line == SAME_COMPARISON_LINE) {
+                    sameComparison = op;
+                } else if (line == DIFFERENT_COMPARISON_LINE) {
+                    differentComparison = op;
+                }
+            }
+            checkEq(2, referenceEqualities,
+                "both function-identity comparisons lower to REFERENCE_EQ");
+            check(sameComparison != null && differentComparison != null,
+                "the two comparisons carry their source-line origins");
+            if (sameComparison == null || differentComparison == null) {
+                return;
+            }
+
+            // The oracle: the cataloged callable is a comparison operand and
+            // the memoized identity decides the outcome.
+            SemanticRuntimeModel.ConsumerRun run = SemanticOracle.executeProjectInits(
+                project, result.tables(), result.registries(), null);
+            check(run.terminal() instanceof SemanticRuntimeModel.Terminal.Success,
+                "the oracle admits the cataloged callable as a comparison operand: "
+                    + run.terminal());
+            checkEq(List.of(SAME_EFFECT), run.effects().stream()
+                    .map(SemanticRuntimeModel.EffectEvent::text).toList(),
+                "exactly one effect: `same` is written and `different` is not — the "
+                    + "identical row compares equal and two distinct rows compare "
+                    + "unequal in the oracle");
+            String sameAtom = successAtomOf(run, sameReads.get(0).opId());
+            checkEq(sameAtom, successAtomOf(run, sameReads.get(1).opId()),
+                "the two reads of one catalog row publish the identical callable value");
+            check(sameAtom != null && sameAtom.startsWith("ref:"),
+                "the compared callable is the memoized allocation: " + sameAtom);
+            check(!java.util.Objects.equals(sameAtom,
+                    successAtomOf(run, distinctReads.get(0).opId())),
+                "the second row's callable is a distinct value");
+            checkEq("bool:true", successAtomOf(run, sameComparison.opId()),
+                "identity over two reads of one row is true in the oracle");
+            checkEq("bool:false", successAtomOf(run, differentComparison.opId()),
+                "identity over two distinct rows is false in the oracle");
+
+            // Both emitters read the memoized carrier for every compared
+            // occurrence: the second read value is never re-materialized.
+            String traceLua = LuaSemanticEmitter.emitProject(project, result.tables(),
+                result.registries());
+            String productionLua = LuaSemanticEmitter.emitProductionProject(project,
+                result.tables(), result.registries(), fixture.surface());
+            JvmSemanticEmitter.EmissionResult traceJvm = JvmSemanticEmitter.emitProject(
+                project, result.tables(), result.registries());
+            JvmSemanticEmitter.EmissionResult productionJvm =
+                JvmSemanticEmitter.emitProductionProject(project, result.tables(),
+                    result.registries(), JvmBackend.classNameFor(APP.path()),
+                    fixture.surface());
+            for (SemanticOp read : comparedReads) {
+                long id = ((ValueId) read.result()).id();
+                checkEq(1, countOccurrences(traceLua, "S.v" + id
+                        + " = __stdlibEntry(\""),
+                    "the trace-mode LuaJIT read is the memoized catalog accessor");
+                checkEq(1, countOccurrences(productionLua, "S.v" + id
+                        + " = __stdlibEntry(\""),
+                    "the production LuaJIT read is the identical accessor");
+                check(!traceLua.contains("S.v" + id + " = __intrinsicFn()"),
+                    "the compared read is never the placeholder arm");
+                checkEq(1, countOccurrences(traceJvm.source(),
+                        "v" + id + " = JvmRuntime.stdlibCallable(\""),
+                    "the trace-mode JVM read is the memoized catalog carrier");
+                checkEq(1, countOccurrences(productionJvm.source(),
+                        "v" + id + " = JvmRuntime.stdlibCallable(\""),
+                    "the production JVM read is the identical carrier accessor");
+            }
+
+            // The three-consumer matrix: the comparison operation, its
+            // operands' atoms, the effects, and the terminal agree.
+            SemanticDifferentialHarness.Verdict verdict =
+                SemanticDifferentialHarness.runProject(project, result.tables(),
+                    result.registries(),
+                    SemanticDifferentialHarness.Expectation.success(
+                        "compared stdlib read values", List.of(SAME_EFFECT), "null"),
+                    workspace.resolve("matrix"));
+            check(verdict.pass(), "the comparison probe's three consumers agree "
+                + "event-for-event:\n" + verdict.report());
+
+            // The LuaJIT production artifact: the chunk's own comparisons
+            // gate the effects (one `same`, no `different`).
+            Path luaOut = fixture.root().resolve("comparison-lua");
+            PublicationStager luaStager = PublicationStager.forRoot(luaOut);
+            ProductionProjectEmission.Result luaResult;
+            try {
+                luaResult = emit(fixture, Backend.LUAJIT, luaStager, false);
+                luaStager.publish();
+            } finally {
+                luaStager.discard();
+            }
+            check(luaResult.emitted(), "the comparison LuaJIT production arm emits: "
+                + luaResult.diagnostics());
+            if (!luaResult.emitted()) {
+                return;
+            }
+            Path luaArtifact = luaOut.resolve(luaResult.artifactRelativePath());
+            String lua = Files.readString(luaArtifact);
+            for (SemanticOp read : comparedReads) {
+                check(!lua.contains("S.v" + ((ValueId) read.result()).id()
+                        + " = __intrinsicFn()"),
+                    "the LuaJIT artifact carries no placeholder read");
+            }
+            Path luaProbe = fixture.root().resolve("comparison-lua-probe.lua");
+            Files.writeString(luaProbe, comparisonLuaProbe(luaArtifact),
+                StandardCharsets.UTF_8);
+            ProcessOutcome luaRun = runProcess(List.of("luajit",
+                luaProbe.toAbsolutePath().toString()), fixture.root());
+            check(luaRun.exitCode() == 0 && luaRun.stdout().contains("PROBE-OK")
+                    && countOccurrences(luaRun.stdout(), SAME_EFFECT) == 1
+                    && !luaRun.stdout().contains(DIFFERENT_EFFECT),
+                "the LuaJIT chunk compares the identical memoized callable (one `same` "
+                    + "effect, no `different` effect) and its surface entries are the "
+                    + "memoized carriers; exit=" + luaRun.exitCode() + " stdout="
+                    + luaRun.stdout().replace("\n", "\\n") + " stderr="
+                    + luaRun.stderr().replace("\n", "\\n"));
+
+            // The JVM production artifact: the artifact's own comparison
+            // slots hold the identity outcomes.
+            Path jvmOut = fixture.root().resolve("comparison-jvm");
+            PublicationStager jvmStager = PublicationStager.forRoot(jvmOut);
+            ProductionProjectEmission.Result jvmResult;
+            try {
+                jvmResult = emit(fixture, Backend.JVM, jvmStager, false);
+                jvmStager.publish();
+            } finally {
+                jvmStager.discard();
+            }
+            check(jvmResult.emitted(), "the comparison JVM production arm emits: "
+                + jvmResult.diagnostics());
+            if (!jvmResult.emitted()) {
+                return;
+            }
+            Path jvmSource = jvmOut.resolve(jvmResult.artifactRelativePath());
+            String jvmText = Files.readString(jvmSource);
+            for (SemanticOp read : comparedReads) {
+                check(!jvmText.contains("v" + ((ValueId) read.result()).id()
+                        + " = new JvmRuntime.Intrinsic();"),
+                    "the JVM artifact carries no placeholder read");
+            }
+            String driver = "StdlibComparisonProductionProbe";
+            Files.writeString(jvmOut.resolve(driver + ".java"),
+                comparisonProbeSource(JvmBackend.classNameFor(APP.path()),
+                    (ValueId) sameComparison.result(),
+                    (ValueId) differentComparison.result()),
+                StandardCharsets.UTF_8);
+            Path classes = jvmOut.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            ProcessOutcome javacRun = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                jvmSource.toAbsolutePath().toString(),
+                jvmOut.resolve(driver + ".java").toAbsolutePath().toString()),
+                fixture.root());
+            checkEq(0, javacRun.exitCode(),
+                "the comparison JVM artifact compiles with javac --release 25 -proc:none: "
+                    + javacRun.output());
+            if (javacRun.exitCode() == 0) {
+                ProcessOutcome javaRun = runProcess(List.of("java", "-cp",
+                    classpath + File.pathSeparator + classes, driver), fixture.root());
+                check(javaRun.exitCode() == 0 && javaRun.stdout().contains("PROBE-OK")
+                        && countOccurrences(javaRun.stdout(), SAME_EFFECT) == 1
+                        && !javaRun.stdout().contains(DIFFERENT_EFFECT),
+                    "the JVM artifact's comparison slots hold the memoized identity "
+                        + "outcomes (true/false) and its effect write is `same` only; "
+                        + "exit=" + javaRun.exitCode() + " stdout="
+                        + javaRun.stdout().replace("\n", "\\n") + " stderr="
+                        + javaRun.stderr().replace("\n", "\\n"));
+            }
+        } finally {
+            deleteRecursively(workspace);
+            deleteRecursively(fixture.root());
+        }
+    }
+
+    /** The reads of one module/export at one source line. */
+    private static List<SemanticOp> readsAt(List<SemanticOp> reads, ModuleId module,
+                                            String name, int line) {
+        List<SemanticOp> matched = new ArrayList<>();
+        for (SemanticOp read : reads) {
+            KindPayload.ExportReadPayload payload = readPayload(read);
+            if (payload.module().equals(module) && payload.name().equals(name)
+                    && read.origin().span() != null
+                    && read.origin().span().startLine() == line) {
+                matched.add(read);
+            }
+        }
+        return matched;
+    }
+
+    /** The comparison LuaJIT probe: the surface entries are the memoized carriers. */
+    private static String comparisonLuaProbe(Path artifact) {
+        StringBuilder lua = new StringBuilder();
+        lua.append("local function __fail(message)\n");
+        lua.append("  print(\"PROBE-FAIL: \"..message)\n");
+        lua.append("  os.exit(1)\n");
+        lua.append("end\n");
+        lua.append("local __surface = dofile(")
+            .append(luaString(artifact.toAbsolutePath().toString())).append(")\n");
+        lua.append("if type(__surface) ~= \"table\" then __fail(\"the production chunk "
+            + "returned \"..type(__surface)) end\n");
+        lua.append("local __log = __exportSurfaces[\"std.console\"][\"log\"]\n");
+        lua.append("local __err = __exportSurfaces[\"std.console\"][\"error\"]\n");
+        lua.append("if __log == nil or __err == nil then __fail(\"no catalog surface "
+            + "entries\") end\n");
+        lua.append("if __stdlibEntries[\"std.console\"..string.char(1)..\"log\"] ~= "
+            + "__log then __fail(\"the log surface entry is not the memoized "
+            + "callable\") end\n");
+        lua.append("if __stdlibEntries[\"std.console\"..string.char(1)..\"error\"] ~= "
+            + "__err then __fail(\"the error surface entry is not the memoized "
+            + "callable\") end\n");
+        lua.append("if __log == __err then __fail(\"one callable for two rows\") end\n");
+        lua.append("print(\"PROBE-OK\")\n");
+        return lua.toString();
+    }
+
+    /** The comparison JVM probe: the artifact's own comparison outcomes. */
+    private static String comparisonProbeSource(String className, ValueId sameResult,
+                                                ValueId differentResult) {
+        StringBuilder source = new StringBuilder();
+        source.append("public class StdlibComparisonProductionProbe {\n");
+        source.append("  static int failures = 0;\n");
+        source.append("  static void check(boolean condition, String what) {\n");
+        source.append("    if (!condition) { failures++; "
+            + "System.out.println(\"PROBE-FAIL: \" + what); }\n");
+        source.append("  }\n");
+        source.append("  public static void main(String[] args) {\n");
+        source.append("    ").append(className).append(".main(new String[0]);\n");
+        source.append("    check(Boolean.TRUE.equals(").append(className).append(".v")
+            .append(sameResult.id()).append("), \"console.log === console.log is true "
+            + "in the artifact; got \" + ").append(className).append(".v")
+            .append(sameResult.id()).append(");\n");
+        source.append("    check(Boolean.FALSE.equals(").append(className).append(".v")
+            .append(differentResult.id()).append("), \"console.log === console.error "
+            + "is false in the artifact; got \" + ").append(className).append(".v")
+            .append(differentResult.id()).append(");\n");
+        source.append("    if (failures > 0) { System.out.println(\"PROBE-FAIL: \" + "
+            + "failures + \" checks failed\"); System.exit(1); }\n");
+        source.append("    System.out.println(\"PROBE-OK\");\n");
+        source.append("  }\n}\n");
+        return source.toString();
+    }
+
+    // =========================================================================
     // 3. The three-consumer matrix over the probe project
     // =========================================================================
 
@@ -1421,6 +1767,7 @@ public class StdlibExportReadRealizationTest {
         testEmittedReadOperation();
         testOracleReadRealization();
         testCombinedComposition();
+        testStdlibCallableComparison();
         testThreeConsumerProjectMatrix();
         testProductionArtifacts();
         System.out.println();

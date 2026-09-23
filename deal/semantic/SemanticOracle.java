@@ -1616,6 +1616,14 @@ public final class SemanticOracle {
                 case Value.FuncValue func -> new ComparisonOperandView.Ref(refIdentity(func));
                 case Value.IntrinsicValue intrinsic ->
                     new ComparisonOperandView.Ref(refIdentity(intrinsic));
+                case Value.StdlibCallableValue callable ->
+                    // The in-target cataloged callable (M4): a heap value whose
+                    // identity is its memoized allocation, exactly like the
+                    // intrinsic and closure carriers — two reads of one catalog
+                    // row compare equal, two distinct rows compare unequal, and
+                    // both production artifacts compare the identical memoized
+                    // object (REFERENCE_EQ -> `l == r`).
+                    new ComparisonOperandView.Ref(refIdentity(callable));
                 default -> throw new IllegalStateException(
                     "value " + value.getClass().getSimpleName()
                         + " is not a comparison operand view");
