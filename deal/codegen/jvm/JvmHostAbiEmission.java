@@ -589,7 +589,7 @@ final class JvmHostAbiEmission {
 
     // =========================================================================
     // Emission: the artifact's host ABI class members
-    // =========================================================================================================================================
+    // =========================================================================
 
     /**
      * Emits the host ABI class members of the production artifact: the
@@ -1010,7 +1010,11 @@ final class JvmHostAbiEmission {
      * {@link JvmRuntime.Array}), and the normal-return copy-back of a
      * declared array parameter's host element writes. The declared
      * descriptor already fixed the carrier class, so every projection is
-     * a per-crossing materialization, never a runtime path selection.
+     * a per-crossing materialization, never a runtime path selection. A
+     * nullable declared position's descriptor text carries the {@code ?}
+     * prefix while the declared element-shape carrier keys are the
+     * un-prefixed array descriptors, so the array dispatch and the
+     * copy-back match the stripped descriptor text.
      */
     private void emitCrossings(StringBuilder out) {
         out.append("  // ---- The host-boundary crossing projections (ISSUE-0651; H7) ----\n");
@@ -1018,7 +1022,7 @@ final class JvmHostAbiEmission {
         out.append("    if (v == null) return null;\n");
         out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
         out.append("    if (inner.startsWith(\"(\") || inner.startsWith(\"async(\")) return __hostFnCarrier(inner, v);\n");
-        out.append("    if (inner.startsWith(\"[\")) return __hostArrayFromDeal(d, v);\n");
+        out.append("    if (inner.startsWith(\"[\")) return __hostArrayFromDeal(inner, v);\n");
         out.append("    if (inner.equals(\"int\")) return java.lang.Integer.valueOf(((java.lang.Number) v).intValue());\n");
         out.append("    if (inner.equals(\"number\")) return java.lang.Double.valueOf(((java.lang.Number) v).doubleValue());\n");
         out.append("    return v;\n");
@@ -1027,7 +1031,7 @@ final class JvmHostAbiEmission {
         out.append("    if (v == null) return null;\n");
         out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
         out.append("    if (inner.startsWith(\"(\") || inner.startsWith(\"async(\")) return __hostFnToDeal(inner, v);\n");
-        out.append("    if (inner.startsWith(\"[\")) return __hostArrayToDeal(d, v);\n");
+        out.append("    if (inner.startsWith(\"[\")) return __hostArrayToDeal(inner, v);\n");
         out.append("    return v;\n");
         out.append("  }\n\n");
         emitFunctionCrossings(out);
@@ -1125,7 +1129,9 @@ final class JvmHostAbiEmission {
      * slots (after the declared element cell admitted them), host-to-DEAL
      * materializes the production array from the carrier, and a
      * normal-return copy-back mirrors the host's element writes into the
-     * production array (a failed call copies nothing back).
+     * production array (a failed call copies nothing back). Every matcher
+     * keys on the un-prefixed array descriptor, so a nullable declared
+     * array position ({@code ?[T]}) crosses like its {@code [T]} form.
      */
     private void emitArrayCrossings(StringBuilder out) {
         // DEAL -> host: the declared carrier materialized per crossing.
@@ -1174,11 +1180,12 @@ final class JvmHostAbiEmission {
             + "java.lang.Object v, JvmRuntime.Array t) {\n");
         out.append("    if (v == null || t == null) return;\n");
         out.append("    if (v instanceof JvmRuntime.Array) return;\n");
+        out.append("    java.lang.String __key = d.startsWith(\"?\") ? d.substring(1) : d;\n");
         for (Map.Entry<String, Type> entry : arrayElements.entrySet()) {
             String desc = entry.getKey();
             Type element = entry.getValue();
             String carrier = arrayCarrier(element);
-            out.append("    if (d.equals(").append(javaString(desc))
+            out.append("    if (__key.equals(").append(javaString(desc))
                 .append(") && v instanceof $DealRt.").append(carrier).append(" __c) {\n");
             out.append("      for (int __i = 0; __i < __c.data.length && __i < t.length; __i++) {\n");
             out.append("        while (t.elements.size() <= __i) t.elements.add(null);\n");

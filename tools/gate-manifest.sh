@@ -686,7 +686,8 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # per-export wrapper with the import's origin triple), the H7 crossing
   # projection (the $DealRt function bridges, the declared element-shape
   # array carriers with the normal-return copy-back, the declared-return
-  # materialization), the bridge's carrier resolution (the D15 protocol
+  # materialization, the nullable-declared ?[T] array positions crossing
+  # like their [T] form), the bridge's carrier resolution (the D15 protocol
   # for a production JvmRuntime.AdapterValue and the carried function id
   # pushed around a plain carrier invocation), the admitted sync host
   # fixture set executed end-to-end under luajit and javac --release 25

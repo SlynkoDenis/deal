@@ -90,7 +90,8 @@ import java.util.Set;
  *       production value carriers and the {@code $DealRt} carrier set
  *       (the {@code FnValue} bridges, the declared element-shape array
  *       carriers with the normal-return copy-back, the declared return
- *       projection).</li>
+ *       projection); the declared array positions include the nullable
+ *       {@code ?[T]} form.</li>
  *   <li><b>Pinned corpus outcomes.</b> The admitted sync host fixture set
  *       compiles through the production emission and executes under
  *       {@code luajit} and {@code java} with the sidecar-pinned outcome
@@ -713,11 +714,16 @@ public class HostCallRealizationTest {
      * carrier's observed class and mutates a declared array parameter, so
      * the probe can assert the production carrier reached the host method
      * and the host's element writes were copied back into the production
-     * array after the normal return.
+     * array after the normal return. The declared positions include a
+     * nullable-array parameter and return ({@code int[] | null}), whose
+     * declared descriptor text carries the {@code ?} prefix, so the
+     * crossing is exercised over that form too.
      */
     private static final String CROSSING_DECLARATION = """
         export function apply(f: (x: int) => int, v: int): int;
         export function bump(parts: int[]): int;
+        export function bumpMaybe(parts: int[] | null): int[] | null;
+        export function sumMaybe(parts: int[] | null): int;
         """;
 
     private static final String CROSSING_SOURCE = """
@@ -743,6 +749,26 @@ public class HostCallRealizationTest {
           return applied;
         }
 
+        export function test_nullable_array_crossing(): int {
+          let parts: int[] = [4, 5];
+          let returned: int[] | null = host.bumpMaybe(parts);
+          if (returned === null) {
+            throw { code: "TEST_FAIL", message: "nullable array return" };
+          }
+          let total: int = host.sumMaybe(returned);
+          if (total !== 15) {
+            throw { code: "TEST_FAIL", message: "nullable array return values" };
+          }
+          if (parts[0] !== 14 || parts[1] !== 15) {
+            throw { code: "TEST_FAIL", message: "nullable array copy-back" };
+          }
+          let nothing: int[] | null = host.bumpMaybe(null);
+          if (nothing !== null) {
+            throw { code: "TEST_FAIL", message: "nullable array null roundtrip" };
+          }
+          return total;
+        }
+
         export function main(): null {
           return null;
         }
@@ -766,6 +792,28 @@ public class HostCallRealizationTest {
               parts.data[i] = parts.data[i] + i;
             }
             return Integer.valueOf(total + 3);
+          }
+
+          public static Object bumpMaybe($DealRt.__IntArray parts) {
+            if (parts == null) {
+              OBSERVED.add("maybearray:null");
+              return null;
+            }
+            OBSERVED.add("maybearray:" + parts.getClass().getName());
+            for (int i = 0; i < parts.data.length; i++) {
+              parts.data[i] = parts.data[i] + 10;
+            }
+            return new $DealRt.__IntArray(new int[] { 7, 8 });
+          }
+
+          public static Object sumMaybe($DealRt.__IntArray parts) {
+            if (parts == null) {
+              OBSERVED.add("maybearray:sum:null");
+              return Integer.valueOf(-1);
+            }
+            OBSERVED.add("maybearray:sum:" + parts.data.length + ":"
+                + parts.data[0] + "," + parts.data[1]);
+            return Integer.valueOf(parts.data[0] + parts.data[1]);
           }
         }
         """;
@@ -819,6 +867,20 @@ public class HostCallRealizationTest {
             check(outcome.value().contains("BRIDGE:array:$DealRt$__IntArray"),
                 "the declared array carrier was materialized from the production "
                     + "array: " + escaped(outcome.value()));
+            check(outcome.value().contains("BRIDGE:maybearray:$DealRt$__IntArray"),
+                "the declared nullable array carrier was materialized from the "
+                    + "production array: " + escaped(outcome.value()));
+            check(outcome.value().contains("BRIDGE:maybearray:sum:2:7,8"),
+                "the nullable declared return was projected into the production "
+                    + "array and re-crossed with its elements: "
+                    + escaped(outcome.value()));
+            check(outcome.value().contains("BRIDGE:maybearray:null"),
+                "a declared null crossed into the nullable array position as Java "
+                    + "null: " + escaped(outcome.value()));
+            check(emission.source().contains("__hostArrayFromDeal(inner, v)")
+                    && emission.source().contains("__hostArrayToDeal(inner, v)"),
+                "the emitted array crossing dispatches the stripped descriptor "
+                    + "(the declared ?[T] form)");
         } finally {
             deleteRecursively(workspace);
             deleteRecursively(compiled.root());
