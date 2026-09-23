@@ -52,6 +52,37 @@ public final class JvmRuntime {
         }
     };
 
+    /**
+     * The program-scoped export-surface registry (M2): one {@link Table}
+     * per module of the program, keyed by the module identity (the dotted
+     * module path). The registry is hosted with the runtime's existing
+     * program state ({@link #TASKS}, {@link #MODULE_STATES}), so every
+     * generated class of one program resolves the same per-module
+     * surfaces — a per-unit class resolves the surface its owner class
+     * published in the same program, exactly like the LuaJIT chunk-global
+     * registry. Written only by the owner's {@code EXPORT_PUBLISH} (and
+     * the session's per-module get-or-create); a read never writes it.
+     */
+    public static final LinkedHashMap<String, Table> EXPORT_SURFACES =
+        new LinkedHashMap<>();
+
+    /**
+     * The idempotent per-module surface accessor of the program-scoped
+     * registry: the existing surface of the module, or a freshly created
+     * empty one (a repeated drive never wipes a published surface).
+     *
+     * @param module the module path (the registry key); non-null
+     * @return the program's surface of the module; never null
+     */
+    public static Table exportSurface(String module) {
+        Table surface = EXPORT_SURFACES.get(module);
+        if (surface == null) {
+            surface = new Table();
+            EXPORT_SURFACES.put(module, surface);
+        }
+        return surface;
+    }
+
     /** A string-keyed table with explicit key presence. */
     public static final class Table {
         public final LinkedHashMap<String, Object> entries = new LinkedHashMap<>();

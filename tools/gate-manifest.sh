@@ -518,4 +518,38 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # result failing the closed gate with R-FUNCTION-BINDING; the
   # unmodified units admitted on the typed and the text surface).
   'fg|=== Running Import-Member Read Arm Tests (ISSUE-0659) ===|java -ea -cp build deal.test.ImportMemberReadArmTest'
+  # ISSUE-0646 registration: the compiled export read realization across
+  # the three consumers plus the oracle's per-run published-surface
+  # registry (module-export-reads-and-in-project-class-construction M2,
+  # M3, M6, the read execution contract, and the export-read contract;
+  # semantic-ir-construct-coverage-cutover K2;
+  # luajit-jvm-single-lowering-production-cutover C1/C2): the probe
+  # project whose entry reads a compiled companion's declared function
+  # export twice into function-typed bindings (no cross-module
+  # invocation) lowers through the one project entry and validates; the
+  # LuaJIT publication's __val field and the nil-safe program-scoped
+  # accessor read, the uniform JVM surface read over the class-level view
+  # of the runtime-hosted registry, the mode-shared read operation in
+  # both project sessions with byte-identical repeats; the oracle's
+  # per-run published-surface registry (the read's trace SUCCESS atom is
+  # the publication's own creation atom, both reads publish the identical
+  # value, the export:<module>.<name> placeholder is gone, the value-keyed
+  # binding map stays the producing allocation's — the owner-side
+  # LoweredBody registration and the read's own allocation-identity
+  # registration — and a doctored re-keying fails the closed gate); the
+  # absent-slot projection of the landed partial drive (Value.MissingValue
+  # / __MISSING / JvmRuntime.MISSING, atomizing as missing) in the oracle
+  # and both per-unit artifacts; the three-consumer project trace matrix
+  # under the real toolchains; the two-chunk/two-class per-unit
+  # program-scoped registry drive (the identical published object for two
+  # reads, and the JVM class-level field view being the runtime-hosted
+  # registry instance); the production artifacts (the real luajit run and
+  # the javac --release 25 -proc:none + java run with the read value being
+  # the published JvmRuntime.FunctionValue carrier and the .f/.fn
+  # retained-caller projections still calling the module function); and
+  # the project-session ownership guard (a foreign owner fails both
+  # project sessions closed, the per-unit sessions never do, and an
+  # emitter failure maps to E6005 SHARED_EMITTER_COVERAGE with nothing
+  # staged and the previous artifact set byte-identical).
+  'fg|=== Running Compiled Export Read Realization Tests (ISSUE-0646) ===|java -ea -cp build deal.test.CompiledExportReadRealizationTest'
 )

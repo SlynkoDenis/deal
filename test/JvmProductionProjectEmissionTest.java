@@ -393,11 +393,14 @@ public class JvmProductionProjectEmissionTest {
             // The module export-surface registry (T1): one surface per
             // closure module keyed by the dotted module path, created before
             // the walks, and one EXPORT_PUBLISH write per declared export in
-            // declaration order.
+            // declaration order. The registry is hosted by the runtime
+            // (M2: the program-scoped registry) and the class-level field is
+            // the compatible per-class view of it.
             check(source.contains("static final java.util.LinkedHashMap<String, "
-                    + "JvmRuntime.Table> EXPORT_SURFACES = new "
-                    + "java.util.LinkedHashMap<>();"),
-                "the class carries the module export-surface registry");
+                    + "JvmRuntime.Table> EXPORT_SURFACES = "
+                    + "JvmRuntime.EXPORT_SURFACES;"),
+                "the class carries the class-level view of the runtime-hosted "
+                    + "program-scoped export-surface registry");
             checkEq(List.of("    exportSurface(\"lib\");", "    exportSurface(\"app\");"),
                 jvmSurfaceCreations(source),
                 "one surface is created per closure module keyed by the module identity, "

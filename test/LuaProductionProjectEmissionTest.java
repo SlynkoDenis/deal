@@ -424,7 +424,8 @@ public class LuaProductionProjectEmissionTest {
                 for (ExportEntry entry : exportsOf(project.modules().get(moduleId))) {
                     expectedWrites.add("__exportSurfaces[\"" + moduleId.path() + "\"][\""
                         + entry.name() + "\"] = {__kind = \"function\", sig = \""
-                        + entry.spec() + "\", f = __unfn(S.v" + entry.valueId() + ")}");
+                        + entry.spec() + "\", f = __unfn(S.v" + entry.valueId()
+                        + "), __val = S.v" + entry.valueId() + "}");
                 }
             }
             checkEq(4, expectedWrites.size(),

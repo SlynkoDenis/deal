@@ -244,8 +244,9 @@ public class ModuleExportSurfaceTest {
             check(registryAt >= 0 && walksAt > registryAt,
                 "the registry and every surface are created before the module walks");
 
-            // The publication writes: the landed entry shape, addressed to
-            // the emitting module's surface, in declaration order.
+            // The publication writes: the landed entry shape with the
+            // compiler-owned __val field, addressed to the emitting
+            // module's surface, in declaration order.
             List<String> expectedWrites = new ArrayList<>();
             List<String> expectedOrder = new ArrayList<>();
             for (ModuleId moduleId : project.modules().keySet()) {
@@ -254,7 +255,8 @@ public class ModuleExportSurfaceTest {
                     expectedOrder.add(moduleId.path() + "#" + entry.name());
                     expectedWrites.add("__exportSurfaces[\"" + moduleId.path() + "\"][\""
                         + entry.name() + "\"] = {__kind = \"function\", sig = \""
-                        + entry.spec() + "\", f = __unfn(S.v" + entry.valueId() + ")}");
+                        + entry.spec() + "\", f = __unfn(S.v" + entry.valueId()
+                        + "), __val = S.v" + entry.valueId() + "}");
                 }
             }
             checkEq(List.of("lib#add", "lib#twice", "app#main", "app#label"),
@@ -484,14 +486,14 @@ public class ModuleExportSurfaceTest {
             String source = emission.source();
 
             check(source.contains("static final java.util.LinkedHashMap<String, "
-                    + "JvmRuntime.Table> EXPORT_SURFACES = new "
-                    + "java.util.LinkedHashMap<>();"),
-                "the emitted class carries the module surface registry");
+                    + "JvmRuntime.Table> EXPORT_SURFACES = "
+                    + "JvmRuntime.EXPORT_SURFACES;"),
+                "the emitted class carries the class-level view of the "
+                    + "runtime-hosted program-scoped surface registry");
             check(source.contains("static JvmRuntime.Table exportSurface(String module) {")
-                    && source.contains("JvmRuntime.Table surface = "
-                        + "EXPORT_SURFACES.get(module);")
-                    && source.contains("EXPORT_SURFACES.put(module, surface);"),
-                "the registry's surface lookup is the idempotent get-or-create");
+                    && source.contains("return JvmRuntime.exportSurface(module);"),
+                "the class's idempotent surface accessor is the per-class view of the "
+                    + "runtime-hosted registry");
 
             checkEq(List.of("    exportSurface(\"lib\");", "    exportSurface(\"app\");"),
                 jvmSurfaceCreations(source),

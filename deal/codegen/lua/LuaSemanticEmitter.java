@@ -243,6 +243,25 @@ public final class LuaSemanticEmitter {
         /** Production mode: no trace protocol, DEAL_ERROR_CODE terminal. */
         final boolean trace;
         /**
+         * Whether the session carries a whole validated closure (the
+         * project entries) or one module (the per-unit entries). The
+         * read's emit-time ownership guard applies to a project session
+         * only: a COMPILED read whose owner module is not among the
+         * session's units is a producer defect there (the one lowering
+         * resolves every COMPILED import to a closure module), while a
+         * per-unit session resolves the owner's published surface of the
+         * same program at execution and never fails closed for a foreign
+         * owner.
+         */
+        final boolean projectSession;
+        /**
+         * Each resolved import's closed kind, collected from the
+         * session's own {@code MODULE_IMPORT} payloads (M6): the read's
+         * module kind comes from the session's import facts, never a
+         * path guess.
+         */
+        final Map<ModuleId, ModuleImportKind> importKinds = new LinkedHashMap<>();
+        /**
          * The compile's host declaration surface (the declared-map source
          * of the {@code MODULE_IMPORT(HOST)} load): non-null in the
          * production project session, null in the trace/unit sessions.
@@ -273,6 +292,7 @@ public final class LuaSemanticEmitter {
             this.unit = unit;
             this.table = table;
             this.trace = trace;
+            this.projectSession = false;
             this.hostSurface = null;
             this.entryModule = entryModule;
             registerUnit(unit, table, new ClassFactoryRegistry(Map.of()));
@@ -317,6 +337,7 @@ public final class LuaSemanticEmitter {
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
                 HostDeclarationSurface hostSurface) {
             this.hostSurface = hostSurface;
+            this.projectSession = true;
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -363,6 +384,11 @@ public final class LuaSemanticEmitter {
             for (SemanticOp op : moduleUnit.ops()) {
                 opsById.put(op.opId(), op);
                 opModule.put(op.opId(), moduleUnit.moduleId());
+                if (op.kind() == SemanticOpKind.MODULE_IMPORT) {
+                    KindPayload.ModuleImportPayload payload =
+                        (KindPayload.ModuleImportPayload) op.payload();
+                    importKinds.putIfAbsent(payload.resolvedModule(), payload.kind());
+                }
                 if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
                     KindPayload.BindingAllocPayload payload =
                         (KindPayload.BindingAllocPayload) op.payload();
@@ -3514,7 +3540,11 @@ public final class LuaSemanticEmitter {
          * {@code EXPORT_PUBLISH} — the checked {@code MODULE_EXPORT}
          * boundary (its owned child) then the export-table publication of
          * the callable function value (the wrapper's closure, unwrapped
-         * so a retained caller can invoke it directly).
+         * so a retained caller can invoke it directly) plus the
+         * compiler-owned {@code __val} field carrying the published value
+         * itself (M2: the compiled read's resolution source; the
+         * {@code f} projection stays the retained-caller ABI's raw
+         * callable).
          */
         private void emitExportPublish(SemanticOp op) {
             KindPayload.ExportPublishPayload payload =
@@ -3539,7 +3569,8 @@ public final class LuaSemanticEmitter {
                 .append("] = {__kind = \"function\", sig = ")
                 .append(luaString(payload.descriptor().canonicalSpecText()))
                 .append(", f = __unfn(").append(slot(payload.value()))
-                .append(")}\n");
+                .append("), __val = ").append(slot(payload.value()))
+                .append("}\n");
             emitPlainSuccess(op);
         }
 
@@ -4406,9 +4437,47 @@ public final class LuaSemanticEmitter {
             return null;
         }
 
+        /**
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M6): a
+         * COMPILED read resolves the owning module's published value
+         * through the chunk-global program-scoped export-surface registry
+         * (the entry's {@code __val} field, an absent surface or entry
+         * projecting the {@code __MISSING} sentinel); the STDLIB and HOST
+         * kinds keep their landed placeholder until their own leaves land
+         * (T4/T5). The emitted read expression is identical in trace and
+         * production mode. In a project session a COMPILED read whose
+         * owner module is not among the closure's units is a producer
+         * defect and fails the emission closed; a per-unit session never
+         * fails closed for a foreign owner (the owner's own chunk
+         * publishes the surface of the same program).
+         */
         private void emitExportRead(SemanticOp op) {
+            KindPayload.ExportReadPayload payload =
+                (KindPayload.ExportReadPayload) op.payload();
+            // The read's module kind is the session's own recorded import
+            // fact (M6). A module the session records no import fact for —
+            // the test-only class-core carrier sessions, whose units carry
+            // no module-level import op — keeps the landed interim
+            // realization (the STDLIB/HOST placeholder); the production
+            // and conformance sessions record every resolved import, so a
+            // COMPILED read is never guessed from a path.
+            ModuleImportKind kind = importKinds.get(payload.module());
+            if (kind == ModuleImportKind.COMPILED && projectSession
+                    && !units.containsKey(payload.module())) {
+                throw new IllegalStateException("the compiled EXPORT_READ of export '"
+                    + payload.name() + "' of module '" + payload.module().path()
+                    + "' resolves an owner module outside the project session's"
+                    + " closure (the one lowering resolves every COMPILED import to a"
+                    + " closure module — a producer defect)");
+            }
             emitStart(op);
-            out.append(slot((ValueId) op.result())).append(" = __intrinsicFn()\n");
+            if (kind == ModuleImportKind.COMPILED) {
+                out.append(slot((ValueId) op.result())).append(" = __exportValue(")
+                    .append(luaString(payload.module().path())).append(", ")
+                    .append(luaString(payload.name())).append(")\n");
+            } else {
+                out.append(slot((ValueId) op.result())).append(" = __intrinsicFn()\n");
+            }
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
         }
@@ -5229,6 +5298,23 @@ local function __allocId(v)
 end
 local function __intrinsicFn()
   return {__f = true}
+end
+-- The compiled export read (M2): the nil-safe accessor of the
+-- chunk-global program-scoped export-surface registry. A published
+-- entry exposes the compiler-owned __val field (the published value
+-- itself — the entry's f projection stays the retained-caller ABI's raw
+-- callable); an absent surface, an absent entry, or an entry without a
+-- published value projects the __MISSING sentinel, which atomizes as
+-- "missing" — exactly the oracle's Value.MissingValue and the JVM
+-- runtime's MISSING. The read allocates, wraps, and copies nothing.
+local function __exportValue(module, name)
+  local surface = __exportSurfaces[module]
+  if surface == nil then return __MISSING end
+  local entry = surface[name]
+  if entry == nil then return __MISSING end
+  local value = entry.__val
+  if value == nil then return __MISSING end
+  return value
 end
 -- The numeric value view of one operand: a JSON_PARSE carrier (the
 -- int/number-typed value the parsed graph carries) unwraps to its

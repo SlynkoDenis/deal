@@ -21,6 +21,7 @@ import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredFunction;
 import deal.semantic.ir.LoweredModuleUnit;
 import deal.semantic.ir.ModuleId;
+import deal.semantic.ir.ModuleImportKind;
 import deal.semantic.ir.OpId;
 import deal.semantic.ir.ParameterBoundaryMode;
 import deal.semantic.ir.RuntimeDescriptor;
@@ -233,6 +234,25 @@ public final class JvmSemanticEmitter {
         final java.util.Set<OpId> structuralOwned = new java.util.HashSet<>();
         /** Production mode: no trace protocol, DEAL_ERROR_CODE terminal. */
         final boolean trace;
+        /**
+         * Whether the session carries a whole validated closure (the
+         * project entries) or one module (the per-unit entries). The
+         * read's emit-time ownership guard applies to a project session
+         * only: a COMPILED read whose owner module is not among the
+         * session's units is a producer defect there (the one lowering
+         * resolves every COMPILED import to a closure module), while a
+         * per-unit session resolves the owner's published surface of the
+         * same program at execution and never fails closed for a foreign
+         * owner.
+         */
+        final boolean projectSession;
+        /**
+         * Each resolved import's closed kind, collected from the
+         * session's own {@code MODULE_IMPORT} payloads (M6): the read's
+         * module kind comes from the session's import facts, never a
+         * path guess.
+         */
+        final Map<ModuleId, ModuleImportKind> importKinds = new LinkedHashMap<>();
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
         final boolean entryModule;
         /** Ops the block walk skips (the entry delegation of a non-entry module). */
@@ -261,6 +281,7 @@ public final class JvmSemanticEmitter {
             this.unit = unit;
             this.table = table;
             this.trace = trace;
+            this.projectSession = false;
             this.entryModule = entryModule;
             // A single-unit session never carries the host ABI emission
             // surface: the surface is emitted once per production project
@@ -322,6 +343,7 @@ public final class JvmSemanticEmitter {
                     "the entry module is not in the executable closure");
             }
             this.trace = trace;
+            this.projectSession = true;
             this.entryModule = true;
             // A production project entry passes its class name verbatim
             // (the JvmBackend.classNameFor(entry path) derivation); the
@@ -366,6 +388,11 @@ public final class JvmSemanticEmitter {
             for (SemanticOp op : moduleUnit.ops()) {
                 opsById.put(op.opId(), op);
                 opModule.put(op.opId(), moduleUnit.moduleId());
+                if (op.kind() == SemanticOpKind.MODULE_IMPORT) {
+                    KindPayload.ModuleImportPayload payload =
+                        (KindPayload.ModuleImportPayload) op.payload();
+                    importKinds.putIfAbsent(payload.resolvedModule(), payload.kind());
+                }
                 if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
                     KindPayload.BindingAllocPayload payload =
                         (KindPayload.BindingAllocPayload) op.payload();
@@ -562,15 +589,15 @@ public final class JvmSemanticEmitter {
             // the closure, keyed by the module identity (the dotted module
             // path), created idempotently before the module walks so a
             // repeated dealMain() drive never wipes a published surface.
+            // The registry is hosted by the runtime (M2), so every
+            // generated class of one program resolves the same per-module
+            // surfaces; the class-level field and accessor are the
+            // compatible per-class view of that program-scoped registry
+            // (the compiled fixture runners reference the field).
             out.append("  static final java.util.LinkedHashMap<String, "
-                + "JvmRuntime.Table> EXPORT_SURFACES = new java.util.LinkedHashMap<>();\n");
+                + "JvmRuntime.Table> EXPORT_SURFACES = JvmRuntime.EXPORT_SURFACES;\n");
             out.append("\n  static JvmRuntime.Table exportSurface(String module) {\n");
-            out.append("    JvmRuntime.Table surface = EXPORT_SURFACES.get(module);\n");
-            out.append("    if (surface == null) {\n");
-            out.append("      surface = new JvmRuntime.Table();\n");
-            out.append("      EXPORT_SURFACES.put(module, surface);\n");
-            out.append("    }\n");
-            out.append("    return surface;\n");
+            out.append("    return JvmRuntime.exportSurface(module);\n");
             out.append("  }\n");
             // Slots and cells (every module; ids are globally unique).
             java.util.LinkedHashSet<String> fields = new java.util.LinkedHashSet<>();
@@ -4592,10 +4619,50 @@ public final class JvmSemanticEmitter {
             emitPlainSuccess(op, indent);
         }
 
+        /**
+         * {@code EXPORT_READ} — the per-kind read resolution (M2/M6): a
+         * COMPILED read is the uniform program-scoped surface lookup
+         * {@code exportSurface(module).read(name)}, whose landed
+         * {@code Table.read} projects {@code JvmRuntime.MISSING} for an
+         * absent key (the stored entry is the owner's published
+         * {@code JvmRuntime.FunctionValue} carrier — the identical object
+         * for every read of one export in one program); the STDLIB and
+         * HOST kinds keep their landed placeholder until their own leaves
+         * land (T4/T5). The emitted read expression is identical in trace
+         * and production mode. In a project session a COMPILED read whose
+         * owner module is not among the closure's units is a producer
+         * defect and fails the emission closed; a per-unit session never
+         * fails closed for a foreign owner (the owner's own class
+         * publishes the surface of the same program).
+         */
         private void emitExportRead(SemanticOp op, int indent) {
+            KindPayload.ExportReadPayload payload =
+                (KindPayload.ExportReadPayload) op.payload();
+            // The read's module kind is the session's own recorded import
+            // fact (M6). A module the session records no import fact for —
+            // the test-only class-core carrier sessions, whose units carry
+            // no module-level import op — keeps the landed interim
+            // realization (the STDLIB/HOST placeholder); the production
+            // and conformance sessions record every resolved import, so a
+            // COMPILED read is never guessed from a path.
+            ModuleImportKind kind = importKinds.get(payload.module());
+            if (kind == ModuleImportKind.COMPILED && projectSession
+                    && !units.containsKey(payload.module())) {
+                throw new IllegalStateException("the compiled EXPORT_READ of export '"
+                    + payload.name() + "' of module '" + payload.module().path()
+                    + "' resolves an owner module outside the project session's"
+                    + " closure (the one lowering resolves every COMPILED import to a"
+                    + " closure module — a producer defect)");
+            }
             emitStart(op, indent);
-            out.append(indent(indent)).append(slot((ValueId) op.result()))
-                .append(" = new JvmRuntime.Intrinsic();\n");
+            out.append(indent(indent)).append(slot((ValueId) op.result()));
+            if (kind == ModuleImportKind.COMPILED) {
+                out.append(" = exportSurface(")
+                    .append(javaString(payload.module().path())).append(").read(")
+                    .append(javaString(payload.name())).append(");\n");
+            } else {
+                out.append(" = new JvmRuntime.Intrinsic();\n");
+            }
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType(), indent);
         }

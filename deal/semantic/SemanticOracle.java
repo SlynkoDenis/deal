@@ -42,6 +42,7 @@ import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredFunction;
 import deal.semantic.ir.LoweredModuleUnit;
 import deal.semantic.ir.ModuleId;
+import deal.semantic.ir.ModuleImportKind;
 import deal.semantic.ir.NormalizedSlot;
 import deal.semantic.ir.OpId;
 import deal.semantic.ir.RuntimeDescriptor;
@@ -736,6 +737,17 @@ public final class SemanticOracle {
         /** The heap function value → resolved execution binding index. */
         final IdentityHashMap<Value, FunctionExecutionBinding> bindingsByValue =
             new IdentityHashMap<>();
+        /**
+         * The per-run published export surfaces (M3): one recorded
+         * published value per {@code (module, name)} of the run, written
+         * exactly once by the owning module's {@code EXPORT_PUBLISH} — the
+         * oracle's mirror of the artifacts' program-scoped export-surface
+         * registry. An absent surface or entry is the absent-slot
+         * projection ({@link Value.MissingValue}); the registry is never
+         * written by a read.
+         */
+        final Map<ModuleId, Map<String, Value>> exportSurfaces =
+            new LinkedHashMap<>();
         /**
          * The payload-owned children: ops referenced by an owner payload's
          * child/boundary id lists (chain children, boundary children of
@@ -4199,8 +4211,11 @@ public final class SemanticOracle {
         /**
          * EXPORT_PUBLISH — the atomic publication record: the
          * MODULE_EXPORT boundary (descriptor-kind) checks the published
-         * value, then the publication is the unit-level export fact
-         * (inert at execution — the exports are recorded statically).
+         * value, then the value is recorded in the per-run export-surface
+         * registry (M3: the oracle's mirror of the artifacts'
+         * program-scoped registry). A second publication of one name in
+         * one run is a producer defect — the registry holds exactly one
+         * value per {@code (module, name)} and is never rewritten.
          */
         private String executeExportPublish(SemanticOp op) {
             KindPayload.ExportPublishPayload payload =
@@ -4214,6 +4229,15 @@ public final class SemanticOracle {
                     runBoundaryChild(candidate, value, BoundaryContext.none());
                 }
             }
+            Map<String, Value> surface = exportSurfaces.computeIfAbsent(
+                payload.module(), ignored -> new LinkedHashMap<>());
+            if (surface.containsKey(payload.name())) {
+                throw new IllegalStateException("the export '" + payload.module().path()
+                    + "#" + payload.name() + "' is published twice in one run (the"
+                    + " per-run export surface records exactly one published value per"
+                    + " export — a producer defect)");
+            }
+            surface.put(payload.name(), value);
             return null;
         }
 
@@ -4994,30 +5018,72 @@ public final class SemanticOracle {
         }
 
         /**
+         * EXPORT_READ — the per-kind read resolution (M3): a COMPILED
+         * read publishes the value the owning module's {@code
+         * EXPORT_PUBLISH} recorded into the per-run export-surface
+         * registry, and an absent surface or entry publishes {@link
+         * Value.MissingValue} (the landed partial-drive parity state, a
+         * state a full execution never reaches because a dependency's
+         * publication runs before any dependent's read). The STDLIB and
+         * HOST kinds keep their landed placeholder until their own leaves
+         * land (T4/T5), and so does a read whose unit records no import
+         * fact for its module — the test-only class-core carrier
+         * sessions, whose units carry no module-level import op; every
+         * production and conformance session records the resolved import
+         * facts, so a COMPILED read is never guessed from a path.
+         *
+         * <p>The read does not write the value-keyed binding map
+         * (K11/M3): the published value already carries the owner's
+         * registration, so re-keying it would replace the owner-side
+         * {@code LoweredBody} resolution; the read's own registration
+         * stays addressable by the read result's allocation identity
+         * ({@link #bindingOf}).</p>
+         */
+        private String executeExportRead(SemanticOp op) {
+            KindPayload.ExportReadPayload payload =
+                (KindPayload.ExportReadPayload) op.payload();
+            Value value;
+            if (importKindOf(stateOf(op.opId()), payload.module())
+                    == ModuleImportKind.COMPILED) {
+                Map<String, Value> surface = exportSurfaces.get(payload.module());
+                Value published = surface == null ? null : surface.get(payload.name());
+                value = published == null ? Value.MissingValue.INSTANCE : published;
+            } else {
+                value = new Value.IntrinsicValue("export:"
+                    + payload.module().path() + "." + payload.name());
+            }
+            return publish(op, value);
+        }
+
+        /**
+         * The closed import kind of one read's module, resolved from the
+         * reading unit's own {@code MODULE_IMPORT} record (the session's
+         * own import facts — never a path guess, never another module's
+         * record), or {@code null} when the unit records no import fact
+         * for the module (the class-core carrier sessions), which keeps
+         * the landed placeholder realization.
+         */
+        private ModuleImportKind importKindOf(UnitState unit, ModuleId module) {
+            for (SemanticOp candidate : unit.unit.ops()) {
+                if (candidate.kind() != SemanticOpKind.MODULE_IMPORT) {
+                    continue;
+                }
+                KindPayload.ModuleImportPayload payload =
+                    (KindPayload.ModuleImportPayload) candidate.payload();
+                if (payload.resolvedModule().equals(module)) {
+                    return payload.kind();
+                }
+            }
+            return null;
+        }
+
+        /**
          * MODULE_IMPORT — the load-once initialization record. The tail's
          * stdlib slice imports {@code std/console} only: the stdlib
          * console algorithm executes inside {@code STDLIB_CALL}
          * ({@code CONSOLE_LOG}/{@code CONSOLE_ERROR}), so the import
          * record initializes no run state beyond the op terminal.
          */
-        /**
-         * EXPORT_READ — the checked export read of the std/console
-         * module's log/error function values: the published export value
-         * is an allocated function identity (the static
-         * {@code STDLIB_CALL} consumes the closed function id).
-         */
-        private String executeExportRead(SemanticOp op) {
-            KindPayload.ExportReadPayload payload =
-                (KindPayload.ExportReadPayload) op.payload();
-            Value value = new Value.IntrinsicValue("export:" + payload.module().path()
-                + "." + payload.name());
-            FunctionExecutionBinding binding = bindingOf((ValueId) op.result());
-            if (binding != null) {
-                bindingsByValue.put(value, binding);
-            }
-            return publish(op, value);
-        }
-
         private String executeModuleImport(SemanticOp op) {
             KindPayload.ModuleImportPayload payload =
                 (KindPayload.ModuleImportPayload) op.payload();
