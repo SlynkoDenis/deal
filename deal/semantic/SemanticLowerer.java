@@ -1866,9 +1866,15 @@ public final class SemanticLowerer {
      * facts (the {@code ExternalExecutionOwner} resolution),
      * the callee modules' recorded {@code EXTERNAL_ENTRY} op ids (the
      * caller-side {@code externalEntryRef} resolution), and the exported
-     * function names the scenario invokes as callbacks. Runtime
-     * selection of binding kind, boundary family, return-boundary owner,
-     * or async source is ISSUE-0531's and fails closed here.</p>
+     * function names the scenario invokes as callbacks. A callee value
+     * with no statically resolvable execution binding lowers the landed
+     * dynamic shape ({@code CALL(INDIRECT)}/{@code ASYNC_START} with
+     * {@code CallCallee.Dynamic} and its recorded return cells —
+     * ISSUE-0657 and the dynamic call/async-start shape contracts): the
+     * runtime resolves the carrier's own class and the effective async
+     * source, while every unresolved or inconsistent callee fact fails
+     * closed here. Adapter-thunk and adapter-of-adapter source selection
+     * stays fail-closed (ISSUE-0531's).</p>
      */
     public static FullProgramE7Result lowerModuleFullProgramE7(CheckedModuleInput module,
             SemanticProfile profile,
@@ -2040,6 +2046,19 @@ public final class SemanticLowerer {
      * in-project class literal lowers {@code CLASS_NEW(SHARED_FACTORY)}
      * with the owner's factory reference and zero
      * {@code RETAINED_ABI_DEFERRED}.</p>
+     *
+     * <p><b>The dynamic call arms (ISSUE-0657).</b> A checked call or
+     * {@code await} whose callee value has no statically resolvable
+     * execution binding lowers the landed dynamic shape through the same
+     * walk: {@code CALL(INDIRECT)} with {@code CallCallee.Dynamic} and the
+     * three recorded {@code DynamicReturnBoundary} cells (the DEAL-body
+     * cell parented to the call-owned {@code RETURN} that names the call —
+     * K12's form (b)), or {@code ASYNC_START} with
+     * {@code CallCallee.Dynamic} and the recorded DEAL-body task cell,
+     * consumed by the single {@code AWAIT}. No operation kind, payload
+     * record, boundary kind, policy, or route is added, and every
+     * unresolved or inconsistent callee fact stays a fail-closed producer
+     * defect.</p>
      *
      * <p><b>Session seeds.</b> Each session receives the class
      * registration seeds as its layout-resolution context (after the
@@ -9840,13 +9859,19 @@ public final class SemanticLowerer {
                     + "bindings; indirect/host/external/async calls are E7's)");
             }
             if (call.callee() instanceof MemberAccessExpr access
-                    && access.object() instanceof IdentifierExpr alias) {
+                    && access.object() instanceof IdentifierExpr alias
+                    && checks.symbolTable().resolve(alias.name())
+                        instanceof Symbol.ModuleSymbol) {
                 return lowerUserCallImport(call, slot, access, alias);
             }
-            throw new ConstructUnlowered("call callee shape "
-                + call.callee().getClass().getSimpleName()
-                + " (the statically-resolved call machine lowers identifier and "
-                + "import-member callees; runtime callee selection is ISSUE-0531's)");
+            // The dynamic arm: a callee value with no statically resolvable
+            // execution binding — a member/index read, a call result, or any
+            // other callee expression — evaluates to its own value first
+            // (left-to-right before the arguments), and the call lowers the
+            // landed dynamic shape over that value.
+            ValueId dynamicCallee = lowerExpression(call.callee());
+            return lowerDynamicCall(call, slot, describeDynamicCallee(call.callee()),
+                dynamicCallee);
         }
 
         /**
@@ -9948,16 +9973,13 @@ public final class SemanticLowerer {
         private ValueId lowerUserCallBinding(CallExpr call, ValueId slot,
                                              IdentifierExpr identifier) {
             FrameResolution resolution = resolveFrame(identifier.name());
-            if (resolution == null) {
-                throw new ConstructUnlowered("callee '" + identifier.name()
-                    + "' is not a declared binding of the walk's environment");
-            }
-            ValueId identity = functionIdentity.get(resolution.entry().incarnation());
+            ValueId identity = resolution == null
+                ? null : functionIdentity.get(resolution.entry().incarnation());
             if (identity == null) {
-                throw new ConstructUnlowered("callee '" + identifier.name()
-                    + "' has no statically tracked function identity (dynamic "
-                    + "function values — parameters, catch bindings, iteration "
-                    + "bindings — are ISSUE-0531's)");
+                // The dynamic arm (the callee value has no statically
+                // resolvable execution binding).
+                return lowerDynamicCall(call, slot, identifier.name(),
+                    lowerDynamicCalleeValue(identifier, resolution));
             }
             ValueId calleeValue = lowerExpression(identifier);
             FunctionExecutionBinding binding =
@@ -9968,6 +9990,161 @@ public final class SemanticLowerer {
                     + " has no registered FunctionExecutionBinding (producer defect)");
             }
             return lowerIndirectCall(call, slot, binding, calleeValue, identifier.name());
+        }
+
+        /**
+         * The callee-value load of a dynamically resolved call: the
+         * identifier's binding cell is read by an ordinary
+         * {@code BINDING_LOAD} (the carrier read) whose result value is
+         * the runtime carrier's own identity — the resolved execution
+         * class is read from that carrier at execution, never from a
+         * statically tracked allocation. A callee resolving outside the
+         * walk's frame environment (a for-of or catch binding) loads
+         * through the same identifier arm its own frame serves.
+         */
+        private ValueId lowerDynamicCalleeValue(IdentifierExpr identifier,
+                                                FrameResolution resolution) {
+            if (resolution == null) {
+                return lowerExpression(identifier);
+            }
+            maybeRegisterCapture(identifier.name(), resolution);
+            return emitResolvedLoad(identifier, checkedType(identifier),
+                resolution.entry(), null, true);
+        }
+
+        /**
+         * {@code CALL(INDIRECT)} — the dynamic arm (ISSUE-0657; design
+         * source {@code dynamic-call-shape-production-and-emission} Y1
+         * and the dynamic call shape contract;
+         * {@code semantic-ir-construct-coverage-cutover} K5/K12): a
+         * checked call whose callee value has no statically resolvable
+         * execution binding lowers one {@code CALL(INDIRECT)} with
+         * {@code CallCallee.Dynamic(calleeValue)}, one declared-signature
+         * {@code FUNCTION_PARAMETER} boundary per argument in one-based
+         * order, and the three recorded return cells — a
+         * {@code FUNCTION_RETURN} on the declared return descriptor
+         * parented to the call-owned {@code RETURN} that names the CALL
+         * (the K12 form (b) cell, never parented to the CALL op), the
+         * {@code HOST_TO_DEAL}+{@code HOST_SYNC_RETURN} cell, and the
+         * {@code EXTERNAL_RETURN} cell. The runtime selects the cell of
+         * the resolved carrier's class at execution; the CALL terminal
+         * publishes the checked value without re-checking.
+         */
+        private ValueId lowerDynamicCall(CallExpr call, ValueId slot, String calleeName,
+                                         ValueId calleeValue) {
+            RuntimeDescriptor.Func signature = dynamicCalleeSignature(call.callee(),
+                "call of '" + calleeName + "'");
+            if (signature.isAsync()) {
+                throw new ConstructUnlowered("call of async callee '" + calleeName
+                    + "' outside await (the checker's E3014 pins the shape; the await "
+                    + "arm owns async starts)");
+            }
+            List<ValueId> args = new ArrayList<>();
+            List<RuntimeDescriptor> argTypes = new ArrayList<>();
+            for (ExpressionNode argument : call.args()) {
+                args.add(lowerExpression(argument));
+                argTypes.add(ContainerPayloadDescriptors.resultDescriptorOf(
+                    checkedType(argument)));
+            }
+            if (args.size() != signature.paramTypes().size()) {
+                throw new ConstructUnlowered("call of '" + calleeName + "' with "
+                    + args.size() + " arguments for " + signature.paramTypes().size()
+                    + " parameters (the checker admits exact arity only)");
+            }
+            RuntimeDescriptor resultType = signature.returnType();
+            ValueId result = slot != null ? slot : ids.nextValueId(module, nextOrdinal++, 0);
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            OpId callOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(call.span()),
+                SourceOriginKind.USER, anchor, currentParent());
+            // The three recorded per-class return cells (the DEAL-body cell
+            // carries the call-owned RETURN the closed validator requires).
+            OpId dealBodyBoundaryOpId = emitCallOwnedReturnBoundary(signature, result,
+                call.span(), callOpId);
+            OpId hostBoundaryOpId = emitHostReturnBoundary(signature, result, call.span(),
+                callOpId);
+            OpId externalBoundaryOpId = emitExternalReturnBoundary(signature, result,
+                call.span(), callOpId);
+            List<SemanticOp> parameterBoundaryOps = new ArrayList<>();
+            List<OpId> parameterBoundaryIds = new ArrayList<>();
+            for (int i = 0; i < args.size(); i++) {
+                SemanticOp boundary = buildChildBoundary(BoundaryKind.FUNCTION_PARAMETER,
+                    signature.paramTypes().get(i), args.get(i), call.span(), callOpId);
+                parameterBoundaryOps.add(boundary);
+                parameterBoundaryIds.add(boundary.opId());
+            }
+            emit(buildOp(callOpId, SemanticOpKind.CALL,
+                new KindPayload.CallPayload(CallMode.INDIRECT,
+                    new KindPayload.CallCallee.Dynamic(calleeValue), signature,
+                    parameterBoundaryIds, null,
+                    new KindPayload.DynamicReturnBoundary(dealBodyBoundaryOpId,
+                        hostBoundaryOpId, externalBoundaryOpId),
+                    null, null),
+                result, resultType, args, argTypes, FailurePolicyId.NO_DEAL_FAILURE,
+                origin));
+            for (SemanticOp boundary : parameterBoundaryOps) {
+                emit(boundary);
+            }
+            return result;
+        }
+
+        /**
+         * The K12 form (b) call-owned DEAL-body return cell: one
+         * {@code FUNCTION_RETURN} boundary on the declared return
+         * descriptor parented to a {@code RETURN} op whose payload names
+         * the dynamic invocation as its {@code enclosingInvocationOpId}
+         * and records that boundary as its {@code returnBoundaryOpId}.
+         * The invocation op executes the cell (the resolved class's own
+         * return admits the value inside the callee first); the record is
+         * not an op of the enclosing function's block flow and is never
+         * executed by a block walk. The record's function position is a
+         * reserved identity: the callee's body is runtime-resolved, so no
+         * statically named body exists for the record.
+         */
+        private OpId emitCallOwnedReturnBoundary(RuntimeDescriptor.Func signature,
+                                                  ValueId result, Span span, OpId callOpId) {
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            OpId returnOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            OpId boundaryOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            AnchorId boundaryAnchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            FunctionId reservedRecordFunction = ids.nextFunctionId(module, nextOrdinal++, 0);
+            SourceOrigin returnOrigin = new SourceOrigin(sourceId, toSourceSpan(span),
+                SourceOriginKind.SYNTHETIC, anchor, null);
+            SourceOrigin boundaryOrigin = new SourceOrigin(sourceId, toSourceSpan(span),
+                SourceOriginKind.SYNTHETIC, boundaryAnchor, returnOpId);
+            emitUnattached(buildOp(returnOpId, SemanticOpKind.RETURN,
+                new KindPayload.ReturnPayload(result, reservedRecordFunction, callOpId,
+                    boundaryOpId),
+                null, null, FailurePolicyId.NO_DEAL_FAILURE, returnOrigin));
+            emit(buildOp(boundaryOpId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.FUNCTION_RETURN,
+                    signature.returnType(), result,
+                    new BoundaryRealization.RuntimeValidation(
+                        CANONICAL_RUNTIME_VALIDATION_ID)),
+                null, null, descriptorKindPolicy(signature.returnType()), boundaryOrigin));
+            return boundaryOpId;
+        }
+
+        /** The checked function descriptor of one callee expression. */
+        private RuntimeDescriptor.Func dynamicCalleeSignature(ExpressionNode callee,
+                                                              String site) {
+            Type calleeType = checkedType(callee);
+            if (!(calleeType instanceof Type.Func funcType)
+                    || !(ContainerPayloadDescriptors.resultDescriptorOf(funcType)
+                        instanceof RuntimeDescriptor.Func signature)) {
+                throw new ConstructUnlowered(site + " without a function-typed checked "
+                    + "descriptor (the checker admits function-typed callees only)");
+            }
+            return signature;
+        }
+
+        /** The callee description of one dynamic site's diagnostics. */
+        private static String describeDynamicCallee(ExpressionNode callee) {
+            return switch (callee) {
+                case IdentifierExpr identifier -> identifier.name();
+                case MemberAccessExpr access -> access.field();
+                default -> callee.getClass().getSimpleName();
+            };
         }
 
         /** The declared parameter count of the resolved binding shape. */
@@ -10620,15 +10797,13 @@ public final class SemanticLowerer {
                     return lowerAwaitDeclared(call, slot, awaitSpan, identifier, context);
                 }
                 FrameResolution resolution = resolveFrame(identifier.name());
-                if (resolution == null) {
-                    throw new ConstructUnlowered("await callee '" + identifier.name()
-                        + "' is not a declared binding of the walk's environment");
-                }
-                ValueId identity = functionIdentity.get(resolution.entry().incarnation());
+                ValueId identity = resolution == null
+                    ? null : functionIdentity.get(resolution.entry().incarnation());
                 if (identity == null) {
-                    throw new ConstructUnlowered("await callee '" + identifier.name()
-                        + "' has no statically tracked function identity (dynamic "
-                        + "function values are ISSUE-0531's)");
+                    // The dynamic async arm (the awaited callee value has no
+                    // statically resolvable execution binding).
+                    return lowerDynamicAwait(call, slot, awaitSpan, identifier.name(),
+                        lowerDynamicCalleeValue(identifier, resolution));
                 }
                 ValueId calleeValue = lowerExpression(identifier);
                 FunctionExecutionBinding binding = registry.bindings().get(
@@ -10645,7 +10820,9 @@ public final class SemanticLowerer {
                 return lowerAsyncStart(call, slot, awaitSpan, binding, false);
             }
             if (call.callee() instanceof MemberAccessExpr access
-                    && access.object() instanceof IdentifierExpr alias) {
+                    && access.object() instanceof IdentifierExpr alias
+                    && checks.symbolTable().resolve(alias.name())
+                        instanceof Symbol.ModuleSymbol) {
                 ImportMaterialization materialization =
                     materializeImportRead(access, alias, null);
                 if (!(materialization.descriptor() instanceof RuntimeDescriptor.Func)
@@ -10657,10 +10834,84 @@ public final class SemanticLowerer {
                 return lowerAsyncStart(call, slot, awaitSpan, materialization.binding(),
                     false);
             }
-            throw new ConstructUnlowered("await callee shape "
-                + call.callee().getClass().getSimpleName()
-                + " (the statically-resolved await arm lowers identifier and "
-                + "import-member callees; runtime callee selection is ISSUE-0531's)");
+            // The dynamic async arm over a callee expression that is neither
+            // an identifier nor an import-member access.
+            ValueId dynamicCallee = lowerExpression(call.callee());
+            return lowerDynamicAwait(call, slot, awaitSpan,
+                describeDynamicCallee(call.callee()), dynamicCallee);
+        }
+
+        /**
+         * {@code ASYNC_START} + {@code AWAIT} — the dynamic arm
+         * (ISSUE-0657; design source
+         * {@code dynamic-call-shape-production-and-emission} Y4 and the
+         * dynamic async start contract;
+         * {@code semantic-ir-construct-coverage-cutover} K5/K12): an
+         * awaited callee value with no statically resolvable execution
+         * binding lowers one {@code ASYNC_START} with
+         * {@code CallCallee.Dynamic(calleeValue)}, the recorded source
+         * {@code DEAL_BODY} (the payload's constructor rule — the only
+         * resolution whose caller-recorded return boundary executes), one
+         * declared-signature {@code FUNCTION_PARAMETER} boundary per
+         * argument in one-based order, and the single recorded task cell —
+         * a {@code FUNCTION_RETURN} on the declared completion descriptor
+         * parented to the call-owned {@code RETURN} that names the
+         * {@code ASYNC_START} (never parented to the start op). The
+         * runtime resolves the effective source and the operation shape
+         * from the callee's carrier; the single {@code AWAIT} drains the
+         * token and runs the single {@code ASYNC_COMPLETION} boundary on
+         * the completion value.
+         */
+        private ValueId lowerDynamicAwait(CallExpr call, ValueId slot, Span awaitSpan,
+                                         String calleeName, ValueId calleeValue) {
+            RuntimeDescriptor.Func signature = dynamicCalleeSignature(call.callee(),
+                "await of '" + calleeName + "'");
+            if (!signature.isAsync()) {
+                throw new ConstructUnlowered("await of non-async callee '" + calleeName
+                    + "' (the checker's E3013 pins the shape)");
+            }
+            List<ValueId> args = new ArrayList<>();
+            List<RuntimeDescriptor> argTypes = new ArrayList<>();
+            for (ExpressionNode argument : call.args()) {
+                args.add(lowerExpression(argument));
+                argTypes.add(ContainerPayloadDescriptors.resultDescriptorOf(
+                    checkedType(argument)));
+            }
+            if (args.size() != signature.paramTypes().size()) {
+                throw new ConstructUnlowered("async call of '" + calleeName + "' with "
+                    + args.size() + " arguments for " + signature.paramTypes().size()
+                    + " parameters (the checker admits exact arity only)");
+            }
+            RuntimeDescriptor completion = signature.returnType();
+            ValueId awaitResult = slot != null ? slot
+                : ids.nextValueId(module, nextOrdinal++, 0);
+            OpId startOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            AsyncTokenId token = new AsyncTokenId.Canonical(
+                ids.nextTokenId(module, nextOrdinal++, 0), AsyncTokenOwner.DEAL_BODY_TASK);
+            OpId taskCellOpId = emitCallOwnedReturnBoundary(signature, awaitResult,
+                call.span(), startOpId);
+            List<SemanticOp> parameterBoundaryOps = new ArrayList<>();
+            List<OpId> parameterBoundaryIds = new ArrayList<>();
+            for (int i = 0; i < args.size(); i++) {
+                SemanticOp boundary = buildChildBoundary(BoundaryKind.FUNCTION_PARAMETER,
+                    signature.paramTypes().get(i), args.get(i), call.span(), startOpId);
+                parameterBoundaryOps.add(boundary);
+                parameterBoundaryIds.add(boundary.opId());
+            }
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(call.span()),
+                SourceOriginKind.USER, anchor, currentParent());
+            emit(buildOp(startOpId, SemanticOpKind.ASYNC_START,
+                new KindPayload.AsyncStartPayload(
+                    new KindPayload.CallCallee.Dynamic(calleeValue),
+                    AsyncStartSource.DEAL_BODY, ParameterBoundaryMode.RUN,
+                    parameterBoundaryIds, completion, taskCellOpId, null, null),
+                token, InternalResultType.INTERNAL_ASYNC, args, argTypes,
+                FailurePolicyId.NO_DEAL_FAILURE, origin));
+            for (SemanticOp boundary : parameterBoundaryOps) {
+                emit(boundary);
+            }
+            return lowerAwait(token, completion, awaitSpan, awaitResult);
         }
 
         /** The awaited declared-function arm: ASYNC_START(DEAL_BODY) + AWAIT. */
@@ -12292,20 +12543,32 @@ public final class SemanticLowerer {
          * slot ({@code slot} non-null) publishes the slot instead of
          * allocating one — the slot-threaded production of the default
          * walk's direct identifier reference (the {@code CLASS_DEFAULT}
-         * op's result identity, K-D3).
+         * op's result identity, K-D3). The dynamic-callee carrier
+         * admission admits the one function-typed load whose caller is
+         * the dynamic call arm's callee site: the carrier read whose
+         * runtime execution class the dispatch resolves, registered by
+         * the function-typed-value child's op-based materialization
+         * producer rule; every value-position function-typed load keeps
+         * the fail-closed resolution.
          */
         private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
                                          FrameEntry entry) {
-            return emitResolvedLoad(identifier, type, entry, null);
+            return emitResolvedLoad(identifier, type, entry, null, false);
         }
 
         private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
                                          FrameEntry entry, ValueId slot) {
+            return emitResolvedLoad(identifier, type, entry, slot, false);
+        }
+
+        private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
+                                         FrameEntry entry, ValueId slot,
+                                         boolean dynamicCalleeCarrier) {
             RuntimeDescriptor descriptor = ContainerPayloadDescriptors.resultDescriptorOf(type);
             ValueId result = null;
             if (descriptor instanceof RuntimeDescriptor.Func) {
                 result = functionIdentity.get(entry.incarnation());
-                if (result == null) {
+                if (result == null && !dynamicCalleeCarrier) {
                     throw new ConstructUnlowered("function-typed load of '"
                         + identifier.name() + "' whose cell value identity is not "
                         + "statically tracked (dynamic function values — parameters, "

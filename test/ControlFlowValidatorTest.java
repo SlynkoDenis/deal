@@ -7,12 +7,16 @@ import deal.semantic.ir.AnchorId;
 import deal.semantic.ir.AssignTargetKind;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BlockId;
+import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.BoundaryRealization;
+import deal.semantic.ir.CallMode;
 import deal.semantic.ir.ClassId;
 import deal.semantic.ir.ClosedSelector;
 import deal.semantic.ir.ContractSnapshotCanonicalizer;
 import deal.semantic.ir.ControlSelector;
 import deal.semantic.ir.ExportPlan;
 import deal.semantic.ir.FailurePolicyId;
+import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.FunctionId;
 import deal.semantic.ir.IterationMode;
 import deal.semantic.ir.KindPayload;
@@ -919,7 +923,157 @@ public class ControlFlowValidatorTest {
     }
 
     // =========================================================================
-    // 4. Determinism and purity
+    // 4b. The dynamic invocation's call-owned return records (ISSUE-0657)
+    // =========================================================================
+
+    /**
+     * The invocation-owned return record of a dynamic {@code CALL} — the
+     * {@code FUNCTION_RETURN} cell's parent RETURN — is admitted outside the
+     * block tree, and every other unattached RETURN keeps the completeness and
+     * exit rules.
+     */
+    private static void testCallOwnedReturnRecords() {
+        System.out.println("-- Call-owned return records: the dynamic invocation's "
+            + "record is admitted outside the block tree --");
+
+        // Positive: the dynamic CALL's DEAL-body cell is parented to a RETURN
+        // naming the CALL; the record is a member of no block and names no unit
+        // function (the callee body is runtime-resolved).
+        {
+            OpId dealCellId = nextOpId();
+            OpId hostCellId = nextOpId();
+            OpId externalCellId = nextOpId();
+            SemanticOp call = op(SemanticOpKind.CALL,
+                new KindPayload.CallPayload(CallMode.INDIRECT,
+                    new KindPayload.CallCallee.Dynamic(nextValue()), SIG, List.of(), null,
+                    new KindPayload.DynamicReturnBoundary(dealCellId, hostCellId,
+                        externalCellId),
+                    null, null),
+                nextValue(), RuntimeDescriptor.Null.INSTANCE,
+                FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp record = opWith(nextOpId(), SemanticOpKind.RETURN,
+                new KindPayload.ReturnPayload(null, new FunctionId(99), call.opId(),
+                    dealCellId),
+                null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp dealCell = opWith(dealCellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.FUNCTION_RETURN,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.TYPE_DESCRIPTOR, record.opId());
+            SemanticOp hostCell = opWith(hostCellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.HOST_TO_DEAL,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.HOST_SYNC_RETURN, call.opId());
+            SemanticOp externalCell = opWith(externalCellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.EXTERNAL_RETURN,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.TYPE_DESCRIPTOR, call.opId());
+            LoweredModuleUnit unit = unit(Map.of(MAIN, function(MAIN, B0)),
+                List.of(call, record, dealCell, hostCell, externalCell));
+            StructuredBodyTable table = tableOf(Map.ofEntries(
+                Map.entry(INIT, List.<SemanticOp>of()),
+                Map.entry(B0, List.of(call, dealCell, hostCell, externalCell))));
+            assertPass(ControlFlowValidator.validate(unit, table),
+                "the dynamic CALL's call-owned return record");
+        }
+
+        // Positive: the dynamic ASYNC_START's recorded task cell's parent RETURN.
+        {
+            OpId taskCellId = nextOpId();
+            SemanticOp start = op(SemanticOpKind.ASYNC_START,
+                new KindPayload.AsyncStartPayload(
+                    new KindPayload.CallCallee.Dynamic(nextValue()),
+                    deal.semantic.ir.AsyncStartSource.DEAL_BODY,
+                    deal.semantic.ir.ParameterBoundaryMode.RUN, List.of(),
+                    RuntimeDescriptor.Null.INSTANCE, taskCellId, null, null),
+                new deal.semantic.ir.AsyncTokenId.Canonical(1,
+                    deal.semantic.ir.AsyncTokenOwner.DEAL_BODY_TASK),
+                deal.semantic.ir.InternalResultType.INTERNAL_ASYNC,
+                FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp record = opWith(nextOpId(), SemanticOpKind.RETURN,
+                new KindPayload.ReturnPayload(null, new FunctionId(99), start.opId(),
+                    taskCellId),
+                null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp taskCell = opWith(taskCellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.FUNCTION_RETURN,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.TYPE_DESCRIPTOR, record.opId());
+            LoweredModuleUnit unit = unit(Map.of(MAIN, function(MAIN, B0)),
+                List.of(start, record, taskCell));
+            StructuredBodyTable table = tableOf(Map.ofEntries(
+                Map.entry(INIT, List.<SemanticOp>of()),
+                Map.entry(B0, List.of(start, taskCell))));
+            assertPass(ControlFlowValidator.validate(unit, table),
+                "the dynamic ASYNC_START's call-owned return record");
+        }
+
+        // Negative: the same unattached record whose parent is a static CALL
+        // (no dynamic invocation records it) stays a member of no block.
+        {
+            OpId cellId = nextOpId();
+            SemanticOp call = op(SemanticOpKind.CALL,
+                new KindPayload.CallPayload(CallMode.DIRECT,
+                    new KindPayload.CallCallee.Static(
+                        new FunctionExecutionBinding.LoweredBody(MAIN, B0)),
+                    SIG, List.of(), cellId, null, B0, null),
+                nextValue(), RuntimeDescriptor.Null.INSTANCE,
+                FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp record = opWith(nextOpId(), SemanticOpKind.RETURN,
+                new KindPayload.ReturnPayload(null, MAIN, call.opId(), cellId),
+                null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp cell = opWith(cellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.FUNCTION_RETURN,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.TYPE_DESCRIPTOR, record.opId());
+            LoweredModuleUnit unit = unit(Map.of(MAIN, function(MAIN, B0)),
+                List.of(call, record, cell));
+            StructuredBodyTable table = tableOf(Map.ofEntries(
+                Map.entry(INIT, List.<SemanticOp>of()),
+                Map.entry(B0, List.of(call, cell))));
+            assertE6005(ControlFlowValidator.validate(unit, table),
+                ControlFlowValidator.CONTROL_BLOCK_TREE, "is a member of no block");
+        }
+
+        // Negative: a call-owned record that is a block member keeps the exit
+        // rule (the exemption covers the invocation-owned record outside the
+        // block tree only).
+        {
+            OpId dealCellId = nextOpId();
+            OpId hostCellId = nextOpId();
+            OpId externalCellId = nextOpId();
+            SemanticOp call = op(SemanticOpKind.CALL,
+                new KindPayload.CallPayload(CallMode.INDIRECT,
+                    new KindPayload.CallCallee.Dynamic(nextValue()), SIG, List.of(), null,
+                    new KindPayload.DynamicReturnBoundary(dealCellId, hostCellId,
+                        externalCellId),
+                    null, null),
+                nextValue(), RuntimeDescriptor.Null.INSTANCE,
+                FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp record = opWith(nextOpId(), SemanticOpKind.RETURN,
+                new KindPayload.ReturnPayload(null, new FunctionId(99), call.opId(),
+                    dealCellId),
+                null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
+            SemanticOp dealCell = opWith(dealCellId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.FUNCTION_RETURN,
+                    RuntimeDescriptor.Null.INSTANCE, nextValue(),
+                    new BoundaryRealization.RuntimeValidation("runtime-validation")),
+                null, null, FailurePolicyId.TYPE_DESCRIPTOR, record.opId());
+            LoweredModuleUnit unit = unit(Map.of(MAIN, function(MAIN, B0)),
+                List.of(call, record, dealCell));
+            StructuredBodyTable table = tableOf(Map.ofEntries(
+                Map.entry(INIT, List.<SemanticOp>of()),
+                Map.entry(B0, List.of(call, dealCell, record))));
+            assertE6005(ControlFlowValidator.validate(unit, table),
+                ControlFlowValidator.CONTROL_EXIT, "is not a function of the unit");
+        }
+    }
+
+    // =========================================================================
+    // 5. Determinism and purity
     // =========================================================================
 
     private static void testDeterminismAndPurity() {
@@ -1000,6 +1154,7 @@ public class ControlFlowValidatorTest {
         testSurfaceAndRecord();
         testPositives();
         testNegatives();
+        testCallOwnedReturnRecords();
         testDeterminismAndPurity();
         testNullArgs();
 

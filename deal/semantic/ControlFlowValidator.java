@@ -58,7 +58,14 @@ import java.util.Set;
  * epics (E6/E7/E9). Module-level ops ({@code MODULE_INIT},
  * {@code EXTERNAL_ENTRY}, {@code CLASS_FACTORY}, {@code CALLBACK_INVOKE},
  * {@code ENTRY_INVOKE}) are not ops of a lowered function and may be
- * absent from the table. Every other produced op of the unit is a pinned
+ * absent from the table, and the invocation-owned return record of a
+ * dynamic {@code CALL}/{@code ASYNC_START} (a {@code RETURN} whose
+ * {@code enclosingInvocationOpId} names the dynamic invocation and whose
+ * {@code returnBoundaryOpId} is its recorded DEAL-body return cell;
+ * ISSUE-0657) is likewise no op of a lowered function: the invocation op
+ * executes the recorded cell and the record is never executed by a block
+ * walk, so it lives outside the block tree. Every other produced op of
+ * the unit is a pinned
  * member of exactly one block (C-D1 — "every op of a lowered function
  * belongs to exactly one block"); the completeness check below enforces
  * that unit-to-table direction.</p>
@@ -88,10 +95,12 @@ import java.util.Set;
  *       <li>completeness — every produced op of the unit whose kind is
  *           not one of the five module-level kinds ({@code MODULE_INIT},
  *           {@code EXTERNAL_ENTRY}, {@code CLASS_FACTORY},
- *           {@code CALLBACK_INVOKE}, {@code ENTRY_INVOKE}) is a member
- *           of exactly one block (present in the block lists and in the
- *           inverse map); absence from the table is admitted only for
- *           those five kinds;</li>
+ *           {@code CALLBACK_INVOKE}, {@code ENTRY_INVOKE}) and which is
+ *           not a dynamic invocation's call-owned return record is a
+ *           member of exactly one block (present in the block lists and
+ *           in the inverse map); absence from the table is admitted only
+ *           for those five kinds and for that invocation-owned
+ *           record;</li>
  *       <li>orphan blocks and acyclicity — no table block is a non-root
  *           block referenced by no payload position of any kind, and the
  *           parent chain is acyclic.</li>
@@ -107,7 +116,9 @@ import java.util.Set;
  *       invalid recorded target indicates a malformed or decoded unit —
  *       E6005, never a silent fallthrough); a {@code RETURN}'s named
  *       function must be the containing function (the block's ancestor
- *       chain terminates at that function's body block).</li>
+ *       chain terminates at that function's body block), while a dynamic
+ *       invocation's call-owned return record is outside the block tree
+ *       and therefore outside this check.</li>
  * </ol>
  *
  * <p><b>Failure and determinism.</b> Every rejection is exactly one E6005
@@ -142,7 +153,6 @@ public final class ControlFlowValidator {
         SemanticOpKind.CLASS_FACTORY,
         SemanticOpKind.CALLBACK_INVOKE,
         SemanticOpKind.ENTRY_INVOKE);
-
     private ControlFlowValidator() {
         // Static surface; no instances.
     }
@@ -206,13 +216,14 @@ public final class ControlFlowValidator {
         final Map<BlockId, Integer> referenceCount;
         final Map<BlockId, List<SemanticOp>> enclosingCache;
         final Map<BlockId, BlockId> terminalCache;
+        final Set<OpId> callOwnedReturns;
 
         Context(LoweredModuleUnit unit, StructuredBodyTable table, Map<OpId, SemanticOp> unitOps,
                 Set<BlockId> roots, Map<OpId, List<BlockId>> controlPositions,
                 Map<OpId, List<BlockId>> foreignPositions, Set<BlockId> foreignReferenced,
                 Map<BlockId, SemanticOp> referencing, Map<BlockId, Integer> referenceCount,
                 Map<BlockId, List<SemanticOp>> enclosingCache,
-                Map<BlockId, BlockId> terminalCache) {
+                Map<BlockId, BlockId> terminalCache, Set<OpId> callOwnedReturns) {
             this.unit = unit;
             this.table = table;
             this.unitOps = unitOps;
@@ -224,6 +235,7 @@ public final class ControlFlowValidator {
             this.referenceCount = referenceCount;
             this.enclosingCache = enclosingCache;
             this.terminalCache = terminalCache;
+            this.callOwnedReturns = callOwnedReturns;
         }
 
         static Context build(LoweredModuleUnit unit, StructuredBodyTable table) {
@@ -251,9 +263,10 @@ public final class ControlFlowValidator {
                     foreignReferenced.add(body.blockId());
                 }
             }
+            Set<OpId> callOwnedReturns = callOwnedReturnRecords(unitOps);
             return new Context(unit, table, unitOps, roots, controlPositions, foreignPositions,
                 foreignReferenced, new LinkedHashMap<>(), new LinkedHashMap<>(),
-                new LinkedHashMap<>(), new LinkedHashMap<>());
+                new LinkedHashMap<>(), new LinkedHashMap<>(), callOwnedReturns);
         }
 
         /**
@@ -338,6 +351,72 @@ public final class ControlFlowValidator {
             terminalCache.put(block, terminal);
             return terminal;
         }
+    }
+
+    /**
+     * The call-owned return records of the unit's dynamic invocation
+     * shapes (ISSUE-0657; design source
+     * {@code dynamic-call-shape-production-and-emission} Y1/Y4 and the
+     * dynamic call/async-start shape contracts;
+     * {@code semantic-ir-construct-coverage-cutover} K12's form (b)): a
+     * {@code RETURN} whose {@code enclosingInvocationOpId} names a
+     * dynamic {@code CALL}/{@code ASYNC_START} of the unit and whose
+     * {@code returnBoundaryOpId} is that invocation's recorded DEAL-body
+     * return cell (the CALL's {@code dealBodyBoundaryOpId}; the
+     * {@code ASYNC_START}'s single recorded task cell).
+     *
+     * <p>Such a record is owned by the invocation, not by a lowered
+     * function: it exists to parent the recorded cell (the landed
+     * validator's parent rule) and the invocation op executes the cell —
+     * the record is never executed by a block walk, exactly like the
+     * module-level invocation records. It is therefore admitted outside
+     * the block tree, and every other {@code RETURN} keeps the full
+     * completeness and exit rules.</p>
+     *
+     * @param unitOps the unit's ops by op id; non-null
+     * @return the call-owned return record op ids; empty when the unit
+     *         carries no dynamic invocation
+     */
+    private static Set<OpId> callOwnedReturnRecords(Map<OpId, SemanticOp> unitOps) {
+        Set<OpId> records = new LinkedHashSet<>();
+        for (SemanticOp op : unitOps.values()) {
+            switch (op.payload()) {
+                case KindPayload.CallPayload call -> {
+                    if (call.callee() instanceof KindPayload.CallCallee.Dynamic
+                            && call.dynamicReturnBoundary() != null) {
+                        collectCallOwnedReturn(records, unitOps, op.opId(),
+                            call.dynamicReturnBoundary().dealBodyBoundaryOpId());
+                    }
+                }
+                case KindPayload.AsyncStartPayload start -> {
+                    if (start.callee() instanceof KindPayload.CallCallee.Dynamic) {
+                        collectCallOwnedReturn(records, unitOps, op.opId(),
+                            start.returnBoundaryOpId());
+                    }
+                }
+                default -> {
+                    // Not a dynamic invocation shape.
+                }
+            }
+        }
+        return records;
+    }
+
+    /** Adds one dynamic invocation's recorded cell's parent RETURN record, when it matches. */
+    private static void collectCallOwnedReturn(Set<OpId> records,
+                                               Map<OpId, SemanticOp> unitOps,
+                                               OpId invocationOpId, OpId cellOpId) {
+        SemanticOp cell = cellOpId == null ? null : unitOps.get(cellOpId);
+        if (cell == null || cell.origin() == null || cell.origin().parentOpId() == null) {
+            return;
+        }
+        SemanticOp parent = unitOps.get(cell.origin().parentOpId());
+        if (parent == null || parent.kind() != SemanticOpKind.RETURN
+                || !(parent.payload() instanceof KindPayload.ReturnPayload returned)
+                || !invocationOpId.equals(returned.enclosingInvocationOpId())) {
+            return;
+        }
+        records.add(parent.opId());
     }
 
     /** The control-tree child positions of a structure op (payload order, nulls skipped). */
@@ -529,9 +608,12 @@ public final class ControlFlowValidator {
         // member of exactly one block. The single-membership and
         // inverse-consistency checks above have already proven the at-most-one
         // and cross-map directions for every listed op, so absence from the
-        // inverse map means absence from every block list.
+        // inverse map means absence from every block list. The call-owned
+        // return records of the dynamic invocation shapes are invocation-owned
+        // structural records, not ops of a lowered function (ISSUE-0657).
         for (SemanticOp op : ctx.unit.ops()) {
             if (!MODULE_LEVEL_KINDS.contains(op.kind())
+                    && !ctx.callOwnedReturns.contains(op.opId())
                     && !ctx.table.opBlocks().containsKey(op.opId())) {
                 return fail(ctx, CONTROL_BLOCK_TREE, "op " + op.opId()
                     + " is a member of no block (every op of a lowered function must"
@@ -617,6 +699,12 @@ public final class ControlFlowValidator {
                     return failure;
                 }
             } else if (op.kind() == SemanticOpKind.RETURN) {
+                if (ctx.callOwnedReturns.contains(op.opId())
+                        && !ctx.table.opBlocks().containsKey(op.opId())) {
+                    // The invocation-owned record: not an op of a lowered
+                    // function, so it has no containing function to check.
+                    continue;
+                }
                 FunctionId function = ((KindPayload.ReturnPayload) op.payload()).function();
                 Optional<CompilerDiagnostic> failure = checkReturnTarget(ctx, op, function);
                 if (failure.isPresent()) {

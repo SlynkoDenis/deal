@@ -588,4 +588,23 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # artifact set byte-identical). No loader surface and no executable
   # value-position drive are added.
   'fg|=== Running Host Export Read Realization Tests (ISSUE-0648) ===|java -ea -cp build deal.test.HostExportReadRealizationTest'
+  # ISSUE-0657 registration: the dynamic call shape production
+  # (dynamic-call-shape-production-and-emission Y1/Y4 and the dynamic
+  # call/async-start shape contracts;
+  # semantic-ir-construct-coverage-cutover K5 and K12's form (b)): the
+  # CALL(INDIRECT) with CallCallee.Dynamic, the declared-signature
+  # FUNCTION_PARAMETER children, and the three recorded
+  # DynamicReturnBoundary cells with the DEAL-body cell parented to the
+  # call-owned RETURN naming the CALL; the ASYNC_START(Dynamic, DEAL_BODY,
+  # RUN) with the single recorded task cell parented to the RETURN naming
+  # the start, consumed by exactly one AWAIT/ASYNC_COMPLETION; the
+  # identifier-callee and callee-expression arms; the gate-clean closure
+  # carriers (the closed gate, the address-chain protocol, the
+  # control-flow validator's call-owned-record admission, and the
+  # bindings production validator pass; repeated dumps are byte-identical),
+  # the pending materialization clause (R-FUNCTION-BINDING) of the
+  # function-typed-value child, the unchanged static arms, and the
+  # hand-built dynamic-cell/record negatives. The class lives in
+  # package deal.semantic to reach the package-internal project walk.
+  'fg|=== Running Dynamic Call Shape Production Tests (ISSUE-0657) ===|java -ea -cp build deal.semantic.DynamicCallLoweringTest'
 )
