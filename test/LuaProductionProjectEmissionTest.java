@@ -46,10 +46,11 @@ import java.util.Set;
  *
  * <ol>
  *   <li>the entry consumes only the validated {@link ExecutableLoweredProject},
- *       the per-module block-membership tables, and the per-module
- *       class-factory registries — no AST, no checker result, no route
- *       input, no host declaration surface, no extern-C generated-module
- *       map, and no identity index;</li>
+ *       the per-module block-membership tables, the per-module class-factory
+ *       registries, and the compile's host declaration surface (the
+ *       declared-map source of the {@code MODULE_IMPORT(HOST)} load) — no
+ *       AST, no checker result, no route input, no extern-C
+ *       generated-module map, and no identity index;</li>
  *   <li>the artifact is exactly one Lua chunk carrying the whole closure
  *       (the prelude once, every module's function factories, adapter
  *       thunks, and detached class-default functions, then each module's
@@ -272,7 +273,8 @@ public class LuaProductionProjectEmissionTest {
             + "validated project, the tables, and the registries --");
 
         Method entry = LuaSemanticEmitter.class.getDeclaredMethod("emitProductionProject",
-            ExecutableLoweredProject.class, Map.class, Map.class);
+            ExecutableLoweredProject.class, Map.class, Map.class,
+            HostDeclarationSurface.class);
         check(java.lang.reflect.Modifier.isStatic(entry.getModifiers())
                 && java.lang.reflect.Modifier.isPublic(entry.getModifiers()),
             "emitProductionProject is a public static entry");
@@ -280,10 +282,11 @@ public class LuaProductionProjectEmissionTest {
             "the entry returns the one project artifact source text");
 
         Class<?>[] parameters = entry.getParameterTypes();
-        checkEq(List.of(ExecutableLoweredProject.class, Map.class, Map.class),
+        checkEq(List.of(ExecutableLoweredProject.class, Map.class, Map.class,
+                HostDeclarationSurface.class),
             List.of(parameters),
-            "the entry takes exactly the validated project, the tables, and the "
-                + "registries");
+            "the entry takes exactly the validated project, the tables, the "
+                + "registries, and the host declaration surface");
         for (Parameter parameter : entry.getParameters()) {
             if (parameter.getType() == Map.class) {
                 checkEq("java.util.Map", parameter.getType().getTypeName(),
@@ -299,17 +302,18 @@ public class LuaProductionProjectEmissionTest {
                 "java.util.Map<deal.semantic.ir.ModuleId, "
                     + "deal.semantic.ir.StructuredBodyTable>",
                 "java.util.Map<deal.semantic.ir.ModuleId, "
-                    + "deal.semantic.ir.ClassFactoryRegistry>"),
+                    + "deal.semantic.ir.ClassFactoryRegistry>",
+                "deal.semantic.HostDeclarationSurface"),
             genericTypes,
             "the entry's declared inputs are exactly the project lowering result's "
-                + "tables and registries");
+                + "tables and registries plus the host declaration surface");
 
         for (Parameter parameter : entry.getParameters()) {
             String typeName = parameter.getType().getName();
             for (String forbidden : List.of("deal.ast.", "deal.checker.",
                     "deal.parser.", "Route", "MigrationPlanner", "CapabilityRegistry",
-                    "HostDeclaration", "FfiGenerated", "CanonicalModuleIdentity",
-                    "CheckResult", "ProgramNode")) {
+                    "HostModuleDeclarations", "FfiGenerated",
+                    "CanonicalModuleIdentity", "CheckResult", "ProgramNode")) {
                 check(!typeName.contains(forbidden),
                     "emitProductionProject takes no " + forbidden + " input: "
                         + typeName);
@@ -327,9 +331,10 @@ public class LuaProductionProjectEmissionTest {
         checkEq(String.class, module.getReturnType(),
             "emitProductionModule keeps its signature and return type");
 
-        // The entry's null guards: the three declared inputs are required.
+        // The entry's null guards: the four declared inputs are required.
         try {
-            LuaSemanticEmitter.emitProductionProject(null, Map.of(), Map.of());
+            LuaSemanticEmitter.emitProductionProject(null, Map.of(), Map.of(),
+                new HostDeclarationSurface(Map.of()));
             fail("a null project is rejected");
         } catch (NullPointerException expected) {
             passed++;
@@ -359,7 +364,7 @@ public class LuaProductionProjectEmissionTest {
             checkEq(APP, project.entryModule(), "the entry module is app");
 
             String lua = LuaSemanticEmitter.emitProductionProject(project,
-                result.tables(), result.registries());
+                result.tables(), result.registries(), fixture.surface());
 
             // Exactly one chunk: one header, one prelude, one deferred main,
             // one entry-surface return.
@@ -493,19 +498,20 @@ public class LuaProductionProjectEmissionTest {
 
             // Determinism: byte-identical repeated emission.
             checkEq(lua, LuaSemanticEmitter.emitProductionProject(project,
-                    result.tables(), result.registries()),
+                    result.tables(), result.registries(), fixture.surface()),
                 "the repeated production project emission is byte-identical");
 
             // The tables/registries inputs are required.
             try {
                 LuaSemanticEmitter.emitProductionProject(project, null,
-                    result.registries());
+                    result.registries(), fixture.surface());
                 fail("a null tables map is rejected");
             } catch (NullPointerException expected) {
                 passed++;
             }
             try {
-                LuaSemanticEmitter.emitProductionProject(project, result.tables(), null);
+                LuaSemanticEmitter.emitProductionProject(project, result.tables(), null,
+                    fixture.surface());
                 fail("a null registries map is rejected");
             } catch (NullPointerException expected) {
                 passed++;
@@ -536,7 +542,8 @@ public class LuaProductionProjectEmissionTest {
             }
             Path artifact = workspace.resolve("project.lua");
             Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
-                result.project(), result.tables(), result.registries()),
+                result.project(), result.tables(), result.registries(),
+                fixture.surface()),
                 StandardCharsets.UTF_8);
             deployRuntime(workspace);
             ProcessOutcome run = runProcess(List.of("luajit",
@@ -564,7 +571,8 @@ public class LuaProductionProjectEmissionTest {
             }
             Path artifact = quietWorkspace.resolve("project.lua");
             Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
-                result.project(), result.tables(), result.registries()),
+                result.project(), result.tables(), result.registries(),
+                quiet.surface()),
                 StandardCharsets.UTF_8);
             deployRuntime(quietWorkspace);
             ProcessOutcome run = runProcess(List.of("luajit",
@@ -591,7 +599,8 @@ public class LuaProductionProjectEmissionTest {
             }
             Path artifact = overflowWorkspace.resolve("project.lua");
             Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
-                result.project(), result.tables(), result.registries()),
+                result.project(), result.tables(), result.registries(),
+                overflow.surface()),
                 StandardCharsets.UTF_8);
             deployRuntime(overflowWorkspace);
             ProcessOutcome run = runProcess(List.of("luajit",
@@ -629,7 +638,7 @@ public class LuaProductionProjectEmissionTest {
             ExecutableLoweredProject project = result.project();
             Path artifact = workspace.resolve("project.lua");
             Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
-                project, result.tables(), result.registries()),
+                project, result.tables(), result.registries(), fixture.surface()),
                 StandardCharsets.UTF_8);
 
             List<String> modules = new ArrayList<>();
@@ -692,7 +701,7 @@ public class LuaProductionProjectEmissionTest {
                 "the fixture's entry unit carries its ENTRY_INVOKE delegation op");
 
             String lua = LuaSemanticEmitter.emitProductionProject(project,
-                result.tables(), result.registries());
+                result.tables(), result.registries(), fixture.surface());
             checkEq(1, countOccurrences(lua, "\"START\", \"ENTRY_INVOKE\""),
                 "the production chunk emits exactly one ENTRY_INVOKE delegation "
                     + "(the entry module's)");

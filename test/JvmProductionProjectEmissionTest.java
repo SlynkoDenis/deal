@@ -41,7 +41,7 @@ import java.util.Set;
 /**
  * ISSUE-0641: the JVM production project entry
  * {@code JvmSemanticEmitter.emitProductionProject(project, tables,
- * registries, className)}
+ * registries, className, declarationSurface)}
  * ({@code production-project-emission-and-atomic-cutover} P1/P2/P3 and the
  * production JVM emission contract;
  * {@code luajit-jvm-single-lowering-production-cutover} C2 and the
@@ -49,10 +49,10 @@ import java.util.Set;
  *
  * <ol>
  *   <li>The entry consumes only the validated project, the per-module body
- *       tables and class-factory registries, and the entry class name; the
- *       artifact is one {@code public final class <className>} with
- *       {@code public static void main(String[])} and the
- *       {@code dealMain()} drive carrying the whole closure.</li>
+ *       tables and class-factory registries, the entry class name, and the
+ *       host declaration surface; the artifact is one {@code public final
+ *       class <className>} with {@code public static void main(String[])}
+ *       and the {@code dealMain()} drive carrying the whole closure.</li>
  *   <li>The trace protocol is suppressed (the class enables no trace and
  *       carries no {@code R|} line), {@code main} drives {@code dealMain()}
  *       exactly once, and the production {@code DEAL_ERROR_CODE: <code>}
@@ -238,10 +238,12 @@ public class JvmProductionProjectEmissionTest {
                 ExecutableLoweredProject.class,
                 Map.class,
                 Map.class,
-                String.class),
+                String.class,
+                HostDeclarationSurface.class),
             List.of(parameters),
             "emitProductionProject consumes exactly the validated project, the tables, "
-                + "the registries, and the entry class name");
+                + "the registries, the entry class name, and the host declaration "
+                + "surface");
         for (Class<?> parameter : parameters) {
             String name = parameter.getName();
             check(!name.startsWith("deal.ast.") && !name.startsWith("deal.checker.")
@@ -295,7 +297,7 @@ public class JvmProductionProjectEmissionTest {
 
             JvmSemanticEmitter.EmissionResult emission =
                 JvmSemanticEmitter.emitProductionProject(project, result.tables(),
-                    result.registries(), className);
+                    result.registries(), className, fixture.surface());
             String source = emission.source();
             checkEq(className, emission.className(), "the emission reports its class name");
 
@@ -426,14 +428,16 @@ public class JvmProductionProjectEmissionTest {
 
             // Determinism and the className passthrough.
             checkEq(source, JvmSemanticEmitter.emitProductionProject(project,
-                    result.tables(), result.registries(), className).source(),
+                    result.tables(), result.registries(), className,
+                    fixture.surface()).source(),
                 "the repeated production emission is byte-identical");
             checkEq("CustomApp",
                 JvmSemanticEmitter.emitProductionProject(project, result.tables(),
-                    result.registries(), "CustomApp").className(),
+                    result.registries(), "CustomApp", fixture.surface()).className(),
                 "the className argument is used verbatim");
             checkEq(1, countOccurrences(JvmSemanticEmitter.emitProductionProject(project,
-                    result.tables(), result.registries(), "CustomApp").source(),
+                    result.tables(), result.registries(), "CustomApp",
+                    fixture.surface()).source(),
                     "public final class CustomApp {"),
                 "a verbatim className lands in the class head");
 
@@ -487,7 +491,7 @@ public class JvmProductionProjectEmissionTest {
             String className = JvmBackend.classNameFor(project.entryModule().path());
             JvmSemanticEmitter.EmissionResult emission =
                 JvmSemanticEmitter.emitProductionProject(project, result.tables(),
-                    result.registries(), className);
+                    result.registries(), className, fixture.surface());
             Path source = workspace.resolve(className + ".java");
             Files.writeString(source, emission.source(), StandardCharsets.UTF_8);
 
@@ -574,7 +578,7 @@ public class JvmProductionProjectEmissionTest {
             checkEq("Main", className, "the overflow entry class name is Main");
             JvmSemanticEmitter.EmissionResult emission =
                 JvmSemanticEmitter.emitProductionProject(project, result.tables(),
-                    result.registries(), className);
+                    result.registries(), className, fixture.surface());
 
             Path source = workspace.resolve(className + ".java");
             Files.writeString(source, emission.source(), StandardCharsets.UTF_8);

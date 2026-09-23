@@ -472,4 +472,24 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # fails closed; that boundary is pinned and recorded as a finding by the
   # run (printed, not a failure) and is not repaired here.
   'fg|=== Running In-Project Imported-Class Construction Vertical Tests (ISSUE-0644) ===|java -ea -cp build deal.test.InProjectClassConstructionVerticalTest'
+  # ISSUE-0650 registration: the host module load and the JVM host ABI
+  # emission surface (host-module-load-and-host-call-realization H1, H2
+  # items 1-2, H7's carrier set, and the host-load contract;
+  # luajit-jvm-single-lowering-production-cutover C2; sequencing step 1):
+  # the LuaJIT inline load at the MODULE_IMPORT(HOST) op with the emitted
+  # declared map in declaration order and the import statement's origin,
+  # the one-load-per-module identity guard with a two-alias import (one
+  # load, one shared surface value), the pinned E8011 defects (missing
+  # declared export at the import origin, class identity mismatch,
+  # missing <C>_defaults), the JVM module-keyed load entry with the
+  # declared parameter-class projection and the <C>_defaults captures,
+  # the per-export wrappers with the declared parameter/return cells and
+  # the pinned E8010 texts, and the synthesized top-level $DealRt
+  # host-record and host-carrier scope the deployed
+  # test/conformance/host-fixtures implementations compile against. Both
+  # artifacts execute under the real toolchains (luajit; javac --release
+  # 25 -proc:none + java with the emitted wrappers driven directly), and
+  # the production unit's two emitter call sites pass the declaration
+  # surface through.
+  'fg|=== Running Host Module Load / JVM Host ABI Surface Tests (ISSUE-0650) ===|java -ea -cp build deal.test.HostModuleLoadEmissionTest'
 )

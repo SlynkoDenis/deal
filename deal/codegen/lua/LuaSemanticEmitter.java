@@ -1,5 +1,7 @@
 package deal.codegen.lua;
 
+import deal.semantic.DescriptorService;
+import deal.semantic.HostDeclarationSurface;
 import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
@@ -24,6 +26,7 @@ import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredFunction;
 import deal.semantic.ir.LoweredModuleUnit;
 import deal.semantic.ir.ModuleId;
+import deal.semantic.ir.ModuleImportKind;
 import deal.semantic.ir.OpId;
 import deal.semantic.ir.ParameterBoundaryMode;
 import deal.semantic.ir.RuntimeDescriptor;
@@ -33,6 +36,7 @@ import deal.semantic.ir.SemanticOpKind;
 import deal.semantic.ir.SourceSpan;
 import deal.semantic.ir.StructuredBodyTable;
 import deal.semantic.ir.ValueId;
+import deal.types.Type;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -144,22 +148,36 @@ public final class LuaSemanticEmitter {
      * executes exactly once per chunk execution.
      *
      * <p>The entry consumes only the validated project, the per-module
-     * block-membership tables, and the per-module class-factory registries:
-     * no AST, no checker result, no route input, no host declaration
-     * surface, no extern-C generated-module map, and no identity index.</p>
+     * block-membership tables, the per-module class-factory registries, and
+     * the host declaration surface: no AST, no checker result, no route
+     * input, no extern-C generated-module map, and no identity index. The
+     * declaration surface is the single source of the declared export map
+     * the {@code MODULE_IMPORT(HOST)} load emits (ISSUE-0650;
+     * {@code host-module-load-and-host-call-realization} H1 and the
+     * host-load contract) — the function exports carry the canonical
+     * runtime-descriptor text in declaration order and the class exports
+     * their canonical class-descriptor text.</p>
      *
-     * @param project    the validated executable closure; non-null
-     * @param tables     each module's block-membership table; non-null
-     * @param registries each module's class-factory registry; non-null
+     * @param project            the validated executable closure; non-null
+     * @param tables             each module's block-membership table;
+     *                           non-null
+     * @param registries         each module's class-factory registry;
+     *                           non-null
+     * @param declarationSurface the declaration surface covering every
+     *                           declaration import of the compile; non-null
      * @return the production project artifact source text
      */
     public static String emitProductionProject(ExecutableLoweredProject project,
                                                Map<ModuleId, StructuredBodyTable> tables,
-                                               Map<ModuleId, ClassFactoryRegistry> registries) {
+                                               Map<ModuleId, ClassFactoryRegistry> registries,
+                                               HostDeclarationSurface declarationSurface) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
-        return new Session(project, tables, registries, false).emit();
+        Objects.requireNonNull(declarationSurface,
+            "declarationSurface must not be null");
+        return new Session(project, tables, registries, false,
+            declarationSurface).emit();
     }
 
     /**
@@ -224,6 +242,12 @@ public final class LuaSemanticEmitter {
         final java.util.Set<OpId> structuralOwned = new java.util.HashSet<>();
         /** Production mode: no trace protocol, DEAL_ERROR_CODE terminal. */
         final boolean trace;
+        /**
+         * The compile's host declaration surface (the declared-map source
+         * of the {@code MODULE_IMPORT(HOST)} load): non-null in the
+         * production project session, null in the trace/unit sessions.
+         */
+        final HostDeclarationSurface hostSurface;
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
         final boolean entryModule;
         /** Ops the block walk skips (the entry delegation of a non-entry module). */
@@ -249,6 +273,7 @@ public final class LuaSemanticEmitter {
             this.unit = unit;
             this.table = table;
             this.trace = trace;
+            this.hostSurface = null;
             this.entryModule = entryModule;
             registerUnit(unit, table, new ClassFactoryRegistry(Map.of()));
             if (!entryModule) {
@@ -277,6 +302,21 @@ public final class LuaSemanticEmitter {
          */
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace) {
+            this(project, tables, registries, trace, null);
+        }
+
+        /**
+         * The project-mode session of the production project entry: the
+         * combined closure plus the compile's host declaration surface
+         * (the declared-map source of the {@code MODULE_IMPORT(HOST)}
+         * load). A trace-mode project session carries no host surface
+         * (the declared-map load is a production realization; the
+         * conformance trace session keeps the landed no-op arm).
+         */
+        Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
+                Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
+                HostDeclarationSurface hostSurface) {
+            this.hostSurface = hostSurface;
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -567,6 +607,13 @@ public final class LuaSemanticEmitter {
             // valid Lua too (production-only is the entry-surface return
             // terminal, not the declaration).
             out.append("__exportSurfaces = __exportSurfaces or {}\n");
+            // The host-module loader of the production chunk (ISSUE-0650): a
+            // chunk with a HOST-kind import requires the deployed runtime's
+            // landed loader (__rt.load_host); the binding is emitted exactly
+            // then, so a host-free chunk keeps its self-contained prelude.
+            if (hasHostImports()) {
+                out.append("local __rt = require(\"deal.runtime\")\n");
+            }
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 String moduleKey = luaString(moduleUnit.moduleId().path());
                 out.append("__exportSurfaces[").append(moduleKey)
@@ -791,6 +838,27 @@ public final class LuaSemanticEmitter {
                     .append(luaString(unit.moduleId().path())).append("]\n");
             }
             return out.toString();
+        }
+
+        /**
+         * Whether the production chunk carries at least one realized host
+         * import (a HOST-kind import with the declaration surface the
+         * declared map reads).
+         */
+        private boolean hasHostImports() {
+            if (hostSurface == null) {
+                return false;
+            }
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.MODULE_IMPORT
+                            && ((KindPayload.ModuleImportPayload) op.payload()).kind()
+                                == ModuleImportKind.HOST) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         /**
@@ -4025,9 +4093,138 @@ public final class LuaSemanticEmitter {
             emitPlainSuccess(op);
         }
 
+        /**
+         * {@code MODULE_IMPORT} — the import's load/initialization op. A
+         * {@code HOST}-kind import emits the host load inline at its
+         * position in the module init walk (ISSUE-0650;
+         * {@code host-module-load-and-host-call-realization} H1 and the
+         * host-load contract): the module's surface entry becomes the
+         * loaded table through the landed loader
+         * {@code __rt.load_host(rawSpecifier, declared, file, line,
+         * column)} with the compiler-owned declared map in declaration
+         * order, and the chunk-global {@code __exportSurfaces} registry
+         * entry is written with the idempotent {@code or} guard, so a
+         * repeated import of the same module (two aliases, two
+         * declarations) loads exactly once per program and every alias
+         * observes the one loaded surface value. The loaded table is
+         * published in the same registry the {@code EXPORT_PUBLISH}/
+         * {@code EXPORT_READ} arms use, so it is the host import's
+         * namespace value. The pinned E8011 defects (missing declared
+         * export, invalid function/class export shape, pre-wrapped
+         * signature mismatch or non-function {@code .f}, class identity
+         * mismatch, missing or non-table {@code <C>_defaults}, a
+         * non-table module result) fail the importing module's init at
+         * the emitted import-statement origin with the host-module-abi
+         * texts. {@code COMPILED}/{@code STDLIB} imports keep the landed
+         * no-op realization.
+         */
         private void emitModuleImport(SemanticOp op) {
+            KindPayload.ModuleImportPayload payload =
+                (KindPayload.ModuleImportPayload) op.payload();
             emitStart(op);
+            if (payload.kind() == ModuleImportKind.HOST && hostSurface != null) {
+                // The host load is a production project realization; a
+                // unit/trace session (no declaration surface) keeps the
+                // landed no-op arm — its host path is the landed scenario
+                // seam, which the production path never reaches.
+                emitHostLoad(op, payload);
+            }
             emitPlainSuccess(op);
+        }
+
+        /**
+         * The inline host load of one {@code MODULE_IMPORT(HOST)} op: the
+         * declared map is read from the compile's host declaration
+         * surface by the resolved module identity (the one descriptor
+         * and declaration-order source — never a second producer), and
+         * the origin is the import statement's span so the pinned E8011
+         * failures carry the import origin.
+         */
+        private void emitHostLoad(SemanticOp op,
+                                  KindPayload.ModuleImportPayload payload) {
+            if (hostSurface == null) {
+                throw new IllegalStateException("MODULE_IMPORT " + op.opId()
+                    + " imports the host module '" + payload.rawSpecifier()
+                    + "' but the session carries no host declaration surface"
+                    + " (the declared map has no second producer — a producer"
+                    + " defect)");
+            }
+            HostDeclarationSurface.DeclarationFacts facts =
+                hostSurface.require(payload.resolvedModule());
+            if (facts.kind() != HostDeclarationSurface.DeclarationKind.HOST) {
+                throw new IllegalStateException("MODULE_IMPORT " + op.opId()
+                    + " imports the declaration module '"
+                    + payload.resolvedModule().path()
+                    + "' of kind " + facts.kind()
+                    + ": the extern-C declaration load is the FFI child's"
+                    + " (fail-closed remnant)");
+            }
+            // A second alias of one host module emits the same guarded load
+            // at its own import position: the first call is the only load of
+            // this module per program, and every later import op re-writes
+            // the already published surface entry through the same guard.
+            ModuleId moduleId = payload.resolvedModule();
+            String key = luaString(moduleId.path());
+            out.append("__exportSurfaces[").append(key).append("] = ")
+                .append("__exportSurfaces[").append(key).append("] or ")
+                .append("__rt.load_host(").append(luaString(payload.rawSpecifier()))
+                .append(", ").append(hostDeclaredMap(facts)).append(", ")
+                .append(loadOriginArgs(op)).append(")\n");
+        }
+
+        /**
+         * The declared-map literal of one host declaration module: the
+         * declared exports in declaration order, each with its canonical
+         * runtime-descriptor text ({@code RuntimeDescriptor.Func} for a
+         * function export, the canonical class descriptor for a class
+         * export) — the single descriptor text the loader validates.
+         */
+        private String hostDeclaredMap(
+                HostDeclarationSurface.DeclarationFacts facts) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (Map.Entry<String, Type> export : facts.exports().entrySet()) {
+                if (!first) {
+                    sb.append(", ");
+                }
+                first = false;
+                sb.append("[").append(luaString(export.getKey()))
+                    .append("] = ")
+                    .append(luaString(hostDescriptorText(export.getValue())));
+            }
+            return sb.append("}").toString();
+        }
+
+        /**
+         * The canonical descriptor text of one declared export type
+         * (the compiled descriptor service — the only type-to-text
+         * producer).
+         */
+        private String hostDescriptorText(Type type) {
+            try {
+                return DescriptorService.describe(type).canonicalSpecText();
+            } catch (DescriptorService.Defect defect) {
+                throw new IllegalStateException("a declared host export carries"
+                    + " a type with no runtime representation: "
+                    + defect.getMessage() + " (the declaration surface never"
+                    + " carries one — a producer defect)", defect);
+            }
+        }
+
+        /**
+         * The literal origin triplet of a load's call site: the import
+         * statement's own file, line, and column, so every E8011 the
+         * loader raises names the import origin.
+         */
+        private String loadOriginArgs(SemanticOp op) {
+            SourceSpan span = op.origin().span();
+            if (span == null) {
+                throw new IllegalStateException("the host import " + op.opId()
+                    + " carries no source span: the pinned E8011 origin needs"
+                    + " the import statement's own origin (a producer defect)");
+            }
+            return luaString(op.origin().sourceId()) + ", "
+                + span.startLine() + ", " + span.startColumn();
         }
 
         /**

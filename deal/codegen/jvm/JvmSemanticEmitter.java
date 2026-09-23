@@ -1,5 +1,6 @@
 package deal.codegen.jvm;
 
+import deal.semantic.HostDeclarationSurface;
 import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
@@ -114,7 +115,7 @@ public final class JvmSemanticEmitter {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
-        return new Session(project, tables, registries, true, null).emit();
+        return new Session(project, tables, registries, true, null, null).emit();
     }
 
     /**
@@ -133,25 +134,40 @@ public final class JvmSemanticEmitter {
      * <p>The class name is used verbatim: the production arm passes the
      * {@code JvmBackend.classNameFor(entryModule.path())} derivation. The
      * entry consumes only the validated project, the per-module body
-     * tables and class-factory registries, and that class name — no AST,
-     * no {@code CheckResult}, no route input, no host declaration
-     * surface, and no extern-C generated-module input.</p>
+     * tables and class-factory registries, that class name, and the
+     * compile's host declaration surface — no AST, no {@code CheckResult},
+     * no route input, and no extern-C generated-module input. The
+     * declaration surface is the single source of the host ABI emission
+     * surface this entry emits (ISSUE-0650;
+     * {@code host-module-load-and-host-call-realization} H2 and H7's
+     * carrier set): the module-keyed load entries with the declared
+     * parameter-class projection, the per-export wrappers with the declared
+     * parameter/return cells, the {@code <C>_defaults} captures, and the
+     * synthesized {@code $DealRt} host-record and host-carrier scope.</p>
      *
-     * @param project    the validated executable closure; non-null
-     * @param tables     each module's block-membership table; non-null
-     * @param registries each module's class-factory registry; non-null
-     * @param className  the entry class name, used verbatim; non-null
+     * @param project            the validated executable closure; non-null
+     * @param tables             each module's block-membership table;
+     *                           non-null
+     * @param registries         each module's class-factory registry;
+     *                           non-null
+     * @param className          the entry class name, used verbatim; non-null
+     * @param declarationSurface the declaration surface covering every
+     *                           declaration import of the compile; non-null
      * @return the emitted production project artifact
      */
     public static EmissionResult emitProductionProject(ExecutableLoweredProject project,
                                                        Map<ModuleId, StructuredBodyTable> tables,
                                                        Map<ModuleId, ClassFactoryRegistry> registries,
-                                                       String className) {
+                                                       String className,
+                                                       HostDeclarationSurface declarationSurface) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
         Objects.requireNonNull(className, "className must not be null");
-        return new Session(project, tables, registries, false, className).emit();
+        Objects.requireNonNull(declarationSurface,
+            "declarationSurface must not be null");
+        return new Session(project, tables, registries, false, className,
+            declarationSurface).emit();
     }
 
     /**
@@ -228,6 +244,13 @@ public final class JvmSemanticEmitter {
         /** Structure ancestors are computed statically from the block tree
          *  per transfer (never a runtime-sensitive stack). */
         final String className;
+        /**
+         * The JVM host ABI emission surface of the production project
+         * session (ISSUE-0650): non-null exactly when the session is the
+         * production project entry and the closure imports a host
+         * declaration module.
+         */
+        final JvmHostAbiEmission hostAbi;
 
         Session(LoweredModuleUnit unit, StructuredBodyTable table) {
             this(unit, table, true, true, null);
@@ -239,6 +262,10 @@ public final class JvmSemanticEmitter {
             this.table = table;
             this.trace = trace;
             this.entryModule = entryModule;
+            // A single-unit session never carries the host ABI emission
+            // surface: the surface is emitted once per production project
+            // artifact, and a unit session has no declaration surface.
+            this.hostAbi = null;
             if (className != null) {
                 this.className = className;
             } else {
@@ -272,6 +299,22 @@ public final class JvmSemanticEmitter {
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
                 String className) {
+            this(project, tables, registries, trace, className, null);
+        }
+
+        /**
+         * The project-mode session of the production project entry: the
+         * combined closure plus the compile's host declaration surface
+         * (the JVM host ABI emission surface). A trace-mode or unit
+         * session carries no host surface (the host ABI emission surface
+         * is a production realization).
+         */
+        Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
+                Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
+                String className, HostDeclarationSurface hostSurface) {
+            this.hostAbi = hostSurface == null ? null
+                : new JvmHostAbiEmission(JvmHostAbiEmission.collect(
+                    project, hostSurface));
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -562,6 +605,12 @@ public final class JvmSemanticEmitter {
             for (String field : fields) {
                 out.append("  static Object ").append(field).append(";\n");
             }
+            // The host ABI surface (ISSUE-0650): the module-keyed load and
+            // binding fields, the per-module load entries, the per-export
+            // wrappers, and the emitted boundary-check seam.
+            if (hostAbi != null) {
+                hostAbi.emitClassMembers(out);
+            }
             // Function factories (every module).
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (LoweredFunction function : moduleUnit.functions().values()) {
@@ -679,6 +728,13 @@ public final class JvmSemanticEmitter {
                 }
             }
             out.append("}\n");
+            // The synthesized top-level $DealRt host-record and host-carrier
+            // scope (ISSUE-0650): the deployed host implementations compile
+            // against these classes unchanged. Emitted exactly for a
+            // production project session carrying a host import.
+            if (hostAbi != null) {
+                hostAbi.emitScope(out);
+            }
             return new EmissionResult(className, out.toString());
         }
 
@@ -4498,8 +4554,41 @@ public final class JvmSemanticEmitter {
             emitPlainSuccess(op, indent);
         }
 
+        /**
+         * {@code MODULE_IMPORT} — the import's load/initialization op
+         * (ISSUE-0650; {@code host-module-load-and-host-call-realization}
+         * H1/H2 item 1): a {@code HOST}-kind import calls its module-keyed
+         * load entry from its position in the module init walk with the
+         * import statement's origin, so the landed E8011 defects carry the
+         * import origin and a second alias of one host module binds
+         * nothing new (the entry is idempotent per module).
+         * {@code COMPILED}/{@code STDLIB} imports keep the landed no-op
+         * realization.
+         */
         private void emitModuleImport(SemanticOp op, int indent) {
+            KindPayload.ModuleImportPayload payload =
+                (KindPayload.ModuleImportPayload) op.payload();
             emitStart(op, indent);
+            if (payload.kind() == deal.semantic.ir.ModuleImportKind.HOST
+                    && hostAbi != null) {
+                // The host load is a production project realization; a
+                // unit/trace session (no host ABI surface) keeps the landed
+                // no-op arm — its host path is the landed scenario seam,
+                // which the production path never reaches.
+                SourceSpan span = op.origin().span();
+                if (span == null) {
+                    throw new IllegalStateException("the host import " + op.opId()
+                        + " carries no source span: the pinned E8011 origin"
+                        + " needs the import statement's own origin (a producer"
+                        + " defect)");
+                }
+                out.append(indent(indent))
+                    .append(JvmHostAbiEmission.loadEntry(JvmHostAbiEmission.key(
+                        payload.resolvedModule().path())))
+                    .append('(').append(javaString(op.origin().sourceId()))
+                    .append(", ").append(span.startLine()).append(", ")
+                    .append(span.startColumn()).append(");\n");
+            }
             emitPlainSuccess(op, indent);
         }
 

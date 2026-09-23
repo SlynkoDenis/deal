@@ -350,7 +350,7 @@ public class CanonicalFailureTextParityTest {
             }
 
             String lua = LuaSemanticEmitter.emitProductionProject(result.project(),
-                result.tables(), result.registries());
+                result.tables(), result.registries(), fixture.surface());
             check(lua.contains("\"" + INT32_TEMPLATE + "\""),
                 "the production LuaJIT artifact carries the pinned literal");
             check(!lua.contains(LEGACY_INT32_TEMPLATE),
@@ -365,7 +365,7 @@ public class CanonicalFailureTextParityTest {
                 "the LuaJIT artifact publishes no trace on stderr");
 
             ProcessOutcome jvmRun = runJvm(result.project(), result.tables(),
-                result.registries(), workspace.resolve("jvm"));
+                result.registries(), fixture.surface(), workspace.resolve("jvm"));
             checkEq(1, jvmRun.exitCode(),
                 "the JVM artifact exits 1: " + jvmRun.stdout() + jvmRun.stderr());
             check(jvmRun.stdout().contains("DEAL_ERROR_CODE: E8004"),
@@ -415,7 +415,7 @@ public class CanonicalFailureTextParityTest {
             }
 
             String lua = LuaSemanticEmitter.emitProductionProject(result.project(),
-                result.tables(), result.registries());
+                result.tables(), result.registries(), fixture.surface());
             check(lua.contains("unsupported type for JSON encoding: "),
                 "the production LuaJIT artifact carries the pinned rejection message");
             check(lua.contains(SharedStdlibSemantics.JSON_STRINGIFY_EXPECTED),
@@ -430,7 +430,7 @@ public class CanonicalFailureTextParityTest {
                 "the LuaJIT artifact publishes the E8001 terminal on stdout");
 
             ProcessOutcome jvmRun = runJvm(result.project(), result.tables(),
-                result.registries(), workspace.resolve("jvm"));
+                result.registries(), fixture.surface(), workspace.resolve("jvm"));
             checkEq(1, jvmRun.exitCode(),
                 "the JVM artifact exits 1: " + jvmRun.stdout() + jvmRun.stderr());
             check(jvmRun.stdout().contains("DEAL_ERROR_CODE: E8001"),
@@ -625,12 +625,13 @@ public class CanonicalFailureTextParityTest {
     private static ProcessOutcome runJvm(ExecutableLoweredProject project,
                                          Map<ModuleId, StructuredBodyTable> tables,
                                          Map<ModuleId, ClassFactoryRegistry> registries,
+                                         HostDeclarationSurface declarationSurface,
                                          Path workspace) throws Exception {
         Files.createDirectories(workspace);
         String className = JvmBackend.classNameFor(project.entryModule().path());
         JvmSemanticEmitter.EmissionResult emission =
             JvmSemanticEmitter.emitProductionProject(project, tables, registries,
-                className);
+                className, declarationSurface);
         Path source = workspace.resolve(className + ".java");
         Files.writeString(source, emission.source(), StandardCharsets.UTF_8);
         Path classes = workspace.resolve("classes");

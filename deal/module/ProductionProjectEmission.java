@@ -339,7 +339,8 @@ public final class ProductionProjectEmission {
             JvmSemanticEmitter.EmissionResult emission;
             try {
                 emission = JvmSemanticEmitter.emitProductionProject(project,
-                    lowering.tables(), lowering.registries(), className);
+                    lowering.tables(), lowering.registries(), className,
+                    declarationSurface);
             } catch (IllegalStateException emitterGap) {
                 return new Result(Outcome.FAILED,
                     List.of(sharedEmitterCoverage(project.entryModule().path(),
@@ -351,7 +352,8 @@ public final class ProductionProjectEmission {
             String source;
             try {
                 source = LuaSemanticEmitter.emitProductionProject(project,
-                    lowering.tables(), lowering.registries());
+                    lowering.tables(), lowering.registries(),
+                    declarationSurface);
             } catch (IllegalStateException emitterGap) {
                 return new Result(Outcome.FAILED,
                     List.of(sharedEmitterCoverage(project.entryModule().path(),
