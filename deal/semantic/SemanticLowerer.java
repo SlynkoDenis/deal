@@ -9860,8 +9860,7 @@ public final class SemanticLowerer {
             }
             if (call.callee() instanceof MemberAccessExpr access
                     && access.object() instanceof IdentifierExpr alias
-                    && checks.symbolTable().resolve(alias.name())
-                        instanceof Symbol.ModuleSymbol) {
+                    && isModuleSymbol(alias.name())) {
                 return lowerUserCallImport(call, slot, access, alias);
             }
             // The dynamic arm: a callee value with no statically resolvable
@@ -10821,8 +10820,7 @@ public final class SemanticLowerer {
             }
             if (call.callee() instanceof MemberAccessExpr access
                     && access.object() instanceof IdentifierExpr alias
-                    && checks.symbolTable().resolve(alias.name())
-                        instanceof Symbol.ModuleSymbol) {
+                    && isModuleSymbol(alias.name())) {
                 ImportMaterialization materialization =
                     materializeImportRead(access, alias, null);
                 if (!(materialization.descriptor() instanceof RuntimeDescriptor.Func)

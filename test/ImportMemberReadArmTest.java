@@ -157,21 +157,28 @@ import java.util.Set;
  *       function-typed read result carries zero registrations fails the
  *       closed gate with {@code R-FUNCTION-BINDING}; the unmodified unit
  *       is admitted on the typed and the text surface.</li>
- *   <li><b>The guard-seed battery (ISSUE-0660).</b> Each double of the
- *       seven guard-table rows fails closed with the exact E6005
- *       {@code CONSTRUCT_UNLOWERED} and no unit: G1 (a non-module member
- *       base on the callee path, including a local binding shadowing an
- *       import alias — the current checker scope's symbol decides), G2
- *       (an alias without a resolved import fact), G3 (a member name
- *       absent from the resolved import's declared-export map, and the
- *       same doctored fact against the real project entry whose index
- *       <em>does</em> declare the export), G4 (a doctored
- *       {@code DECLARATION}-kind fact), G5 (a STDLIB member outside the
- *       closed catalog), G6 (a STDLIB descriptor mismatch), and G7 (a
- *       class-descriptor read). The failure detail names the module and
- *       the member, no read op is emitted, and no registration exists.
- *       The G1 seed's project is also driven through the production arm:
- *       the exact E6005, nothing staged, and the prior artifact set
+ *   <li><b>The guard-seed battery (ISSUE-0660; G1 retargeted by
+ *       ISSUE-0657).</b> Each double of the guard-table rows fails closed
+ *       with no unit. G2, G3, G4, G5, G6, and G7 keep the exact E6005
+ *       {@code CONSTRUCT_UNLOWERED}, the module, and the member in the
+ *       failure detail, and emit no read op: G2 (an alias without a
+ *       resolved import fact), G3 (a member name absent from the resolved
+ *       import's declared-export map, and the same doctored fact against
+ *       the real project entry whose index <em>does</em> declare the
+ *       export), G4 (a doctored {@code DECLARATION}-kind fact), G5 (a
+ *       STDLIB member outside the closed catalog), G6 (a STDLIB
+ *       descriptor mismatch), and G7 (a class-descriptor read). G1 is
+ *       retargeted: a member callee whose base is not a module alias (a
+ *       local class-typed receiver, including one shadowing an import
+ *       alias — the current checker scope's symbol decides, never a
+ *       root-table-only fact) is a dynamic callee, never an import-member
+ *       read, so the read production is not reached and the call lowers
+ *       the landed dynamic shape; the closed gate then stops at the
+ *       pending function-typed materialization registration with E6005
+ *       {@code R-FUNCTION-BINDING} (the function-typed-value child's
+ *       clause) and no {@code EXPORT_READ} is produced for the base. The
+ *       G1 seed's project is also driven through the production arm: the
+ *       exact E6005, nothing staged, and the prior artifact set
  *       byte-identical. The combination positive control (the
  *       {@code std.console} read plus its typed-binding invocation) still
  *       lowers and validates with exactly one {@code EXPORT_READ} and
@@ -1136,9 +1143,10 @@ public class ImportMemberReadArmTest {
 
     /**
      * The G1 project seed: a class-field call — the member callee's base is
-     * a local class-typed binding, never a module alias. The callee path
-     * ({@code lowerUserCallImport}) reaches the read production with the
-     * non-module base.
+     * a local class-typed binding, never a module alias. ISSUE-0657
+     * retargets the seed: the callee takes the dynamic arm, so the read
+     * production's G1 guard is not reached and the gate stops at the
+     * pending function-typed materialization registration instead.
      */
     private static final String GUARD_G1_APP_SOURCE = """
         class Holder {
@@ -1159,7 +1167,10 @@ public class ImportMemberReadArmTest {
     /**
      * The G1 shadowing seed: the local binding carries the import alias's
      * name but a non-module type. The current checker scope's symbol decides
-     * — a root-table-only fact would wrongly produce a read.
+     * — a root-table-only fact would wrongly produce a read. ISSUE-0657: the
+     * callee takes the dynamic arm (the class-field read), so no read is
+     * produced and the gate stops at the pending materialization
+     * registration.
      */
     private static final String GUARD_G1_SHADOW_APP_SOURCE = """
         import * as probe from "host/probe"
@@ -1244,6 +1255,36 @@ public class ImportMemberReadArmTest {
             what + " names the module '" + modulePath + "': " + diagnostic);
     }
 
+    /**
+     * The retargeted G1 project-seed assertion (ISSUE-0657): a member callee
+     * whose base is not a module alias is a dynamic callee, never an
+     * import-member read, so the read production is not reached and no
+     * {@code EXPORT_READ} is produced for the base. The call lowers the
+     * landed dynamic shape and the closed gate stops at the pending
+     * function-typed materialization registration ({@code R-FUNCTION-BINDING}
+     * — the function-typed-value child's {@code DynamicFunctionValue}
+     * producer rule).
+     */
+    private static void assertProjectFailsClosedOnPendingMaterialization(
+            SemanticLowerer.ProjectLoweringResult lowered, String what) {
+        if (lowered == null) {
+            fail(what + ": the project lowering returns a result");
+            return;
+        }
+        check(lowered.hasErrors() && lowered.project() == null,
+            what + " fails closed with no project (no unit, no registration); got "
+                + (lowered.hasErrors() ? "diagnostics" : "a project"));
+        if (!lowered.hasErrors()) {
+            return;
+        }
+        CompilerDiagnostic diagnostic = lowered.diagnostics().get(0);
+        check("E6005".equals(diagnostic.code())
+                && diagnostic.message().contains("R-FUNCTION-BINDING"),
+            what + " stops at the pending function-typed materialization "
+                + "registration (R-FUNCTION-BINDING, the function-typed-value "
+                + "child's clause): " + diagnostic);
+    }
+
     /** One production-arm run of one fixture (the P9 pattern). */
     private static ProductionProjectEmission.Result emit(Fixture fixture,
             Backend backend, PublicationStager stager, boolean sourceMapExplicit)
@@ -1278,11 +1319,14 @@ public class ImportMemberReadArmTest {
         System.out.println("-- the project guard seeds: G1 on the callee path, the "
             + "fact-channel seed, and the production-arm staging assertion --");
 
-        // G1a: a local class-typed receiver's function-typed field call.
+        // G1a (retargeted by ISSUE-0657): a local class-typed receiver's
+        // function-typed field call is not an import-member read — the base
+        // is not a module alias — so the dynamic callee arm owns the shape
+        // and the read production is never reached.
         Fixture call = compileProject(Map.of("src/app.deal", GUARD_G1_APP_SOURCE),
             Map.of());
         try {
-            assertProjectFailsClosed(lower(call), "app", "h.f",
+            assertProjectFailsClosedOnPendingMaterialization(lower(call),
                 "G1a the non-module class-field callee");
 
             // The same seed through the production arm: the exact E6005, no
@@ -1303,12 +1347,10 @@ public class ImportMemberReadArmTest {
             check(result.firstDiagnostic() != null
                     && "E6005".equals(result.firstDiagnostic().code())
                     && result.firstDiagnostic().message()
-                        .contains(SemanticLowerer.CONSTRUCT_UNLOWERED),
-                "the guard-seed project reports E6005 CONSTRUCT_UNLOWERED: "
+                        .contains("R-FUNCTION-BINDING"),
+                "the guard-seed project reports E6005 R-FUNCTION-BINDING (the "
+                    + "pending materialization registration): "
                     + result.diagnostics());
-            check(result.firstDiagnostic() != null
-                    && result.firstDiagnostic().message().contains("h.f"),
-                "the guard-seed failure names the member: " + result.diagnostics());
             check(stager.stagedSet().relativePaths().isEmpty(),
                 "the guarded compile stages nothing");
             check(before.equals(snapshotTree(out)),
@@ -1318,14 +1360,18 @@ public class ImportMemberReadArmTest {
             deleteRecursively(call.root());
         }
 
-        // G1b: the local binding carries the import alias's name and a
-        // non-module type; the current checker scope's symbol decides.
+        // G1b (retargeted by ISSUE-0657): the local binding carries the
+        // import alias's name and a non-module type; the current checker
+        // scope's symbol decides (never a root-table-only fact), so the
+        // callee takes the dynamic arm — the class-field read, no
+        // EXPORT_READ for the base — and the gate stops at the pending
+        // materialization registration.
         Fixture shadow = compileProject(Map.of(
                 "src/probe.d.deal", "export function ping(): string;\n",
                 "src/app.deal", GUARD_G1_SHADOW_APP_SOURCE),
             Map.of("host/probe", "src/probe.d.deal"));
         try {
-            assertProjectFailsClosed(lower(shadow), "app", "probe.ping",
+            assertProjectFailsClosedOnPendingMaterialization(lower(shadow),
                 "G1b the shadowed non-module callee base");
         } finally {
             deleteRecursively(shadow.root());

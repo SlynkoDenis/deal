@@ -95,6 +95,13 @@ import java.util.Set;
  *       parent-rule clause — the identifier-callee arm is reached through
  *       the package-internal project walk, because the project entry
  *       discards a unit that a later rule rejects;</li>
+ *   <li>the callee-expression arm (a callee that is neither an identifier
+ *       nor an import-member access — a call result, an index/member
+ *       read): the callee expression evaluates to its own value first and
+ *       the call lowers the same dynamic shape; a class-field member read
+ *       on a non-module base never reaches the import-member read
+ *       production (no {@code EXPORT_READ} for it) and stops the closed
+ *       gate at the same pending materialization clause;</li>
  *   <li>the static call and async arms are unchanged: a statically
  *       resolvable callee keeps {@code CallCallee.Static} and its single
  *       recorded return boundary, and no dynamic shape appears;</li>
@@ -719,6 +726,74 @@ public class DynamicCallLoweringTest {
     }
 
     // =========================================================================
+    // 3b. The callee-expression arm: a member read is not an import-member
+    //     access and never reaches the read production
+    // =========================================================================
+
+    /** A class-field callee: the member read is the callee expression. */
+    private static final String MEMBER_READ_CALLEE_SOURCE = """
+        class Holder {
+          f: () => int = compute
+        }
+
+        function compute(): int {
+          return 1
+        }
+
+        export function main(): null {
+          let h: Holder = {f: compute}
+          let n: int = h.f()
+          return null
+        }
+        """;
+
+    private static void testCalleeExpressionArm() {
+        System.out.println("-- the callee-expression arm: a non-module member read "
+            + "lowers the dynamic shape, never an import-member read --");
+        Fixture fixture = fixture(MEMBER_READ_CALLEE_SOURCE, "member-read callee");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "member-read callee");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+        SemanticOp call = dynamicCall(unit);
+        check(call != null, "h.f() lowers CALL(INDIRECT) with a Dynamic callee");
+        if (call != null) {
+            KindPayload.CallPayload payload = (KindPayload.CallPayload) call.payload();
+            check(payload.mode() == CallMode.INDIRECT
+                    && payload.returnBoundaryOpId() == null
+                    && payload.dynamicReturnBoundary() != null
+                    && payload.parameterBoundaryOpIds().isEmpty(),
+                "the parameterless member-read callee records no parameter cell and "
+                    + "the three dynamic cells");
+            SemanticOp calleeValue = producerOf(unit,
+                ((KindPayload.CallCallee.Dynamic) payload.callee()).callee());
+            check(calleeValue != null && calleeValue.kind() == SemanticOpKind.FIELD_READ,
+                "the callee value is the class member read (FIELD_READ) the call "
+                    + "expression evaluated first, got "
+                    + (calleeValue == null ? "null" : calleeValue.kind()));
+        }
+        check(ofKind(unit, SemanticOpKind.EXPORT_READ).isEmpty(),
+            "the non-module base produces no EXPORT_READ: the import-member read "
+                + "production is never reached");
+
+        // The project entry's verdict: the dynamic shape is produced and the
+        // gate stops at the pending materialization registration (the
+        // function-typed-value child's clause).
+        SemanticLowerer.ProjectLoweringResult result = lower(fixture);
+        check(result.project() == null && !result.diagnostics().isEmpty()
+                && "E6005".equals(result.diagnostics().get(0).code())
+                && result.diagnostics().get(0).message()
+                    .contains("R-FUNCTION-BINDING"),
+            "the project entry stops at the pending materialization registration "
+                + "(R-FUNCTION-BINDING), so the dynamic-cell and parent rules passed: "
+                + result.diagnostics());
+    }
+
+    // =========================================================================
     // 4. The static arms are unchanged
     // =========================================================================
 
@@ -1091,6 +1166,7 @@ public class DynamicCallLoweringTest {
         testDynamicCallShape();
         testDynamicAsyncShape();
         testIdentifierCalleeArm();
+        testCalleeExpressionArm();
         testStaticArmsUnchanged();
         testDeterminism();
         testNegativeSeeds();
