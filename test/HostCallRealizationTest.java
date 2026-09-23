@@ -1818,16 +1818,36 @@ public class HostCallRealizationTest {
     // =========================================================================
 
     /**
-     * The fixtures of the admitted sync host set whose host terminals the
-     * oracle's deterministic seam can express <em>and</em> whose three
-     * consumers' trace streams agree, with the reason of every exclusion
-     * (asserted, never silently skipped). Each exclusion below is either
-     * an expression limit of the oracle's seam/value model or a
-     * divergence between the oracle's landed projections and the
-     * corpus-pinned artifact texts — never a missing host-call arm: the
-     * excluded fixtures' host calls execute on both artifacts through the
-     * same arms, and their pinned outcomes are asserted by the fixture-set
-     * drives above. See the MR body's findings for the exact evidence.
+     * The admitted fixtures excluded from the trace-drive comparison, each
+     * with the structural reason it cannot be compared event-for-event.
+     * The map is asserted (every key is a member of the admitted set and
+     * absent from the drive), so no fixture is silently skipped. The
+     * reasons are three classes, none of them a missing host-call arm —
+     * the excluded fixtures' host calls execute on both artifacts through
+     * the same arms, and their pinned outcomes and origins are asserted by
+     * the fixture-set drives above:
+     * <ul>
+     *   <li><b>The oracle's deterministic seam or closed value model
+     *       cannot express the host terminal</b>: the deployed host
+     *       invokes a crossed DEAL closure, returns a raw host function
+     *       value, returns no value, returns invalid UTF-8, or crosses a
+     *       declared bytes position (the oracle's closed boundary
+     *       projector carries no bytes cell — the bytes representation is
+     *       the sibling child's).</li>
+     *   <li><b>The failing cell is inside the loaded wrapper</b> (the
+     *       single check authority): the artifact cannot emit the return
+     *       boundary child's START — the wrapper checks the value it
+     *       received — and the oracle projects the shared closed-boundary
+     *       row where the artifacts project the corpus-pinned runtime
+     *       wrapper text. The artifact emits the boundary child's FAILURE
+     *       with the wrapper's error on both targets.</li>
+     *   <li><b>A text projection or value identity differs by
+     *       construction</b>: the parameter-cell text the oracle's closed
+     *       row projects differs from the pinned runtime text the wrapper
+     *       produces, and the H7 per-crossing array materialization
+     *       allocates its own carrier on LuaJIT (the oracle keeps the
+     *       single seam value).</li>
+     * </ul>
      */
     private static final Map<String, String> TRACE_DRIVE_EXCLUSIONS = Map.ofEntries(
         Map.entry("host-boundary-apply-function",
@@ -1856,11 +1876,12 @@ public class HostCallRealizationTest {
                 + "value is a Java String (valid UTF-16), so the invalid-encoding "
                 + "classification is not expressible (the UTF-16 surrogate row is)"),
         Map.entry("host-bad-return",
-            "the declared return cell fails inside the emitted wrapper (the single "
-                + "check authority), so the raw host value never reaches the arm: the "
-                + "oracle's return-boundary START input cannot be reproduced, and the "
-                + "oracle's HOST_SYNC_RETURN projection text differs from the "
-                + "corpus-pinned runtime text the artifacts produce"),
+            "the declared return cell fails inside the loaded wrapper (the single "
+                + "check authority): the artifact emits the boundary child's FAILURE "
+                + "with the wrapper's error but cannot emit its START (the checked "
+                + "value is the wrapper's own), and the oracle's HOST_SYNC_RETURN "
+                + "projection text differs from the corpus-pinned runtime text the "
+                + "artifacts produce"),
         Map.entry("host-prewrapped-bad", "same return-cell failure path"),
         Map.entry("host-null-return-bad", "same return-cell failure path"),
         Map.entry("host-nullable-return-bad", "same return-cell failure path"),
@@ -1871,7 +1892,9 @@ public class HostCallRealizationTest {
         Map.entry("host-rest-bad",
             "the oracle's landed HOST_PARAMETER projection text/actual (the shared "
                 + "closed-boundary row) differs from the corpus-pinned runtime text "
-                + "(\"expected array\" / actual number) the artifacts produce"),
+                + "(\"expected array\" / actual number) the artifacts produce; the "
+                + "deferred read's own events (the composite-read drive below) and "
+                + "the event prefix through them match on all three consumers"),
         Map.entry("host-nullable-function-param-bad",
             "same parameter-cell projection text (the oracle's row vs the pinned "
                 + "runtime signature-mismatch text)"),
@@ -2202,14 +2225,17 @@ public class HostCallRealizationTest {
     }
 
     /**
-     * The composite contextual read's oracle parity (the ISSUE-0651
-     * deferral): a function/array contextual read whose value carries no
-     * matching shape passes through in the oracle exactly as it does in
-     * both emitted arms, so the consuming declared cell — the host
-     * parameter cell — carries the pinned E8010 at the call origin and the
-     * read never fails. The fixture's artifacts are driven by the fixture
-     * set's production probes (the pinned call-origin outcome); this check
-     * pins the oracle's side of the same run.
+     * The composite contextual read's parity (the ISSUE-0651 deferral): a
+     * function/array contextual read whose value carries no matching shape
+     * passes through in the oracle and in both emitted arms, so the
+     * consuming declared cell — the host parameter cell — carries the
+     * pinned E8010 at the call origin and the read never fails. The
+     * trace-mode artifacts of the same run are compared event-for-event
+     * through the read's own SUCCESS event on both targets (the wrong-kind
+     * fixture's consuming cell is one of the trace-drive exclusions: the
+     * oracle projects the shared closed-boundary row there while the
+     * artifacts project the corpus-pinned runtime wrapper text, so the
+     * comparison stops where the consuming cell starts).
      */
     private static void testCompositeReadOracleDeferral() throws Exception {
         System.out.println("-- the composite contextual read defers in the oracle exactly "
@@ -2222,6 +2248,7 @@ public class HostCallRealizationTest {
                     StandardCharsets.UTF_8),
                 traceDriveSource(Files.readString(Path.of(fixture.corpusFixture()),
                     StandardCharsets.UTF_8)));
+            Path workspace = Files.createTempDirectory("host-composite-read");
             try {
                 SemanticLowerer.ProjectLoweringResult result = lower(compiled);
                 if (result.project() == null) {
@@ -2240,14 +2267,16 @@ public class HostCallRealizationTest {
                 // The read boundary's terminal is a SUCCESS (the value
                 // passed through; a failure there would have emitted a
                 // FAILURE with the read's origin).
+                long boundaryOp = compositeBoundaryOp(project);
+                long readOp = compositeReadOp(project, boundaryOp);
                 boolean readPassed = false;
                 boolean readFailed = false;
                 for (SemanticRuntimeModel.TraceEvent event : oracleRun.trace()) {
-                    if (event.op().id() == compositeBoundaryOp(project)
+                    if (event.op().id() == boundaryOp
                             && event.phase() == SemanticRuntimeModel.Phase.SUCCESS) {
                         readPassed = true;
                     }
-                    if (event.op().id() == compositeBoundaryOp(project)
+                    if (event.op().id() == boundaryOp
                             && event.phase() == SemanticRuntimeModel.Phase.FAILURE) {
                         readFailed = true;
                     }
@@ -2256,10 +2285,105 @@ public class HostCallRealizationTest {
                     + "of '" + name + "' passes the wrong-kind value through (the "
                     + "consuming declared cell carries the pinned projection); "
                     + "events=" + events);
+
+                // The read-side event prefix (the deferral's three-consumer
+                // parity): identical through the read's own SUCCESS event on
+                // both trace-mode artifacts.
+                int readSuccessIndex = -1;
+                for (int i = 0; i < oracleRun.trace().size(); i++) {
+                    SemanticRuntimeModel.TraceEvent event = oracleRun.trace().get(i);
+                    if (event.op().id() == readOp
+                            && event.phase() == SemanticRuntimeModel.Phase.SUCCESS) {
+                        readSuccessIndex = i;
+                        break;
+                    }
+                }
+                check(readSuccessIndex >= 0, "the oracle publishes the composite read's "
+                    + "SUCCESS event");
+                if (readSuccessIndex < 0) {
+                    continue;
+                }
+                java.util.List<String> oraclePrefix = new ArrayList<>();
+                for (int i = 0; i <= readSuccessIndex; i++) {
+                    oraclePrefix.add(oracleRun.trace().get(i).text());
+                }
+
+                Path luaArtifact = workspace.resolve("project.lua");
+                Files.writeString(luaArtifact, LuaSemanticEmitter.emitProject(project,
+                    result.tables(), result.registries(), compiled.surface()),
+                    StandardCharsets.UTF_8);
+                deployRuntime(workspace);
+                deployHostLua(workspace, fixture);
+                Outcome luaOutcome = runProcess(List.of("luajit",
+                    luaArtifact.toAbsolutePath().toString()), workspace);
+                checkTracePrefix(name, "luajit", oraclePrefix,
+                    decodeTrace(luaOutcome.stderr()).events());
+
+                JvmSemanticEmitter.EmissionResult jvmEmission =
+                    JvmSemanticEmitter.emitProject(project, result.tables(),
+                        result.registries(), compiled.surface());
+                String jvmClass = jvmEmission.className();
+                String hostClass = JvmBackend.classNameFor(fixture.hostSpecifier());
+                Files.writeString(workspace.resolve(jvmClass + ".java"),
+                    jvmEmission.source(), StandardCharsets.UTF_8);
+                Files.writeString(workspace.resolve(hostClass + ".java"),
+                    Files.readString(Path.of(fixture.corpusHost() + ".java")),
+                    StandardCharsets.UTF_8);
+                Path classes = workspace.resolve("classes");
+                Files.createDirectories(classes);
+                String classpath = absoluteClasspath();
+                Outcome javacRun = runProcess(List.of("javac", "--release", "25",
+                    "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                    jvmClass + ".java", hostClass + ".java"), workspace);
+                check(javacRun.exitCode() == 0, "the composite-read fixture '" + name
+                    + "' compiles under javac: " + javacRun.stdout() + javacRun.stderr());
+                if (javacRun.exitCode() == 0) {
+                    Outcome jvmOutcome = runProcess(List.of("java", "-cp",
+                        classpath + java.io.File.pathSeparator + classes, jvmClass),
+                        workspace);
+                    checkTracePrefix(name, "java", oraclePrefix,
+                        decodeTrace(jvmOutcome.stderr()).events());
+                }
             } finally {
+                deleteRecursively(workspace);
                 deleteRecursively(compiled.root());
             }
         }
+    }
+
+    /** Asserts one artifact's event stream begins with the oracle's prefix. */
+    private static void checkTracePrefix(String name, String target,
+            List<String> expectedPrefix, List<String> actual) {
+        for (int i = 0; i < expectedPrefix.size(); i++) {
+            if (i >= actual.size() || !expectedPrefix.get(i).equals(actual.get(i))) {
+                failed++;
+                System.err.println("FAIL: " + name + " (" + target
+                    + ") trace prefix event " + i + " oracle ["
+                    + expectedPrefix.get(i) + "] vs artifact ["
+                    + (i < actual.size() ? actual.get(i) : "<absent>") + "]");
+                return;
+            }
+        }
+        passed++;
+    }
+
+    /** The read op parenting the one composite contextual-read boundary child. */
+    private static long compositeReadOp(ExecutableLoweredProject project,
+            long boundaryOpId) {
+        LoweredModuleUnit unit = project.modules().get(project.entryModule());
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.MEMBER_READ
+                    || op.kind() == SemanticOpKind.OPTIONAL_READ) {
+                for (SemanticOp candidate : unit.ops()) {
+                    if (candidate.opId().id() == boundaryOpId
+                            && op.opId().equals(candidate.origin().parentOpId())) {
+                        return op.opId().id();
+                    }
+                }
+            }
+        }
+        throw new IllegalStateException("the composite read from boundary "
+            + boundaryOpId + " is missing");
     }
 
     /** The op id of the one composite contextual-read boundary child of the entry. */

@@ -1391,6 +1391,23 @@ public final class LuaSemanticEmitter {
             return result;
         }
 
+        /**
+         * A result SUCCESS event atomized by the value's own kind (the
+         * deferred composite read: the pass-through admits a value whose
+         * runtime variant need not match the read's internal result kind,
+         * and the oracle's publish atomizes the value, never the kind).
+         */
+        private void emitResultSuccessAtom(SemanticOp op, String valueExpr) {
+            RuntimeDescriptor resultDescriptor = (RuntimeDescriptor) op.resultType();
+            out.append("__ev(").append(luaString(opKey(op.opId())))
+                .append(", \"SUCCESS\", ").append(luaString(op.kind().name()))
+                .append(", ").append(luaString(op.contract().canonicalDigest()))
+                .append(", ").append(luaString(parentKey(op.origin().parentOpId())))
+                .append(", {}, __rawArgAtom(")
+                .append(luaString(staticKind(resultDescriptor))).append(", ")
+                .append(valueExpr).append("), nil)\n");
+        }
+
         /** Emits the transfer closures of the ancestors down to (and including)
          *  the target loop; stops at an enclosing TRY_CATCH when requested
          *  (its dispatch closes it). */
@@ -1648,15 +1665,19 @@ public final class LuaSemanticEmitter {
                     // The deferred composite read's SUCCESS atom renders
                     // the value's own kind (the pass-through left a
                     // possibly wrong-kind value in place; the oracle's
-                    // atomOf uses the value's own kind too).
+                    // atomOf uses the value's own kind too), and the op's
+                    // own result SUCCESS renders the same value-aware atom
+                    // (the read's internal result kind is not the value).
                     emitBoundarySuccessAtom(boundary, "__rawArgAtom("
                         + luaString(staticKind(boundaryPayload.descriptor()))
                         + ", " + target + ")");
+                    emitResultSuccessAtom(op, target);
                 } else {
                     emitBoundarySuccess(boundary, target,
                         boundaryPayload.descriptor());
+                    emitResultSuccess(op, target,
+                        (RuntimeDescriptor) op.resultType());
                 }
-                emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
                 return;
             }
             // The OPTIONAL_READ envelope shape: the raw read publishes the
@@ -1778,12 +1799,18 @@ public final class LuaSemanticEmitter {
                     emitBoundarySuccessAtom(boundary, "__rawArgAtom("
                         + luaString(staticKind(boundaryPayload.descriptor()))
                         + ", " + target + ")");
+                    // The op's own result SUCCESS renders the value-aware
+                    // atom too (the oracle's publish atomizes the value).
+                    emitResultSuccessAtom(op, target);
                 } else {
                     emitBoundarySuccess(boundary, target,
                         boundaryPayload.descriptor());
+                    emitResultSuccess(op, target,
+                        (RuntimeDescriptor) op.resultType());
                 }
+            } else {
+                emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
             }
-            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
         }
 
         /** Whether one boundary descriptor is a function type (nullable unwrapped). */
@@ -2831,6 +2858,19 @@ public final class LuaSemanticEmitter {
                     .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
                 index++;
             }
+            // The declared return cell: the single HOST_TO_DEAL child of
+            // the call, run at the call origin (the loaded wrapper already
+            // runs its own return rule; the cell re-projects the pinned
+            // text and keeps the boundary child's event pair exact). The
+            // child is resolved before the invocation, so the wrapper's
+            // own return-cell failure (raised inside the loaded wrapper)
+            // still carries the boundary child's FAILURE event — the same
+            // pair the JVM arm emits on its wrapper-error path.
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            String declaredReturn = returnBoundary == null ? null
+                : ((KindPayload.BoundaryPayload) returnBoundary.payload())
+                    .descriptor().canonicalSpecText();
             // The converged host-boundary call shape: the trailing literal
             // span triplet is how a boundary error reports the DEAL call
             // site byte-exact.
@@ -2842,18 +2882,21 @@ public final class LuaSemanticEmitter {
             out.append("if not __okT then\n");
             out.append("  __resT = __hostError(__resT, ")
                 .append(luaString(originOf(op))).append(")\n");
+            if (returnBoundary != null) {
+                // The loaded wrapper runs the declared return rule itself,
+                // so its return-cell failure surfaces inside the pcall:
+                // the boundary child's FAILURE event carries the wrapper's
+                // error, exactly the JVM arm's wrapper-error path.
+                out.append("  if type(__resT) == \"table\" and __resT.code == \"E8010\""
+                    + " and type(__resT.m) == \"string\" and string.find(__resT.m,"
+                    + " \"return value 1 type mismatch\", 1, true) == 1 then\n");
+                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                    "__errtext(__resT)");
+                out.append("  end\n");
+            }
             emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
             out.append("  error(__resT, 0)\n");
             out.append("end\n");
-            // The declared return cell: the single HOST_TO_DEAL child of
-            // the call, run at the call origin (the loaded wrapper already
-            // runs its own return rule; the cell re-projects the pinned
-            // text and keeps the boundary child's event pair exact).
-            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
-                ? null : opsById.get(payload.returnBoundaryOpId());
-            String declaredReturn = returnBoundary == null ? null
-                : ((KindPayload.BoundaryPayload) returnBoundary.payload())
-                    .descriptor().canonicalSpecText();
             if (returnBoundary != null) {
                 // The boundary events' atoms are the DEAL-null-aware host
                 // atom (the deployed runtime's null sentinel is the
