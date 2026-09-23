@@ -108,6 +108,13 @@ import java.util.Set;
  *       the scalar declared return is reconciled with the production
  *       carrier, the host-returned array crosses back into the production
  *       array, and the void callback wrapper is never assigned.</li>
+ *   <li><b>The bridge's carrier resolution.</b> A declared function-typed
+ *       host position is crossed by a production
+ *       {@code JvmRuntime.AdapterValue} (a checker-valid arity extension
+ *       over a DEAL body), whose host-invoked bridge must run the D15
+ *       protocol instead of the adapter's throwing stub, and by a plain
+ *       DEAL-body carrier whose host-invoked error snapshot must carry the
+ *       closure's own frame; the same fixture drives both targets.</li>
  * </ol>
  */
 public class HostCallRealizationTest {
@@ -1396,6 +1403,291 @@ public class HostCallRealizationTest {
     }
 
     // =========================================================================
+    // 7. The adapter carrier and the carrier frame push through the bridge
+    // =========================================================================
+
+    /**
+     * The adapter-crossing drive: the declared function-typed host
+     * positions are crossed by a production {@code JvmRuntime.AdapterValue}
+     * (a checker-valid arity extension over a DEAL body) and by a plain
+     * DEAL-body carrier whose body raises, so the bridge's carrier
+     * resolution (the D15 protocol for an adapter, the carried function id
+     * pushed around a plain carrier) is exercised by the real toolchain on
+     * both targets.
+     */
+    private static final String ADAPTER_DECLARATION = """
+        export function apply2(f: (x: int, y: int) => int, v: int): int;
+        export function frames(f: (x: int) => int, v: int): int;
+        export function visit(f: (x: int) => null, v: int): int;
+        """;
+
+    private static final String ADAPTER_SOURCE = """
+        import * as host from "host/adapter_probe"
+
+        function one(x: int): int {
+          return x + 1;
+        }
+
+        function boom(x: int): int {
+          throw { code: "TEST_FAIL", message: "boom" };
+        }
+
+        function noop(x: int): null {
+          return null;
+        }
+
+        export function test_adapter_crossing(): int {
+          let f: (x: int, y: int) => int = one;
+          let applied: int = host.apply2(f, 41);
+          if (applied !== 42) {
+            throw { code: "TEST_FAIL", message: "adapter crossing result" };
+          }
+          return applied;
+        }
+
+        export function test_carrier_frames(): int {
+          return host.frames(boom, 1);
+        }
+
+        export function test_null_return_bridge(): int {
+          return host.visit(noop, 7);
+        }
+
+        export function main(): null {
+          return null;
+        }
+        """;
+
+    private static final String ADAPTER_HOST_JAVA = """
+        final class HostAdapter_probe {
+          static final java.util.List<java.lang.String> OBSERVED =
+              new java.util.ArrayList<>();
+
+          public static Object apply2($DealRt.Fn2_I_I_R_I f, int v) {
+            OBSERVED.add("adapter:" + f.getClass().getName());
+            return Integer.valueOf(f.invoke(v, 1000));
+          }
+
+          public static Object frames($DealRt.Fn1_I_R_I f, int v) {
+            OBSERVED.add("frames:" + f.getClass().getName());
+            return Integer.valueOf(f.invoke(v));
+          }
+
+          public static Object visit($DealRt.Fn1_I_R_V f, int v) {
+            OBSERVED.add("void:" + f.getClass().getName());
+            f.invoke(v);
+            return Integer.valueOf(v + 1);
+          }
+        }
+        """;
+
+    private static final String ADAPTER_HOST_LUA = """
+        return {
+          apply2 = function(f, v)
+            return f(v, 1000)
+          end,
+          frames = function(f, v)
+            return f(v)
+          end,
+          visit = function(f, v)
+            f(v)
+            return v + 1
+          end,
+        }
+        """;
+
+    private static void testAdapterCarrierCrossing() throws Exception {
+        System.out.println("-- the adapter carrier crossing and the carrier frame "
+            + "push through the declared bridge --");
+        Fixture compiled = compileSource("host-adapter", "adapter_probe",
+            ADAPTER_DECLARATION, ADAPTER_SOURCE);
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(compiled);
+            if (result.project() == null) {
+                fail("the adapter crossing fixture lowers: " + result.diagnostics());
+                return;
+            }
+            ExecutableLoweredProject project = result.project();
+            String className = JvmBackend.classNameFor(project.entryModule().path());
+            JvmSemanticEmitter.EmissionResult emission =
+                JvmSemanticEmitter.emitProductionProject(project, result.tables(),
+                    result.registries(), className, compiled.surface());
+            check(emission.source().contains(
+                    "if (this.$carrier instanceof JvmRuntime.AdapterValue __a)"),
+                "the emitted bridge resolves an adapter carrier through the D15"
+                    + " protocol");
+            check(emission.source().contains(
+                    "JvmRuntime.invokeAdapter(__a, \"-\", new java.lang.Object[]{"),
+                "the emitted bridge runs JvmRuntime.invokeAdapter on an adapter"
+                    + " carrier");
+            check(emission.source().contains(
+                    "if (__pushed) JvmRuntime.pushFrame(this.$carrier.fid);"),
+                "the emitted bridge pushes the carried function id around a plain"
+                    + " carrier invocation");
+            check(emission.source().contains(
+                    "if (__pushed) JvmRuntime.popFrame();"),
+                "the emitted bridge pops the pushed frame on every path");
+            Path workspace = Files.createTempDirectory("host-call-adapter");
+            try {
+                Files.writeString(workspace.resolve(className + ".java"),
+                    emission.source(), StandardCharsets.UTF_8);
+                Files.writeString(workspace.resolve("HostAdapter_probe.java"),
+                    ADAPTER_HOST_JAVA, StandardCharsets.UTF_8);
+                Files.writeString(workspace.resolve("AdapterProbe.java"),
+                    adapterProbe(className, compiled.entryPath()), StandardCharsets.UTF_8);
+                Path classes = workspace.resolve("classes");
+                Files.createDirectories(classes);
+                String classpath = absoluteClasspath();
+                Outcome javacRun = runProcess(List.of("javac", "--release", "25",
+                    "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                    className + ".java", "HostAdapter_probe.java", "AdapterProbe.java"),
+                    workspace);
+                check(javacRun.exitCode() == 0,
+                    "the adapter crossing artifact compiles with the deployed host: "
+                        + javacRun.stdout() + javacRun.stderr());
+                if (javacRun.exitCode() == 0) {
+                    Outcome outcome = runProcess(List.of("java", "-cp",
+                        classpath + java.io.File.pathSeparator + classes, "AdapterProbe"),
+                        workspace);
+                    check(outcome.exitCode() == 0 && outcome.value().contains("OK"),
+                        "the adapter crossing drive runs to completion: "
+                            + escaped(outcome.value()) + " stderr="
+                            + escaped(outcome.stderr()));
+                    check(outcome.value().contains("ADAPTER:42"),
+                        "the host-invoked bridge ran the adapter's D15 protocol"
+                            + " (the source body with the leading argument): "
+                            + escaped(outcome.value()));
+                    check(outcome.value().contains(
+                            "OBSERVED:adapter:$DealRt$__Bridge$Fn2_I_I_R_I"),
+                        "the host received the declared two-parameter bridge: "
+                            + escaped(outcome.value()));
+                    check(outcome.value().contains("FRAMES:")
+                            && !outcome.value().contains("FRAMES:-"),
+                        "a DEAL body the host invoked through the bridge carries its"
+                            + " own frame: " + escaped(outcome.value()));
+                    check(outcome.value().contains(
+                            "OBSERVED:void:$DealRt$__Bridge$Fn1_I_R_V"),
+                        "the host received the declared null-return bridge: "
+                            + escaped(outcome.value()));
+                    check(outcome.value().contains("NULLRET:8"),
+                        "the declared null-return bridge compiles and runs its"
+                            + " carrier: " + escaped(outcome.value()));
+                }
+            } finally {
+                deleteRecursively(workspace);
+            }
+            adapterLuaDrive(compiled);
+        } finally {
+            deleteRecursively(compiled.root());
+        }
+    }
+
+    /** The same crossing under real luajit (the shared carrier in both directions). */
+    private static void adapterLuaDrive(Fixture compiled) throws Exception {
+        SemanticLowerer.ProjectLoweringResult result = lower(compiled);
+        if (result.project() == null) {
+            fail("the adapter crossing fixture lowers for LuaJIT: "
+                + result.diagnostics());
+            return;
+        }
+        Path workspace = Files.createTempDirectory("host-call-adapter-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
+                result.project(), result.tables(), result.registries(),
+                compiled.surface()), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path host = workspace.resolve("host/adapter_probe.lua");
+            Files.createDirectories(host.getParent());
+            Files.writeString(host, ADAPTER_HOST_LUA, StandardCharsets.UTF_8);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, adapterLuaDriver(artifact, compiled.entryPath()),
+                StandardCharsets.UTF_8);
+            Outcome outcome = runLua(probe, workspace);
+            check(outcome.exitCode() == 0 && outcome.value().contains("OK"),
+                "the LuaJIT adapter crossing drive runs to completion: "
+                    + escaped(outcome.value()) + " stderr="
+                    + escaped(outcome.stderr()));
+            check(outcome.value().contains("ADAPTER:42"),
+                "the LuaJIT bridge runs the adapter carrier through the D15"
+                    + " protocol: " + escaped(outcome.value()));
+            check(outcome.value().contains("ERR:TEST_FAIL|boom"),
+                "the LuaJIT bridge runs the plain carrier and its DEAL error"
+                    + " propagates unchanged: " + escaped(outcome.value()));
+            check(outcome.value().contains("NULLRET:8"),
+                "the LuaJIT null-return bridge runs its carrier: "
+                    + escaped(outcome.value()));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The JVM probe of the adapter crossing: the two exports and the observed bridge. */
+    private static String adapterProbe(String className, String entryPath) {
+        return """
+            final class AdapterProbe {
+              public static void main(String[] args) {
+                try {
+                  %s.dealMain();
+                } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                  System.out.println("ERR:" + error.code + "|" + error.msg + "|"
+                      + error.origin);
+                  return;
+                }
+                deal.codegen.jvm.JvmRuntime.Table surface =
+                    %s.exportSurface(%s);
+                java.lang.Object applied = invoke(surface, "test_adapter_crossing");
+                System.out.println("ADAPTER:" + applied);
+                try {
+                  invoke(surface, "test_carrier_frames");
+                  System.out.println("FRAMES:none");
+                } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                  System.out.println("FRAMES:" + error.frames);
+                }
+                java.lang.Object visited = invoke(surface, "test_null_return_bridge");
+                System.out.println("NULLRET:" + visited);
+                for (java.lang.String observed : HostAdapter_probe.OBSERVED) {
+                  System.out.println("OBSERVED:" + observed);
+                }
+                System.out.println("OK");
+              }
+
+              private static java.lang.Object invoke(
+                  deal.codegen.jvm.JvmRuntime.Table surface, java.lang.String name) {
+                return ((deal.codegen.jvm.JvmRuntime.FunctionValue) surface.read(name))
+                    .fn.invoke(new java.lang.Object[]{ });
+              }
+            }
+            """.formatted(className, className, quoted(entryPath));
+    }
+
+    /** The LuaJIT probe of the adapter crossing. */
+    private static String adapterLuaDriver(Path artifact, String entryPath) {
+        return """
+            local function emitError(e)
+              if type(e) == "table" and (e.__d or e.code ~= nil) then
+                print("ERR:" .. tostring(e.code) .. "|" .. tostring(e.m or e.message))
+                return
+              end
+              print("ERR:E9999|" .. tostring(e))
+            end
+            dofile("%s")
+            local ok, err = __dealMain()
+            if not ok then emitError(err) os.exit(0) end
+            local surface = __exportSurfaces["%s"]
+            local ok1, applied = pcall(surface["test_adapter_crossing"].f)
+            if not ok1 then emitError(applied) os.exit(0) end
+            print("ADAPTER:" .. tostring(applied))
+            local ok2, frames = pcall(surface["test_carrier_frames"].f)
+            if ok2 then print("FRAMES:none") else emitError(frames) end
+            local ok3, visited = pcall(surface["test_null_return_bridge"].f)
+            if not ok3 then emitError(visited) os.exit(0) end
+            print("NULLRET:" .. tostring(visited))
+            print("OK")
+            """.formatted(artifact.toAbsolutePath().toString(), entryPath);
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -1528,6 +1820,7 @@ public class HostCallRealizationTest {
         testJvmFixtureSet();
         testTwoAliasCall();
         testJvmCrossingProjection();
+        testAdapterCarrierCrossing();
         testFailClosedSeeds();
         testJvmHostFunctionValueCall();
         testLuaHostFunctionValueCall();

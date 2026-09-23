@@ -1442,6 +1442,13 @@ final class JvmHostAbiEmission {
         // host-facing wrapper class over one production function carrier —
         // its typed invoke runs the carrier (the DEAL body's own frames and
         // return cell) and applies the declared return cell's projection.
+        // The carrier is resolved the way JvmRuntime.invokeAdapter resolves
+        // its source: a production JvmRuntime.AdapterValue runs the D15
+        // protocol (JvmRuntime.invokeAdapter resolves the source per the
+        // capture mode, runs the source-signature check, and pushes the
+        // source body's frame); every other carrier runs its own function id
+        // pushed around the invocation, so a host-invoked DEAL body's error
+        // snapshot carries the closure's own frame.
         out.append("  static final class __Bridge$").append(shapeId)
             .append(" extends ").append(shapeId).append(" {\n");
         out.append("    final JvmRuntime.FunctionValue $carrier;\n");
@@ -1464,16 +1471,29 @@ final class JvmHostAbiEmission {
             boxed.append(boxedParameter(func.paramTypes().get(i), "p" + i));
         }
         Type bridgedReturn = func.returnType();
-        if (bridgedReturn instanceof Type.Null) {
-            out.append("      this.$carrier.fn.invoke(new java.lang.Object[]{ ")
-                .append(boxed).append(" });\n");
-            out.append("    }\n");
-        } else {
-            out.append("      java.lang.Object __r = this.$carrier.fn.invoke("
-                + "new java.lang.Object[]{ ").append(boxed).append(" });\n");
-            out.append("      return ").append(bridgeReturn(func)).append(";\n");
-            out.append("    }\n");
+        boolean voidReturn = bridgedReturn instanceof Type.Null;
+        String args = "new java.lang.Object[]{ " + boxed + " }";
+        if (!voidReturn) {
+            out.append("      java.lang.Object __r;\n");
         }
+        out.append("      if (this.$carrier instanceof JvmRuntime.AdapterValue __a) {\n");
+        out.append("        ").append(voidReturn ? "" : "__r = ")
+            .append("JvmRuntime.invokeAdapter(__a, \"-\", ").append(args)
+            .append(");\n");
+        out.append("      } else {\n");
+        out.append("        boolean __pushed = this.$carrier.fid != null;\n");
+        out.append("        if (__pushed) JvmRuntime.pushFrame(this.$carrier.fid);\n");
+        out.append("        try {\n");
+        out.append("          ").append(voidReturn ? "" : "__r = ")
+            .append("this.$carrier.fn.invoke(").append(args).append(");\n");
+        out.append("        } finally {\n");
+        out.append("          if (__pushed) JvmRuntime.popFrame();\n");
+        out.append("        }\n");
+        out.append("      }\n");
+        if (!voidReturn) {
+            out.append("      return ").append(bridgeReturn(func)).append(";\n");
+        }
+        out.append("    }\n");
         out.append("  }\n");
     }
 
