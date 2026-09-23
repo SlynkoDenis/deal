@@ -26,6 +26,7 @@ import deal.semantic.SemanticRuntimeModel;
 import deal.semantic.SharedStdlibSemantics;
 import deal.semantic.SharedStdlibSemantics.Outcome;
 import deal.semantic.SharedStdlibSemantics.StdlibFailure;
+import deal.semantic.StdlibFunctionCatalog;
 import deal.semantic.Target;
 import deal.semantic.ir.BoundaryFailure;
 import deal.semantic.ir.CanonicalJson;
@@ -33,6 +34,7 @@ import deal.semantic.ir.ContractSnapshotCanonicalizer;
 import deal.semantic.ir.FailureContractRegistry;
 import deal.semantic.ir.FailurePolicyId;
 import deal.semantic.ir.FailurePolicyRow;
+import deal.semantic.ir.FunctionAllocationIdentity;
 import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.FunctionId;
 import deal.semantic.ir.KindPayload;
@@ -43,6 +45,7 @@ import deal.semantic.ir.OpId;
 import deal.semantic.ir.RawOp;
 import deal.semantic.ir.RawUnit;
 import deal.semantic.ir.ReleaseState;
+import deal.semantic.ir.RuntimeDescriptor;
 import deal.semantic.ir.SemanticIdAllocator;
 import deal.semantic.ir.SemanticIrValidator;
 import deal.semantic.ir.SemanticOp;
@@ -75,8 +78,11 @@ import java.util.stream.Stream;
  * derivation, the plan-time manifest arm (a checked module containing a
  * cataloged stdlib call claims {@code STDLIB_SEMANTICS} before lowering),
  * the time lock with every negative proof, and the stdlib-export
- * value-read disposition (no claim, no route rule; E6005 while the gap
- * is open; no within-run and no node-level fallback)
+ * value-read disposition (no claim, no route rule; since ISSUE-0659 the
+ * realized lowering of the read plus its typed-binding invocation is
+ * driven through the call-machine entry while a carrier session without
+ * import facts keeps failing closed — no within-run and no node-level
+ * fallback)
  * ({@code stdlib-operations-and-time-lock} D3/D8/D9, Contracts §Time
  * lock and §Stdlib-export value-read disposition, Verification 4 and 5).
  *
@@ -296,6 +302,43 @@ public class StdlibClaimingTimeLockTest {
             checked.index().interfaceIndexDigest(),
             CapabilityRegistry.releaseRegistry().capabilityRegistryHash(),
             SemanticIdAllocator.over(moduleIds));
+    }
+
+    /**
+     * Lowers the named subject module through the call-machine entry
+     * (ISSUE-0659's drive rule): the resolved import facts and the
+     * callee-route facts are installed, so a read and its typed-binding
+     * invocation both lower and validate. A carrier session
+     * ({@link #lowerSubject}) installs no import facts and keeps failing
+     * closed through the unresolved-alias guard.
+     */
+    private static SemanticLowerer.FullProgramE7Result lowerSubjectCallMachine(
+            CheckedProjectBuildResult checked, String modulePath) {
+        CheckedModuleInput subject = moduleOf(checked.input(), modulePath);
+        if (subject == null) {
+            fail("the checked project has no module " + modulePath);
+            return null;
+        }
+        RequirementManifestResult manifests = manifestsOf(checked, invocation());
+        if (manifests == null || manifests.hasErrors()) {
+            return null;
+        }
+        SemanticRequirementManifest manifest = manifestOf(manifests, subject.moduleId());
+        if (manifest == null) {
+            fail("no manifest for module " + modulePath);
+            return null;
+        }
+        List<ModuleId> moduleIds = new ArrayList<>();
+        Map<ModuleId, ModuleRoute> routes = new LinkedHashMap<>();
+        for (CheckedModuleInput module : checked.input().modules()) {
+            moduleIds.add(module.moduleId());
+            routes.put(module.moduleId(), ModuleRoute.SHARED);
+        }
+        return SemanticLowerer.lowerModuleFullProgramE7(
+            subject, SemanticProfile.DEAL_V1_2_INT32, manifest.constructCoverage(),
+            checked.index().interfaceIndexDigest(),
+            CapabilityRegistry.releaseRegistry().capabilityRegistryHash(),
+            SemanticIdAllocator.over(moduleIds), routes, Map.of(), Set.of());
     }
 
     /** Every {@code STDLIB_CALL} op of the unit in source order. */
@@ -1191,7 +1234,7 @@ public class StdlibClaimingTimeLockTest {
     // =========================================================================
 
     static void testValueReadDisposition() throws Exception {
-        System.out.println("-- Value-read disposition: no claim, no route rule, E6005 (D3) --");
+        System.out.println("-- Value-read disposition: no claim, no route rule, realized (D3) --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-claim-valueread");
         try {
@@ -1275,20 +1318,70 @@ public class StdlibClaimingTimeLockTest {
                         + "shadow SHARED entry");
                 SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
                 check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                    "the common unit containing the read fails with E6005 (no unit)");
-                if (lowering != null && lowering.hasErrors()) {
-                    check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                            diagnostic.message().contains("module 'lib'")
-                                && diagnostic.message().contains("CONSTRUCT_UNLOWERED")
-                                && diagnostic.message().contains(
-                                    "module member access 'console.log'")),
-                        "the exact E6005 names module lib, validatorRule "
-                            + "CONSTRUCT_UNLOWERED, and the read position: "
-                            + lowering.diagnostics());
-                    check(lowering.unit() == null
-                            && lowering.diagnostics().size() >= 1,
-                        "no unit and no fallback product exist — the failure is "
-                            + "terminal for the module");
+                    "the carrier session installs no import facts and keeps failing closed "
+                        + "(E6005, no unit): " + (lowering == null ? "null"
+                            : String.valueOf(lowering.diagnostics())));
+                // The realized lowering of the same fixture through the
+                // call-machine entry (ISSUE-0659's drive rule): the read and
+                // its typed-binding invocation both lower and validate, the
+                // read produces exactly one EXPORT_READ of the cataloged
+                // export with the catalog row's declared descriptor and
+                // exactly one HostFunction registration keyed by the read's
+                // result identity; no lowerer-side invocation guard and no
+                // "no unit" state are asserted for it.
+                SemanticLowerer.FullProgramE7Result realized =
+                    lowerSubjectCallMachine(checked, "lib");
+                check(realized != null && realized.lowering() != null
+                        && !realized.lowering().hasErrors()
+                        && realized.lowering().unit() != null,
+                    "the read-plus-invocation fixture lowers to a validated unit through "
+                        + "the call machine: " + (realized == null
+                            || realized.lowering() == null ? " (null)"
+                            : String.valueOf(realized.lowering().diagnostics())));
+                if (realized != null && realized.lowering() != null
+                        && !realized.lowering().hasErrors()
+                        && realized.lowering().unit() != null) {
+                    LoweredModuleUnit unit = realized.lowering().unit();
+                    List<SemanticOp> reads = new ArrayList<>();
+                    for (SemanticOp op : unit.ops()) {
+                        if (op.kind() == SemanticOpKind.EXPORT_READ) {
+                            reads.add(op);
+                        }
+                    }
+                    check(reads.size() == 1,
+                        "the realized fixture produces exactly one EXPORT_READ; got "
+                            + reads.size());
+                    if (reads.size() == 1) {
+                        KindPayload.ExportReadPayload payload =
+                            (KindPayload.ExportReadPayload) reads.get(0).payload();
+                        StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                            .lookup("std.console", "log").orElseThrow();
+                        RuntimeDescriptor.Func rowDescriptor = StdlibFunctionCatalog
+                            .lookup("std.console", "log").orElseThrow()
+                            .declaredDescriptor();
+                        check(payload.module().path().equals("std.console")
+                                && payload.name().equals("log")
+                                && payload.descriptor().equals(rowDescriptor),
+                            "the read names std.console/log with the catalog row's "
+                                + "declared descriptor " + rowDescriptor.canonicalSpecText()
+                                + "; got " + payload.module() + "/" + payload.name() + " "
+                                + payload.descriptor().canonicalSpecText());
+                        FunctionExecutionBinding binding = unit.functionBindings().get(
+                            new FunctionAllocationIdentity(payload.value().id()));
+                        check(binding instanceof FunctionExecutionBinding.HostFunction host
+                                && host.hostModuleId().path().equals("std.console")
+                                && host.exportName().equals("log")
+                                && host.descriptor().equals(rowDescriptor),
+                            "exactly one HostFunction(std.console, log, row descriptor) "
+                                + "registration keyed by the read's result identity; got "
+                                + binding);
+                        check(unit.ops().stream().anyMatch(op ->
+                                op.kind() == SemanticOpKind.CALL
+                                    && ((KindPayload.CallPayload) op.payload()).mode()
+                                        == deal.semantic.ir.CallMode.INDIRECT),
+                            "the typed-binding invocation lowers CALL(INDIRECT), never a "
+                                + "lowerer-side guard");
+                    }
                 }
             }
 

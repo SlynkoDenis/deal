@@ -92,9 +92,16 @@ import java.util.stream.Stream;
  *   <li>Argument operand completion: a call with three side-effecting
  *       argument expressions asserts left-to-right operand production
  *       before the {@code STDLIB_CALL} START.</li>
- *   <li>Negatives: a user-module member call and a stdlib-export value
- *       read produce no {@code STDLIB_CALL} (the value read fails the
- *       common unit with E6005 while the gap is open — D3).</li>
+ *   <li>Negatives: a user-module member call produces no
+ *       {@code STDLIB_CALL}.</li>
+ *   <li>The stdlib-export value read (ISSUE-0659): the read and its
+ *       typed-binding invocation lower and validate through the
+ *       call-machine entry — exactly one {@code EXPORT_READ} of the
+ *       cataloged export carrying the row's declared descriptor and
+ *       exactly one {@code HostFunction} registration keyed by the
+ *       read's result identity, plus the {@code CALL(INDIRECT)} the
+ *       landed call machine builds over the host cell family; the read
+ *       claims no capability.</li>
  *   <li>Validator conformance: a hand-modified wrong stamped policy on a
  *       {@code STDLIB_CALL} fails validation through the text surface
  *       (R-POLICY-KIND); the unmodified unit passes both surfaces.</li>
@@ -256,6 +263,47 @@ public class StdlibCallLoweringTest {
             checked.index().interfaceIndexDigest(),
             CapabilityRegistry.releaseRegistry().capabilityRegistryHash(),
             SemanticIdAllocator.over(moduleIds));
+    }
+
+    /**
+     * Lowers the named subject module through the call-machine entry
+     * (ISSUE-0659's retargeted drive): the resolved import facts and the
+     * callee-route facts are installed, so the read and the typed-binding
+     * invocation both lower and validate. A carrier session installs no
+     * import facts and keeps failing closed through the unresolved-alias
+     * guard.
+     */
+    private static SemanticLowerer.FullProgramE7Result lowerSubjectCallMachine(
+            CheckedProjectBuildResult checked, String modulePath) {
+        CheckedModuleInput subject = moduleOf(checked.input(), modulePath);
+        if (subject == null) {
+            fail("the checked project has no module " + modulePath);
+            return null;
+        }
+        RequirementManifestResult manifests = LoweringSupport.computeManifests(invocation(),
+            checked.input(), checked.index());
+        check(manifests != null && !manifests.hasErrors(),
+            "the manifest computation is clean"
+                + (manifests == null ? " (null)" : ": " + manifests.diagnostics()));
+        if (manifests == null || manifests.hasErrors()) {
+            return null;
+        }
+        SemanticRequirementManifest manifest = manifestOf(manifests, subject.moduleId());
+        if (manifest == null) {
+            fail("no manifest for module " + modulePath);
+            return null;
+        }
+        List<ModuleId> moduleIds = new ArrayList<>();
+        Map<ModuleId, ModuleRoute> routes = new LinkedHashMap<>();
+        for (CheckedModuleInput module : checked.input().modules()) {
+            moduleIds.add(module.moduleId());
+            routes.put(module.moduleId(), ModuleRoute.SHARED);
+        }
+        return SemanticLowerer.lowerModuleFullProgramE7(subject,
+            SemanticProfile.DEAL_V1_2_INT32, manifest.constructCoverage(),
+            checked.index().interfaceIndexDigest(),
+            CapabilityRegistry.releaseRegistry().capabilityRegistryHash(),
+            SemanticIdAllocator.over(moduleIds), routes, Map.of(), Set.of());
     }
 
     // =========================================================================
@@ -811,7 +859,8 @@ public class StdlibCallLoweringTest {
     }
 
     static void testNegativeStdlibExportValueRead() throws Exception {
-        System.out.println("-- Negative: a stdlib-export value read fails the common unit (D3) --");
+        System.out.println("-- The stdlib value read realizes through the call machine "
+            + "(D3) --");
 
         Path tmp = Files.createTempDirectory("deal-stdlib-call-valueread");
         try {
@@ -850,18 +899,70 @@ public class StdlibCallLoweringTest {
                     && !manifest.capabilities().contains(SemanticCapability.STDLIB_SEMANTICS),
                 "the value-read module's manifest claims no STDLIB_SEMANTICS from the read"
                     + (manifest == null ? " (no manifest)" : ": " + manifest.capabilities()));
-            // STDLIB_CALL is the only common stdlib form: the common unit
-            // containing the read fails with E6005 while the gap is open.
-            SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
-            check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                "the stdlib-export value read fails lowering with no unit (E6005)");
-            if (lowering != null && lowering.hasErrors()) {
-                check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                        diagnostic.message().contains("module member access")),
-                    "the failure is the module member-access gap (EXPORT_READ is not "
-                        + "produced for the read), never a STDLIB_CALL: "
-                        + lowering.diagnostics());
+            // The realized lowering: the read and the typed-binding
+            // invocation both lower and validate through the call-machine
+            // entry (the resolved import facts and the callee-route facts
+            // are installed by that drive). No "no unit" state is
+            // asserted for the fixture.
+            SemanticLowerer.FullProgramE7Result result =
+                lowerSubjectCallMachine(checked, "lib");
+            check(result != null && result.lowering() != null
+                    && !result.lowering().hasErrors()
+                    && result.lowering().unit() != null,
+                "the fixture lowers to a validated unit through the call machine"
+                    + (result == null || result.lowering() == null ? " (null)"
+                        : ": " + result.lowering().diagnostics()));
+            if (result == null || result.lowering() == null
+                    || result.lowering().hasErrors() || result.lowering().unit() == null) {
+                return;
             }
+            LoweredModuleUnit unit = result.lowering().unit();
+            List<SemanticOp> reads = new ArrayList<>();
+            for (SemanticOp op : unit.ops()) {
+                if (op.kind() == SemanticOpKind.EXPORT_READ) {
+                    reads.add(op);
+                }
+            }
+            check(reads.size() == 1,
+                "exactly one EXPORT_READ is produced for the read occurrence; got "
+                    + reads.size());
+            if (reads.size() != 1) {
+                return;
+            }
+            KindPayload.ExportReadPayload payload =
+                (KindPayload.ExportReadPayload) reads.get(0).payload();
+            StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                .lookup("std.console", "log").orElseThrow();
+            RuntimeDescriptor.Func rowDescriptor = new RuntimeDescriptor.Func(
+                row.parameterDescriptors(), row.returnDescriptor());
+            check(payload.module().path().equals("std.console")
+                    && payload.name().equals("log")
+                    && payload.descriptor().equals(rowDescriptor),
+                "the read names std.console/log with the catalog row's declared descriptor "
+                    + rowDescriptor.canonicalSpecText() + "; got " + payload.module()
+                    + "/" + payload.name() + " "
+                    + payload.descriptor().canonicalSpecText());
+            FunctionExecutionBinding binding = unit.functionBindings().get(
+                new FunctionAllocationIdentity(payload.value().id()));
+            check(binding instanceof FunctionExecutionBinding.HostFunction host
+                    && host.hostModuleId().path().equals("std.console")
+                    && host.exportName().equals("log")
+                    && host.descriptor().equals(rowDescriptor),
+                "exactly one HostFunction(std.console, log, row descriptor) registration "
+                    + "keyed by the read's result identity; got " + binding);
+            // The typed-binding invocation of the read value lowers through
+            // the landed call machine: CALL(INDIRECT) with the Static host
+            // binding and the host cell family, admitted by the validator
+            // (this drive validated the unit above).
+            boolean indirect = unit.ops().stream().anyMatch(op ->
+                op.kind() == SemanticOpKind.CALL
+                    && ((KindPayload.CallPayload) op.payload()).callee()
+                        instanceof KindPayload.CallCallee.Static
+                    && ((KindPayload.CallPayload) op.payload()).mode()
+                        == deal.semantic.ir.CallMode.INDIRECT);
+            check(indirect,
+                "the read value's invocation lowers CALL(INDIRECT) with the Static "
+                    + "binding");
         } finally {
             deleteRecursively(tmp);
         }

@@ -10295,22 +10295,71 @@ public final class SemanticLowerer {
             return result;
         }
 
-        /** One imported host/external export materialization (read + registration). */
+        /**
+         * One imported export materialization (the read and, for a
+         * function descriptor, its registration): the produced read value,
+         * the read's descriptor, and the registered binding
+         * ({@code null} for a non-function descriptor — a non-function
+         * read registers nothing).
+         */
         private record ImportMaterialization(FunctionExecutionBinding binding,
-                                             RuntimeDescriptor.Func descriptor) {
+                                             RuntimeDescriptor descriptor,
+                                             ValueId value) {
         }
 
         /**
-         * The import-member callee arm: {@code alias.export(args)} on a
-         * host or compiled import. The checked export read materializes
-         * the function value ({@code EXPORT_READ} + exactly one
-         * {@code FunctionExecutionBinding} registration through the
-         * registry seam — {@code HostFunction} for host imports,
-         * {@code ExternalFunction} with the route-derived execution
-         * owner for compiled imports).
+         * The one import-member read production (R1): the callee arms
+         * ({@code alias.export(args)} on a host, compiled, or cataloged
+         * stdlib import) and the value-position module-symbol arm of
+         * {@link #lowerMemberAccess} both call this method, so one read is
+         * produced per source occurrence and no later pass re-produces it.
+         *
+         * <p>The read is exactly one {@code EXPORT_READ} of the resolved
+         * export — payload {@code {resolvedModule, exportName, descriptor}}
+         * — with a {@code USER} origin at the access span and
+         * {@code parentOpId} = the position's current parent. It publishes
+         * the position's pre-allocated slot when the position threads one
+         * ({@code slot != null ? slot : <fresh value>}), and the produced
+         * read value is returned together with the descriptor and the
+         * binding. For a function descriptor the read registers exactly
+         * one {@code FunctionExecutionBinding} through the closed registry
+         * seam — {@code HostFunction(resolvedModule, exportName, descriptor)}
+         * for a HOST-kind import and for a declared function export of a
+         * STDLIB-kind import, {@code ExternalFunction(resolvedModule,
+         * exportName, descriptor, owner)} with the route-derived execution
+         * owner for an IMPLEMENTATION-kind import — keyed by the published
+         * cell. A non-function descriptor produces the read with no
+         * registration.</p>
+         *
+         * <p><b>The STDLIB branch (R2).</b> The closed
+         * {@link StdlibFunctionCatalog} is the STDLIB kind's resolution
+         * authority: {@code lookup(resolvedModulePath, field)}; an absent
+         * row fails closed, and the row's declared descriptor is the
+         * read's own — the checked descriptor must equal it, else the read
+         * fails closed and no registration happens.</p>
+         *
+         * <p>Fail-closed guards (each E6005
+         * {@code CONSTRUCT_UNLOWERED}, no unit): a member base that is not
+         * a module alias, an alias without a resolved import fact, an
+         * import kind outside the closed set, a STDLIB member outside the
+         * closed catalog, and a STDLIB descriptor mismatch. A missing
+         * callee-route record for an IMPLEMENTATION-kind read is the same
+         * producer defect: the realized drive installs the resolved import
+         * facts and the route facts (the call-machine and project
+         * entries), and a route-less carrier session fails closed.</p>
+         *
+         * @param access the checked import-member access; non-null
+         * @param alias  the access's base identifier (the import alias);
+         *               non-null
+         * @param slot   the position's pre-allocated result slot, or
+         *               {@code null} to allocate a fresh value
+         * @return the produced read value with its descriptor and, for a
+         *         function descriptor, the registered binding
+         * @throws ConstructUnlowered on any fail-closed guard above
          */
         private ImportMaterialization materializeImportRead(MemberAccessExpr access,
-                                                            IdentifierExpr alias) {
+                                                            IdentifierExpr alias,
+                                                            ValueId slot) {
             if (!(checks.symbolTable().resolve(alias.name()) instanceof Symbol.ModuleSymbol)) {
                 throw new ConstructUnlowered("callee member base '" + alias.name()
                     + "' is not a module import (module member reads are EXPORT_READ "
@@ -10322,14 +10371,60 @@ public final class SemanticLowerer {
                     + "' without a resolved import fact (a missing checker fact is a "
                     + "producer defect)");
             }
-            if (importFact.kind() == ExternalModuleKind.STDLIB) {
-                throw new ConstructUnlowered("stdlib member call not recognized by the "
-                    + "closed stdlib catalog (the STDLIB_CALL arm owns cataloged stdlib "
-                    + "ids; unrecognized stdlib members are not calls)");
+            RuntimeDescriptor checked = ContainerPayloadDescriptors
+                .resultDescriptorOf(checkedType(access));
+            RuntimeDescriptor descriptor;
+            switch (importFact.kind()) {
+                case HOST, IMPLEMENTATION -> descriptor = checked;
+                case STDLIB -> {
+                    StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                        .lookup(importFact.resolvedModuleId().path(), access.field())
+                        .orElseThrow(() -> new ConstructUnlowered("stdlib member '"
+                            + alias.name() + "." + access.field() + "' of module '"
+                            + importFact.resolvedModuleId().path()
+                            + "' is outside the closed stdlib catalog (the catalog is "
+                            + "the STDLIB kind's resolution authority; an unrecognized "
+                            + "stdlib member is never a call)"));
+                    descriptor = row.declaredDescriptor();
+                    if (!descriptor.equals(checked)) {
+                        throw new ConstructUnlowered("stdlib member '" + alias.name()
+                            + "." + access.field() + "' has checked descriptor "
+                            + checked.canonicalSpecText() + " but the closed stdlib "
+                            + "catalog row for '" + importFact.resolvedModuleId().path()
+                            + "' declares " + descriptor.canonicalSpecText()
+                            + " (the row's declared descriptor is the EXPORT_READ's own)");
+                    }
+                }
+                default -> throw new ConstructUnlowered("import kind "
+                    + importFact.kind() + " has no import-member read arm (the closed "
+                    + "set is IMPLEMENTATION/STDLIB/HOST)");
             }
-            RuntimeDescriptor.Func descriptor = (RuntimeDescriptor.Func)
-                ContainerPayloadDescriptors.resultDescriptorOf(checkedType(access));
-            ValueId exportValue = ids.nextValueId(module, nextOrdinal++, 0);
+            FunctionBindingRegistry.FunctionValueImportFacts facts = null;
+            if (descriptor instanceof RuntimeDescriptor.Func functionDescriptor) {
+                facts = switch (importFact.kind()) {
+                    case HOST, STDLIB -> new FunctionBindingRegistry
+                        .FunctionValueImportFacts(importFact.resolvedModuleId(), null,
+                            access.field(), functionDescriptor);
+                    case IMPLEMENTATION -> {
+                        if (!calleeRoutes.containsKey(importFact.resolvedModuleId())) {
+                            throw new ConstructUnlowered("compiled import member read '"
+                                + alias.name() + "." + access.field()
+                                + "' has no callee-route record for module '"
+                                + importFact.resolvedModuleId().path()
+                                + "' (the realized drive installs the session's "
+                                + "resolved import facts and callee-route facts; a "
+                                + "route-less carrier session fails closed)");
+                        }
+                        yield new FunctionBindingRegistry.FunctionValueImportFacts(null,
+                            importFact.resolvedModuleId(), access.field(),
+                            functionDescriptor);
+                    }
+                    default -> throw new ConstructUnlowered("import kind "
+                        + importFact.kind() + " has no import-member registration arm");
+                };
+            }
+            ValueId exportValue = slot != null ? slot
+                : ids.nextValueId(module, nextOrdinal++, 0);
             AnchorId exportAnchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             OpId exportOpId = ids.nextOpId(module, nextOrdinal++, 0);
             SourceOrigin exportOrigin = new SourceOrigin(sourceId,
@@ -10341,14 +10436,11 @@ public final class SemanticLowerer {
             emit(buildOp(exportOpId, SemanticOpKind.EXPORT_READ, exportPayload, exportValue,
                 descriptor, List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE,
                 exportOrigin));
-            FunctionBindingRegistry.FunctionValueImportFacts facts = switch (importFact.kind()) {
-                case HOST -> new FunctionBindingRegistry.FunctionValueImportFacts(
-                    importFact.resolvedModuleId(), null, access.field(), descriptor);
-                case IMPLEMENTATION -> new FunctionBindingRegistry.FunctionValueImportFacts(
-                    null, importFact.resolvedModuleId(), access.field(), descriptor);
-                default -> throw new ConstructUnlowered("import kind "
-                    + importFact.kind() + " is not a host/compiled call source");
-            };
+            if (facts == null) {
+                // A non-function descriptor produces the read with no
+                // registration (R3).
+                return new ImportMaterialization(null, descriptor, exportValue);
+            }
             registry.registerHostOrExternalImportWithRoutes(
                 new FunctionAllocationIdentity(exportValue.id()), exportPayload, facts,
                 calleeRoutes);
@@ -10359,15 +10451,20 @@ public final class SemanticLowerer {
                     + alias.name() + "." + access.field()
                     + "' registered no binding (producer defect)");
             }
-            return new ImportMaterialization(binding, descriptor);
+            return new ImportMaterialization(binding, descriptor, exportValue);
         }
 
         /** The import-member sync call arm (CALL(HOST)/CALL(EXTERNAL)). */
         private ValueId lowerUserCallImport(CallExpr call, ValueId slot,
                                             MemberAccessExpr access, IdentifierExpr alias) {
-            ImportMaterialization materialization = materializeImportRead(access, alias);
-            return lowerImportCall(call, slot, materialization.binding(),
-                materialization.descriptor());
+            ImportMaterialization materialization = materializeImportRead(access, alias, null);
+            if (!(materialization.descriptor() instanceof RuntimeDescriptor.Func descriptor)
+                    || materialization.binding() == null) {
+                throw new ConstructUnlowered("import call callee '" + alias.name()
+                    + "." + access.field() + "' is not a function-typed export (the "
+                    + "checker admits function-typed call callees only)");
+            }
+            return lowerImportCall(call, slot, materialization.binding(), descriptor);
         }
 
         /**
@@ -10509,7 +10606,14 @@ public final class SemanticLowerer {
             }
             if (call.callee() instanceof MemberAccessExpr access
                     && access.object() instanceof IdentifierExpr alias) {
-                ImportMaterialization materialization = materializeImportRead(access, alias);
+                ImportMaterialization materialization =
+                    materializeImportRead(access, alias, null);
+                if (!(materialization.descriptor() instanceof RuntimeDescriptor.Func)
+                        || materialization.binding() == null) {
+                    throw new ConstructUnlowered("await callee '" + alias.name()
+                        + "." + access.field() + "' is not a function-typed export (the "
+                        + "checker admits function-typed callees only)");
+                }
                 return lowerAsyncStart(call, slot, awaitSpan, materialization.binding(),
                     false);
             }
@@ -12453,14 +12557,16 @@ public final class SemanticLowerer {
         }
 
         private ValueId lowerMemberAccess(MemberAccessExpr access, ValueId slot) {
-            // Module member access first: the checker types a module-symbol
-            // object as `table`, so the symbol fact must win over the type
-            // fact (EXPORT_READ is E10's).
+            // The module-symbol arm of the one import-member read production
+            // (R1): the checker types a module-symbol object as `table`, so
+            // the symbol fact of the access site's checker scope must win over
+            // the type fact. The production emits exactly one EXPORT_READ per
+            // source occurrence and, for a function descriptor, exactly one
+            // FunctionExecutionBinding registration keyed by the published
+            // cell (the position's threaded slot when it has one).
             if (access.object() instanceof IdentifierExpr identifier
-                    && checks.symbolTable().resolve(identifier.name())
-                        instanceof Symbol.ModuleSymbol) {
-                throw new ConstructUnlowered("module member access '" + identifier.name()
-                    + "." + access.field() + "' (EXPORT_READ is E10's)");
+                    && isModuleSymbol(identifier.name())) {
+                return materializeImportRead(access, identifier, slot).value();
             }
             Type objectType = checkedType(access.object());
             if (objectType instanceof Type.Array && "length".equals(access.field())) {
@@ -12495,6 +12601,19 @@ public final class SemanticLowerer {
             throw new ConstructUnlowered("member access '" + access.field() + "' on "
                 + typeName(objectType) + " (no member-access arm for this receiver shape "
                 + "in this stage's window)");
+        }
+
+        /**
+         * Whether the identifier resolves to a module alias in the
+         * current checker site scope (the scope the checker resolved the
+         * access's base identifier in — the module root table at module
+         * level, the innermost per-scope table inside a body), never a
+         * root-table-only fact: a nested-scope binding shadowing an
+         * import alias keeps its landed receiver-shape arm.
+         */
+        private boolean isModuleSymbol(String name) {
+            SymbolTable scope = currentCheckerScope();
+            return scope != null && scope.resolve(name) instanceof Symbol.ModuleSymbol;
         }
 
         /**

@@ -550,6 +550,43 @@ public final class StdlibIntegrationTest {
             SemanticIdAllocator.over(moduleIds));
     }
 
+    /**
+     * Lowers the named subject module through the call-machine entry
+     * (ISSUE-0659's drive rule): the resolved import facts and the
+     * callee-route facts are installed, so a read and its typed-binding
+     * invocation both lower and validate. A carrier session
+     * ({@link #lowerSubject}) installs no import facts and keeps failing
+     * closed through the unresolved-alias guard.
+     */
+    private static SemanticLowerer.FullProgramE7Result lowerSubjectCallMachine(
+            CheckedProjectBuildResult checked, String modulePath) {
+        CheckedModuleInput subject = moduleOf(checked.input(), modulePath);
+        if (subject == null) {
+            fail("the checked project has no module " + modulePath);
+            return null;
+        }
+        RequirementManifestResult manifests = manifestsOf(checked, invocation());
+        if (manifests == null || manifests.hasErrors()) {
+            return null;
+        }
+        SemanticRequirementManifest manifest = manifestOf(manifests, subject.moduleId());
+        if (manifest == null) {
+            fail("no manifest for module " + modulePath);
+            return null;
+        }
+        List<ModuleId> moduleIds = new ArrayList<>();
+        Map<ModuleId, ModuleRoute> routes = new LinkedHashMap<>();
+        for (CheckedModuleInput module : checked.input().modules()) {
+            moduleIds.add(module.moduleId());
+            routes.put(module.moduleId(), ModuleRoute.SHARED);
+        }
+        return SemanticLowerer.lowerModuleFullProgramE7(subject,
+            SemanticProfile.DEAL_V1_2_INT32, manifest.constructCoverage(),
+            checked.index().interfaceIndexDigest(),
+            CapabilityRegistry.releaseRegistry().capabilityRegistryHash(),
+            SemanticIdAllocator.over(moduleIds), routes, Map.of(), Set.of());
+    }
+
     /** Every {@code STDLIB_CALL} op of the unit in source order. */
     private static List<SemanticOp> stdlibOps(LoweredModuleUnit unit) {
         List<SemanticOp> ops = new ArrayList<>();
@@ -1984,9 +2021,14 @@ public final class StdlibIntegrationTest {
         }
     }
 
-    /** The D3 disposition: the stdlib-export value read claims nothing, routes by rules 1/3/4/5. */
+    /**
+     * The D3 disposition: the stdlib-export value read claims nothing and
+     * routes by rules 1/3/4/5; since ISSUE-0659 the realized lowering of
+     * the read plus its typed-binding invocation is driven through the
+     * call-machine entry (the retargeted pin — never a "no unit" state).
+     */
     private static void testValueReadDisposition() throws java.io.IOException {
-        System.out.println("-- T5c: the stdlib-export value-read disposition (D3) --");
+        System.out.println("-- T5c: the stdlib-export value read (D3; realized lowering) --");
         Path tmp = Files.createTempDirectory("deal-stdlib-integration-valueread");
         try {
             CheckedProjectBuildResult checked = compileProject(tmp, Map.of(
@@ -2059,17 +2101,69 @@ public final class StdlibIntegrationTest {
                         + "entry under the explicit shadow request");
                 SemanticLowerer.LoweringResult lowering = lowerSubject(checked, "lib");
                 check(lowering != null && lowering.hasErrors() && lowering.unit() == null,
-                    "T5c: the common unit containing the read fails with E6005 "
-                        + "(no unit, no within-run fallback)");
-                if (lowering != null && lowering.hasErrors()) {
-                    check(lowering.diagnostics().stream().anyMatch(diagnostic ->
-                            diagnostic.message().contains("module 'lib'")
-                                && diagnostic.message().contains("CONSTRUCT_UNLOWERED")
-                                && diagnostic.message().contains(
-                                    "module member access 'console.log'")),
-                        "T5c: the exact E6005 names module lib, validatorRule "
-                            + "CONSTRUCT_UNLOWERED, and the read position: "
-                            + lowering.diagnostics());
+                    "T5c: the carrier session installs no import facts and keeps failing "
+                        + "closed (E6005, no unit): " + (lowering == null ? "null"
+                            : String.valueOf(lowering.diagnostics())));
+                // ISSUE-0659: the realized lowering of the same fixture
+                // through the call-machine entry. The read and its
+                // typed-binding invocation both lower and validate; the
+                // read produces exactly one EXPORT_READ of the cataloged
+                // export with its catalog row's declared descriptor and
+                // exactly one HostFunction registration keyed by the read's
+                // result identity — no lowerer-side invocation guard and no
+                // "no unit" state for the realized drive.
+                SemanticLowerer.FullProgramE7Result realized =
+                    lowerSubjectCallMachine(checked, "lib");
+                check(realized != null && realized.lowering() != null
+                        && !realized.lowering().hasErrors()
+                        && realized.lowering().unit() != null,
+                    "T5c: the read-plus-invocation fixture lowers to a validated unit "
+                        + "through the call machine: " + (realized == null
+                            || realized.lowering() == null ? " (null)"
+                            : String.valueOf(realized.lowering().diagnostics())));
+                if (realized != null && realized.lowering() != null
+                        && !realized.lowering().hasErrors()
+                        && realized.lowering().unit() != null) {
+                    LoweredModuleUnit unit = realized.lowering().unit();
+                    List<SemanticOp> reads = new ArrayList<>();
+                    for (SemanticOp op : unit.ops()) {
+                        if (op.kind() == SemanticOpKind.EXPORT_READ) {
+                            reads.add(op);
+                        }
+                    }
+                    check(reads.size() == 1,
+                        "T5c: the realized fixture produces exactly one EXPORT_READ; got "
+                            + reads.size());
+                    if (reads.size() == 1) {
+                        KindPayload.ExportReadPayload payload =
+                            (KindPayload.ExportReadPayload) reads.get(0).payload();
+                        StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                            .lookup("std.console", "log").orElseThrow();
+                        RuntimeDescriptor.Func rowDescriptor = StdlibFunctionCatalog
+                            .lookup("std.console", "log").orElseThrow()
+                            .declaredDescriptor();
+                        check(payload.module().path().equals("std.console")
+                                && payload.name().equals("log")
+                                && payload.descriptor().equals(rowDescriptor),
+                            "T5c: the read names std.console/log with the catalog row's "
+                                + "declared descriptor "
+                                + rowDescriptor.canonicalSpecText() + "; got "
+                                + payload.module() + "/" + payload.name() + " "
+                                + payload.descriptor().canonicalSpecText());
+                        check(unit.functionBindings().get(
+                                new deal.semantic.ir.FunctionAllocationIdentity(
+                                    payload.value().id()))
+                                instanceof deal.semantic.ir.FunctionExecutionBinding
+                                    .HostFunction,
+                            "T5c: exactly one HostFunction registration is keyed by the "
+                                + "read's result identity");
+                        check(unit.ops().stream().anyMatch(op ->
+                                op.kind() == SemanticOpKind.CALL
+                                    && ((KindPayload.CallPayload) op.payload()).mode()
+                                        == deal.semantic.ir.CallMode.INDIRECT),
+                            "T5c: the typed-binding invocation lowers CALL(INDIRECT), "
+                                + "never a lowerer-side guard");
+                    }
                 }
             }
             {

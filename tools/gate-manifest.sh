@@ -492,4 +492,30 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the production unit's two emitter call sites pass the declaration
   # surface through.
   'fg|=== Running Host Module Load / JVM Host ABI Surface Tests (ISSUE-0650) ===|java -ea -cp build deal.test.HostModuleLoadEmissionTest'
+  # ISSUE-0659 registration: the import-member read production — the
+  # value-position arm, the STDLIB catalog branch, and the exactly-one
+  # registrations (import-member-read-arm-lowering-and-registration R1-R3
+  # and R5, the import-read (lowering) contract, guard-table rows
+  # G1/G2/G4/G5/G6; module-export-reads-and-in-project-class-construction
+  # M1; semantic-ir-construct-coverage-cutover K2/K9;
+  # luajit-jvm-single-lowering-production-cutover C1): the stub battery
+  # per import kind in both positions (exactly one EXPORT_READ per source
+  # occurrence with the expected payload, a USER origin at the access
+  # span, parentOpId = the position's current parent, and the expected
+  # registration shape and owner per kind — HostFunction for HOST and for
+  # a cataloged STDLIB export with the row's declared descriptor,
+  # ExternalFunction(SHARED_BODY) for a COMPILED import through the
+  # session's callee-route facts), the non-function read with no
+  # registration, the guards (unresolved alias, route-less COMPILED read,
+  # out-of-catalog STDLIB member, STDLIB descriptor mismatch) each E6005
+  # CONSTRUCT_UNLOWERED with no unit, the focused project runs (the
+  # compiled companion's declared function export read with no invocation;
+  # HOST and STDLIB in both positions; the slot convention pinned by a
+  # class-default read publishing the CLASS_DEFAULT threaded cell and
+  # keying its registration by it), the determinism of repeated lowerings,
+  # and the registration/gate seeds (a duplicate rejected at registration
+  # time and never overwritten; a zero-registration function-typed read
+  # result failing the closed gate with R-FUNCTION-BINDING; the
+  # unmodified units admitted on the typed and the text surface).
+  'fg|=== Running Import-Member Read Arm Tests (ISSUE-0659) ===|java -ea -cp build deal.test.ImportMemberReadArmTest'
 )

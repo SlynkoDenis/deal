@@ -56,6 +56,7 @@ import deal.semantic.CheckedModuleInput;
 import deal.semantic.CheckedModuleKind;
 import deal.semantic.ContainerPayloadDescriptors;
 import deal.semantic.SemanticLowerer;
+import deal.semantic.StdlibFunctionCatalog;
 import deal.semantic.ir.BoundaryFailure;
 import deal.semantic.ir.BoundaryKind;
 import deal.semantic.ir.BoundaryRealization;
@@ -77,6 +78,7 @@ import deal.semantic.ir.LoweringFailureDetail;
 import deal.semantic.ir.ModuleId;
 import deal.semantic.ir.OpId;
 import deal.semantic.ir.ProjectInterfaceIndex;
+import deal.semantic.ir.ResolvedImport;
 import deal.semantic.ir.RuntimeDescriptor;
 import deal.semantic.ir.ScalarValue;
 import deal.semantic.ir.SemanticArray;
@@ -133,7 +135,13 @@ import java.util.Set;
  *       array for-of raises E6005 {@code CONSTRUCT_UNLOWERED} as a hard
  *       failure with the exact {@link LoweringFailureDetail} (and the
  *       same hard failure for class-typed literals, class/member access,
- *       module member access, and bytes {@code .length}); a
+ *       and bytes {@code .length}); the module member access arm is the
+ *       value position of the one import-member read production
+ *       (ISSUE-0659) — with the resolved import fact installed and a
+ *       declaration matching the closed catalog row it produces the
+ *       realized {@code EXPORT_READ}, while a declaration diverging from
+ *       the catalog row's declared descriptor fails closed with the
+ *       descriptor-equality guard; a
  *       bytes/error descriptor position raises E6005
  *       {@code DESCRIPTOR_UNREPRESENTABLE} with the exact detail;</li>
  *   <li>the combined dependency step — an array literal with
@@ -1525,29 +1533,106 @@ public class ContainerLoweringArmsTest {
             }
         }
 
-        // (d) Module member access (EXPORT_READ is E10's).
-        StubModuleResolver resolver = new StubModuleResolver();
-        resolver.register("std/console",
-            Map.of("log", new Type.Func(List.of(), Type.Null.INSTANCE)));
-        CheckedSlice moduleAccess = checkSlice("""
-            import * as console from "std/console"
-            function f(): null {
-              let g: () => null = console.log
-              return null
-            }
-            """, resolver);
-        if (moduleAccess != null) {
-            MemberAccessExpr access = first(moduleAccess.program(), MemberAccessExpr.class);
-            if (access != null) {
-                SemanticLowerer.ModuleLowerer lowerer = lowerer(moduleAccess.checks());
-                RuntimeException defect = null;
-                try {
-                    lowerer.lowerExpression(access);
-                } catch (SemanticLowerer.ConstructUnlowered unlowered) {
-                    defect = unlowered;
+        // (d) Module member access — the value-position arm of the one
+        // import-member read production (ISSUE-0659): with a declaration
+        // matching the closed catalog row and the resolved import fact
+        // installed, the arm produces the realized EXPORT_READ; keeping
+        // the stub's diverging declaration, it fails closed with the
+        // descriptor-equality guard.
+        {
+            StubModuleResolver resolver = new StubModuleResolver();
+            CheckedSlice moduleAccess = checkSlice("""
+                import * as console from "std/console"
+                function f(): null {
+                  let g: (x: string) => null = console.log
+                  return null
                 }
-                check(defect != null, "the module member access arm raises ConstructUnlowered");
-                checkConstructDetail("module member access", defect, "EXPORT_READ");
+                """, resolver);
+            if (moduleAccess != null) {
+                MemberAccessExpr access = first(moduleAccess.program(),
+                    MemberAccessExpr.class);
+                if (access != null) {
+                    SemanticLowerer.ModuleLowerer lowerer = lowerer(moduleAccess.checks());
+                    lowerer.setModuleImports(List.of(new ResolvedImport("console",
+                        "std/console", new ModuleId("std.console"),
+                        ExternalModuleKind.STDLIB)));
+                    RuntimeException defect = null;
+                    try {
+                        lowerer.lowerExpression(access);
+                    } catch (SemanticLowerer.ConstructUnlowered unlowered) {
+                        defect = unlowered;
+                    }
+                    check(defect == null,
+                        "the module member access arm produces the read with matching "
+                            + "declared facts: " + (defect == null ? ""
+                                : defect.getMessage()));
+                    List<SemanticOp> reads = new ArrayList<>();
+                    for (SemanticOp op : lowerer.ops()) {
+                        if (op.kind() == SemanticOpKind.EXPORT_READ) {
+                            reads.add(op);
+                        }
+                    }
+                    check(reads.size() == 1,
+                        "exactly one EXPORT_READ per source occurrence; got "
+                            + reads.size());
+                    if (reads.size() == 1) {
+                        KindPayload.ExportReadPayload payload =
+                            (KindPayload.ExportReadPayload) reads.get(0).payload();
+                        check(payload.module().equals(new ModuleId("std.console"))
+                                && payload.name().equals("log"),
+                            "the read names std.console/log; got " + payload.module()
+                                + "/" + payload.name());
+                        RuntimeDescriptor.Func row = StdlibFunctionCatalog
+                            .lookup("std.console", "log").orElseThrow()
+                            .declaredDescriptor();
+                        check(payload.descriptor().equals(row)
+                                && reads.get(0).resultType().equals(row),
+                            "the read carries the catalog row's declared descriptor "
+                                + row.canonicalSpecText() + "; got "
+                                + payload.descriptor().canonicalSpecText());
+                        check(reads.get(0).origin().kind() == SourceOriginKind.USER,
+                            "the read carries a USER origin at the access span");
+                    }
+                }
+            }
+        }
+        {
+            StubModuleResolver resolver = new StubModuleResolver();
+            resolver.register("std/console",
+                Map.of("log", new Type.Func(List.of(), Type.Null.INSTANCE)));
+            CheckedSlice moduleAccess = checkSlice("""
+                import * as console from "std/console"
+                function f(): null {
+                  let g: () => null = console.log
+                  return null
+                }
+                """, resolver);
+            if (moduleAccess != null) {
+                MemberAccessExpr access = first(moduleAccess.program(),
+                    MemberAccessExpr.class);
+                if (access != null) {
+                    SemanticLowerer.ModuleLowerer lowerer =
+                        lowerer(moduleAccess.checks());
+                    lowerer.setModuleImports(List.of(new ResolvedImport("console",
+                        "std/console", new ModuleId("std.console"),
+                        ExternalModuleKind.STDLIB)));
+                    RuntimeException defect = null;
+                    try {
+                        lowerer.lowerExpression(access);
+                    } catch (SemanticLowerer.ConstructUnlowered unlowered) {
+                        defect = unlowered;
+                    }
+                    check(defect != null,
+                        "the diverging declared member raises ConstructUnlowered");
+                    checkConstructDetail("module member access", defect, "EXPORT_READ");
+                    if (defect != null) {
+                        check(defect.getMessage().contains("()->null")
+                                && defect.getMessage().contains("(string)->null"),
+                            "the failure is the descriptor-equality guard naming the "
+                                + "checked and the catalog row's declared descriptor: "
+                                + defect.getMessage());
+                    }
+                }
             }
         }
 

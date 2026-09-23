@@ -116,6 +116,22 @@ public final class StdlibFunctionCatalog {
             Objects.requireNonNull(returnDescriptor, "returnDescriptor must not be null");
             parameterDescriptors = List.copyOf(parameterDescriptors);
         }
+
+        /**
+         * The row's declared function descriptor —
+         * {@code Func(parameterDescriptors(), returnDescriptor())} built
+         * from the row's declared parts. It is the STDLIB-kind
+         * import-member read's own descriptor
+         * ({@code import-member-read-arm-lowering-and-registration} R2):
+         * the closed catalog row is the resolution authority and its
+         * declared signature is the read's carried signature, assembled
+         * here beside the row data it belongs to.
+         *
+         * @return the row's declared {@code Func} descriptor
+         */
+        public RuntimeDescriptor.Func declaredDescriptor() {
+            return new RuntimeDescriptor.Func(parameterDescriptors, returnDescriptor);
+        }
     }
 
     // =========================================================================
