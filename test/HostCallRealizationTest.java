@@ -17,13 +17,44 @@ import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticRequirementManifest;
 import deal.semantic.ir.ExecutableLoweredProject;
+import deal.semantic.ir.AnchorId;
+import deal.semantic.ir.BlockId;
+import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.BoundaryRealization;
+import deal.semantic.ir.CallMode;
+import deal.semantic.ir.ClassFactoryRegistry;
+import deal.semantic.ir.ClosedSelector;
+import deal.semantic.ir.ContractSnapshotCanonicalizer;
+import deal.semantic.ir.ExportPlan;
+import deal.semantic.ir.ExternalModuleInterface;
+import deal.semantic.ir.ExternalModuleKind;
+import deal.semantic.ir.FailurePolicyId;
+import deal.semantic.ir.FunctionAllocationIdentity;
+import deal.semantic.ir.FunctionExecutionBinding;
+import deal.semantic.ir.InitializationMode;
 import deal.semantic.ir.IntrinsicKind;
 import deal.semantic.ir.KindPayload;
+import deal.semantic.ir.LoweredModuleUnit;
+import deal.semantic.ir.LoweringContextHash;
 import deal.semantic.ir.ModuleId;
 import deal.semantic.ir.ModuleImportKind;
+import deal.semantic.ir.ModuleInitPlan;
+import deal.semantic.ir.OpId;
+import deal.semantic.ir.OpResultType;
+import deal.semantic.ir.OperationContractSnapshot;
 import deal.semantic.ir.ProjectInterfaceIndex;
+import deal.semantic.ir.RuntimeDescriptor;
+import deal.semantic.ir.ScalarValue;
+import deal.semantic.ir.SemanticIrValidator;
 import deal.semantic.ir.SemanticOp;
 import deal.semantic.ir.SemanticOpKind;
+import deal.semantic.ir.SemanticProfile;
+import deal.semantic.ir.SemanticValue;
+import deal.semantic.ir.SourceOrigin;
+import deal.semantic.ir.SourceOriginKind;
+import deal.semantic.ir.SourceSpan;
+import deal.semantic.ir.StructuredBodyTable;
+import deal.semantic.ir.ValueId;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -65,6 +96,18 @@ import java.util.Set;
  *       declared position crossed by a value carrying no matching shape,
  *       a raw host-returned function value, and a bytes position crossed
  *       by a non-bytes value each fail with the pinned projection.</li>
+ *   <li><b>The hand-built {@code HostFunctionValue} arm.</b> No DEAL source
+ *       registers a {@code HostFunctionValue} binding today, so the closed
+ *       IR of the host-materialized crossing (the declared host call with
+ *       its {@code HOST_TO_DEAL} return crossing, the exactly-one
+ *       registration, the {@code CALL(INDIRECT)} on the value, and the
+ *       declared null-return callback record) is hand-built, validated,
+ *       and emitted: the LuaJIT chunk runs the materialized value's
+ *       declared cells under {@code luajit}, and the JVM artifact is
+ *       compiled by {@code javac} and executed under {@code java}, where
+ *       the scalar declared return is reconciled with the production
+ *       carrier, the host-returned array crosses back into the production
+ *       array, and the void callback wrapper is never assigned.</li>
  * </ol>
  */
 public class HostCallRealizationTest {
@@ -827,6 +870,456 @@ public class HostCallRealizationTest {
         }
     }
 
+    // =========================================================================
+    // 6. The hand-built HostFunctionValue sync call
+    // =========================================================================
+
+    /**
+     * The hand-built {@code HostFunctionValue} sync-call drive: the exact IR
+     * the host-materialized-crossing producer records for a declared
+     * function-typed host return (the {@code CALL(HOST)} with its
+     * {@code HOST_TO_DEAL} crossing boundary plus the exactly-one
+     * {@code HostFunctionValue} registration), followed by the
+     * {@code CALL(INDIRECT)} on the materialized value. No DEAL source
+     * registers a {@code HostFunctionValue} binding today, so the corpus seed
+     * builds the closed shape directly and the emitted arm is compiled and
+     * executed by the real toolchain — the scalar return carrier and the
+     * host-to-DEAL array projection both drive.
+     */
+    private static final ModuleId HOST_VALUE_MODULE = new ModuleId("main");
+    private static final String HOST_VALUE_SOURCE_ID = "host-value-call.deal";
+
+    private static final String HOST_VALUE_DECLARATION = """
+        export function pick(): (x: int) => int;
+        export function gather(): (x: int) => string[];
+        export function signal(): null;
+        """;
+
+    private static final String HOST_VALUE_SOURCE = """
+        import * as host from "host/pick_fn"
+
+        export function main(): null {
+          return null;
+        }
+        """;
+
+    /**
+     * The deployed host implementation of the drive: {@code pick} returns a
+     * host function value with a scalar return, {@code gather} one with a
+     * declared array return (the declared element-shape carrier the
+     * host-to-DEAL projection materializes back into the production array),
+     * and {@code notify} is the callback record's declared null return (the
+     * emitted wrapper is void, so the callback arm must not assign it).
+     */
+    private static final String HOST_VALUE_HOST_JAVA = """
+        final class HostPick_fn {
+          public static Object pick() {
+            return new $DealRt.Fn1_I_R_I() {
+              @Override
+              int invoke(int x) { return x + 1; }
+            };
+          }
+
+          public static Object gather() {
+            return new $DealRt.Fn1_I_R_$$Bstring$E() {
+              @Override
+              java.lang.Object invoke(int x) {
+                return new $DealRt.__StringArray(
+                    new java.lang.String[]{ "n" + x });
+              }
+            };
+          }
+
+          public static Object signal() {
+            return null;
+          }
+        }
+        """;
+
+    /** The hand-built callback record's op id (the emitted {@code cb<id>} entry). */
+    private static final long HOST_VALUE_CALLBACK_OP = 9;
+
+    /**
+     * The deployed Lua host of the hand-built drive: each export returns a
+     * declared function value through the runtime's wrapper factory (the
+     * declared cells then run through the materialized wrapper), and the
+     * declared null return is the runtime's null sentinel.
+     */
+    private static final String HOST_VALUE_HOST_LUA = """
+        local rt = require("deal.runtime")
+
+        return {
+          pick = function()
+            return rt.function_("(int)->int", function(x) return x + 1 end)
+          end,
+          gather = function()
+            return rt.function_("(int)->[string]", function(x) return { "n" .. x } end)
+          end,
+          signal = function()
+            return rt.__NULL
+          end,
+        }
+        """;
+
+    /** The declared host module of the hand-built drive's compile. */
+    private static ModuleId hostValueHostModule(Fixture compiled) {
+        for (ModuleId module : compiled.surface().moduleIds()) {
+            if (module.path().endsWith("pick_fn")) {
+                return module;
+            }
+        }
+        throw new IllegalStateException("the hand-built drive resolves no"
+            + " declared host module (a test-producer defect)");
+    }
+
+    private static void testLuaHostFunctionValueCall() throws Exception {
+        System.out.println("-- the hand-built HostFunctionValue sync call under "
+            + "luajit: the materialized value runs its declared cells at the call "
+            + "origin --");
+        Fixture compiled = compileSource("host-value-call-lua", "pick_fn",
+            HOST_VALUE_DECLARATION, HOST_VALUE_SOURCE);
+        try {
+            ModuleId hostModule = hostValueHostModule(compiled);
+            hostValueLuaCase(compiled, hostModule, "pick",
+                new RuntimeDescriptor.Func(List.of(RuntimeDescriptor.Int.INSTANCE),
+                    RuntimeDescriptor.Int.INSTANCE, false),
+                RuntimeDescriptor.Int.INSTANCE, "RESULT:42");
+            hostValueLuaCase(compiled, hostModule, "gather",
+                new RuntimeDescriptor.Func(List.of(RuntimeDescriptor.Int.INSTANCE),
+                    new RuntimeDescriptor.Array(RuntimeDescriptor.String.INSTANCE),
+                    false),
+                new RuntimeDescriptor.Array(RuntimeDescriptor.String.INSTANCE),
+                "RESULT:[n41]");
+        } finally {
+            deleteRecursively(compiled.root());
+        }
+    }
+
+    /** One hand-built unit emitted for LuaJIT and executed under real luajit. */
+    private static void hostValueLuaCase(Fixture compiled, ModuleId hostModule,
+            String exportName, RuntimeDescriptor.Func descriptor,
+            RuntimeDescriptor resultType, String expected) throws Exception {
+        LoweredModuleUnit unit = hostValueUnit(hostModule, exportName, descriptor,
+            resultType, "interface", "lowering-context");
+        ExecutableLoweredProject project = new ExecutableLoweredProject(
+            SemanticProfile.DEAL_V1_2_INT32,
+            new ProjectInterfaceIndex(ProjectInterfaceIndex.FORMAT_VERSION,
+                Map.of(HOST_VALUE_MODULE, new ExternalModuleInterface(
+                    HOST_VALUE_MODULE, ExternalModuleKind.IMPLEMENTATION, List.of(),
+                    List.of(), List.of(), InitializationMode.ONCE_AFTER_DEPENDENCIES))),
+            Map.of(HOST_VALUE_MODULE, unit), HOST_VALUE_MODULE);
+        Path workspace = Files.createTempDirectory("host-value-call-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
+                project, Map.of(HOST_VALUE_MODULE, hostValueTable(unit)),
+                Map.of(HOST_VALUE_MODULE, new ClassFactoryRegistry(Map.of())),
+                compiled.surface()), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path host = workspace.resolve("host/pick_fn.lua");
+            Files.createDirectories(host.getParent());
+            Files.writeString(host, HOST_VALUE_HOST_LUA, StandardCharsets.UTF_8);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, luaHostValueDriver(artifact), StandardCharsets.UTF_8);
+            Outcome outcome = runLua(probe, workspace);
+            check(outcome.exitCode() == 0 && outcome.value().contains(expected),
+                "the LuaJIT " + exportName + " arm runs the materialized value: "
+                    + escaped(outcome.value()) + " stderr="
+                    + escaped(outcome.stderr()));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The LuaJIT probe of the hand-built drive: init walk, then the published result. */
+    private static String luaHostValueDriver(Path artifact) {
+        return """
+            local function emitError(e)
+              if type(e) == "table" and (e.__d or e.code ~= nil) then
+                print("ERR:" .. tostring(e.code) .. "|" .. tostring(e.m or e.message))
+                return
+              end
+              print("ERR:E9999|" .. tostring(e))
+            end
+            dofile("%s")
+            local ok, err = __dealMain()
+            if not ok then emitError(err) os.exit(0) end
+            -- The emitted export entry is the publication wrapper; its `f`
+            -- is the published value itself (__unfn of a non-function value
+            -- is the value).
+            local value = __exportSurfaces["main"]["result"].f
+            if type(value) == "table" then
+              print("RESULT:[" .. tostring(value[1]) .. "]")
+            else
+              print("RESULT:" .. tostring(value))
+            end
+            """.formatted(artifact.toAbsolutePath().toString());
+    }
+
+    private static void testJvmHostFunctionValueCall() throws Exception {
+        System.out.println("-- the hand-built HostFunctionValue sync call: the "
+            + "declared scalar carrier and the host-to-DEAL array projection "
+            + "compile and run --");
+        Fixture compiled = compileSource("host-value-call", "pick_fn",
+            HOST_VALUE_DECLARATION, HOST_VALUE_SOURCE);
+        ModuleId hostModule = hostValueHostModule(compiled);
+        RuntimeDescriptor.Func scalarDescriptor = new RuntimeDescriptor.Func(
+            List.of(RuntimeDescriptor.Int.INSTANCE), RuntimeDescriptor.Int.INSTANCE,
+            false);
+        RuntimeDescriptor.Func arrayDescriptor = new RuntimeDescriptor.Func(
+            List.of(RuntimeDescriptor.Int.INSTANCE),
+            new RuntimeDescriptor.Array(RuntimeDescriptor.String.INSTANCE), false);
+        testJvmHostFunctionValueUnit(compiled, hostModule, "pick",
+            scalarDescriptor, RuntimeDescriptor.Int.INSTANCE,
+            "RESULT:42|java.lang.Long",
+            "the scalar declared return is reconciled with the production carrier");
+        testJvmHostFunctionValueUnit(compiled, hostModule, "gather",
+            arrayDescriptor,
+            new RuntimeDescriptor.Array(RuntimeDescriptor.String.INSTANCE),
+            "RESULT:[n41]|deal.codegen.jvm.JvmRuntime$Array",
+            "the host-returned array crosses back into the production array");
+        deleteRecursively(compiled.root());
+    }
+
+    /** One hand-built {@code HostFunctionValue} unit drive under javac + java. */
+    private static void testJvmHostFunctionValueUnit(Fixture compiled,
+            ModuleId hostModule, String exportName, RuntimeDescriptor.Func descriptor,
+            RuntimeDescriptor resultType, String expected, String what)
+            throws Exception {
+        ProjectInterfaceIndex index = new ProjectInterfaceIndex(
+            ProjectInterfaceIndex.FORMAT_VERSION, Map.of(HOST_VALUE_MODULE,
+                new ExternalModuleInterface(HOST_VALUE_MODULE,
+                    ExternalModuleKind.IMPLEMENTATION, List.of(), List.of(), List.of(),
+                    InitializationMode.ONCE_AFTER_DEPENDENCIES)));
+        String interfaceHash = index.interfaceIndexDigest();
+        String registryHash = deal.semantic.CapabilityRegistry.releaseRegistry()
+            .capabilityRegistryHash();
+        LoweredModuleUnit unit = hostValueUnit(hostModule, exportName, descriptor,
+            resultType, interfaceHash,
+            LoweringContextHash.of(SemanticProfile.DEAL_V1_2_INT32, registryHash));
+        java.util.Optional<deal.diagnostics.CompilerDiagnostic> validation =
+            SemanticIrValidator.validate(unit,
+                new SemanticIrValidator.ComparisonFacts(interfaceHash,
+                    SemanticProfile.DEAL_V1_2_INT32, registryHash));
+        check(validation.isEmpty(), "the hand-built HostFunctionValue unit of '"
+            + exportName + "' passes validation: " + validation);
+        if (validation.isPresent()) {
+            return;
+        }
+        StructuredBodyTable table = hostValueTable(unit);
+        ExecutableLoweredProject project = new ExecutableLoweredProject(
+            SemanticProfile.DEAL_V1_2_INT32, index,
+            Map.of(HOST_VALUE_MODULE, unit), HOST_VALUE_MODULE);
+        String className = JvmBackend.classNameFor(HOST_VALUE_MODULE.path());
+        JvmSemanticEmitter.EmissionResult emission =
+            JvmSemanticEmitter.emitProductionProject(project,
+                Map.of(HOST_VALUE_MODULE, table),
+                Map.of(HOST_VALUE_MODULE, new ClassFactoryRegistry(Map.of())),
+                className, compiled.surface());
+        check(emission.source().contains("(JvmRuntime.FunctionValue)"),
+            "the " + exportName + " arm invokes the materialized production "
+                + "function carrier");
+        check(emission.source().contains("Object cb" + HOST_VALUE_CALLBACK_OP),
+            "the " + exportName + " unit carries the host callback record entry");
+        Path workspace = Files.createTempDirectory("host-value-call");
+        try {
+            Files.writeString(workspace.resolve(className + ".java"),
+                emission.source(), StandardCharsets.UTF_8);
+            Files.writeString(workspace.resolve("HostPick_fn.java"),
+                HOST_VALUE_HOST_JAVA, StandardCharsets.UTF_8);
+            Files.writeString(workspace.resolve("HostValueProbe.java"),
+                hostValueProbe(className), StandardCharsets.UTF_8);
+            Path classes = workspace.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            Outcome javacRun = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                className + ".java", "HostPick_fn.java", "HostValueProbe.java"),
+                workspace);
+            check(javacRun.exitCode() == 0, "the hand-built " + exportName
+                + " arm compiles: " + javacRun.stdout() + javacRun.stderr());
+            if (javacRun.exitCode() != 0) {
+                return;
+            }
+            Outcome outcome = runProcess(List.of("java", "-cp",
+                classpath + java.io.File.pathSeparator + classes, "HostValueProbe"),
+                workspace);
+            check(outcome.exitCode() == 0 && outcome.value().contains(expected),
+                what + ": " + escaped(outcome.value()) + " stderr="
+                    + escaped(outcome.stderr()));
+            check(outcome.value().contains("CALLBACK:null"),
+                "the declared null-return callback arm runs its void wrapper: "
+                    + escaped(outcome.value()));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The JVM probe of the hand-built drive: init walk, then the published result. */
+    private static String hostValueProbe(String className) {
+        return """
+            final class HostValueProbe {
+              public static void main(String[] args) {
+                try {
+                  %s.dealMain();
+                } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                  System.out.println("ERR:" + error.code + "|" + error.msg + "|"
+                      + error.origin);
+                  return;
+                }
+                Object value = %s.exportSurface("main").read("result");
+                String text = value instanceof deal.codegen.jvm.JvmRuntime.Array array
+                    ? String.valueOf(array.elements) : String.valueOf(value);
+                System.out.println("RESULT:" + text + "|"
+                    + (value == null ? "null" : value.getClass().getName()));
+                try {
+                  System.out.println("CALLBACK:" + %s.cb%s(new java.lang.Object[]{ }));
+                } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                  System.out.println("CALLBACK:" + error.code + "|" + error.msg);
+                }
+              }
+            }
+            """.formatted(className, className, className,
+                String.valueOf(HOST_VALUE_CALLBACK_OP));
+    }
+
+    /**
+     * The hand-built unit of one {@code HostFunctionValue} sync call: the
+     * import load, the declared host call whose function-typed return
+     * materializes the crossing, the {@code CALL(INDIRECT)} on the registered
+     * value (published under {@code result}), and the unattached callback
+     * record of the declared null-returning export.
+     */
+    private static LoweredModuleUnit hostValueUnit(ModuleId hostModule,
+            String exportName, RuntimeDescriptor.Func descriptor,
+            RuntimeDescriptor resultType, String interfaceHash,
+            String loweringContextHash) {
+        OpId importOp = new OpId(HOST_VALUE_MODULE, 1);
+        OpId callHostOp = new OpId(HOST_VALUE_MODULE, 2);
+        OpId crossingOp = new OpId(HOST_VALUE_MODULE, 3);
+        OpId constOp = new OpId(HOST_VALUE_MODULE, 4);
+        OpId callOp = new OpId(HOST_VALUE_MODULE, 5);
+        OpId parameterBoundaryOp = new OpId(HOST_VALUE_MODULE, 6);
+        OpId returnBoundaryOp = new OpId(HOST_VALUE_MODULE, 7);
+        OpId publishOp = new OpId(HOST_VALUE_MODULE, 8);
+        OpId callbackOp = new OpId(HOST_VALUE_MODULE, HOST_VALUE_CALLBACK_OP);
+        OpId callbackReturnBoundaryOp = new OpId(HOST_VALUE_MODULE, 10);
+        ValueId functionValue = new ValueId(1);
+        ValueId argument = new ValueId(2);
+        ValueId result = new ValueId(3);
+        ValueId callbackValue = new ValueId(4);
+        BlockId initBlock = new BlockId(1);
+        FunctionExecutionBinding.HostFunctionValue registration =
+            new FunctionExecutionBinding.HostFunctionValue(hostModule, crossingOp,
+                descriptor);
+        RuntimeDescriptor.Func hostSignature = new RuntimeDescriptor.Func(List.of(),
+            descriptor, false);
+        RuntimeDescriptor.Func callbackSignature = new RuntimeDescriptor.Func(List.of(),
+            RuntimeDescriptor.Null.INSTANCE, false);
+        FunctionExecutionBinding.HostFunction callbackRegistration =
+            new FunctionExecutionBinding.HostFunction(hostModule, "signal",
+                callbackSignature);
+        List<SemanticOp> ops = new ArrayList<>();
+        ops.add(hostValueOp(importOp, SemanticOpKind.MODULE_IMPORT,
+            new KindPayload.ModuleImportPayload(hostModule.path(), hostModule,
+                ModuleImportKind.HOST, List.of()),
+            null, null, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueOp(callHostOp, SemanticOpKind.CALL,
+            new KindPayload.CallPayload(CallMode.HOST,
+                new KindPayload.CallCallee.Static(
+                    new FunctionExecutionBinding.HostFunction(hostModule, exportName,
+                        hostSignature)),
+                hostSignature, List.of(), crossingOp, null, null, null),
+            functionValue, descriptor, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueBoundary(crossingOp, BoundaryKind.HOST_TO_DEAL, descriptor,
+            functionValue, FailurePolicyId.HOST_SYNC_RETURN, callHostOp));
+        ops.add(hostValueOp(constOp, SemanticOpKind.CONST,
+            new KindPayload.ConstPayload(new ScalarValue.Int(41)), argument,
+            RuntimeDescriptor.Int.INSTANCE, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueOp(callOp, SemanticOpKind.CALL,
+            new KindPayload.CallPayload(CallMode.INDIRECT,
+                new KindPayload.CallCallee.Static(registration), descriptor,
+                List.of(parameterBoundaryOp), returnBoundaryOp, null, null, null),
+            result, resultType, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueBoundary(parameterBoundaryOp, BoundaryKind.DEAL_TO_HOST,
+            RuntimeDescriptor.Int.INSTANCE, argument, FailurePolicyId.HOST_PARAMETER,
+            callOp));
+        ops.add(hostValueBoundary(returnBoundaryOp, BoundaryKind.HOST_TO_DEAL,
+            resultType, result, FailurePolicyId.HOST_SYNC_RETURN, callOp));
+        ops.add(hostValueOp(publishOp, SemanticOpKind.EXPORT_PUBLISH,
+            new KindPayload.ExportPublishPayload(HOST_VALUE_MODULE, "result",
+                resultType, result),
+            null, null, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueOp(callbackOp, SemanticOpKind.CALLBACK_INVOKE,
+            new KindPayload.CallbackInvokePayload(callbackValue, callbackSignature,
+                List.of(), callbackReturnBoundaryOp),
+            null, null, FailurePolicyId.NO_DEAL_FAILURE, null));
+        ops.add(hostValueBoundary(callbackReturnBoundaryOp, BoundaryKind.DEAL_TO_HOST,
+            RuntimeDescriptor.Null.INSTANCE, callbackValue,
+            FailurePolicyId.TYPE_DESCRIPTOR, callbackOp));
+        return new LoweredModuleUnit(LoweredModuleUnit.FORMAT_VERSION,
+            SemanticProfile.DEAL_V1_2_INT32, HOST_VALUE_MODULE, interfaceHash,
+            loweringContextHash, Set.of(), Map.of(), Map.of(), Map.of(),
+            new ModuleInitPlan(List.of(hostModule), initBlock), ExportPlan.empty(),
+            Map.of(new FunctionAllocationIdentity(functionValue.id()), registration,
+                new FunctionAllocationIdentity(callbackValue.id()),
+                callbackRegistration),
+            ops);
+    }
+
+    /** The block-membership table of the hand-built unit (init block only). */
+    private static StructuredBodyTable hostValueTable(LoweredModuleUnit unit) {
+        List<OpId> membership = new ArrayList<>();
+        Map<OpId, BlockId> opBlocks = new LinkedHashMap<>();
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.BOUNDARY
+                    || op.kind() == SemanticOpKind.CALLBACK_INVOKE) {
+                // The boundary children are payload-owned and the callback
+                // record is unattached (its static entry is emitted at class
+                // level, never by the module walk).
+                continue;
+            }
+            membership.add(op.opId());
+            opBlocks.put(op.opId(), unit.moduleInit().initBlock());
+        }
+        Map<BlockId, List<OpId>> blockOps = new LinkedHashMap<>();
+        blockOps.put(unit.moduleInit().initBlock(), membership);
+        return new StructuredBodyTable(blockOps, opBlocks);
+    }
+
+    private static SemanticOp hostValueBoundary(OpId id, BoundaryKind kind,
+            RuntimeDescriptor descriptor, ValueId input, FailurePolicyId policy,
+            OpId parent) {
+        return hostValueOp(id, SemanticOpKind.BOUNDARY,
+            new KindPayload.BoundaryPayload(kind, descriptor, input,
+                new BoundaryRealization.RuntimeValidation("check")),
+            null, null, policy, parent);
+    }
+
+    /** One hand-built op with its canonical contract snapshot (the closed digest). */
+    private static SemanticOp hostValueOp(OpId id, SemanticOpKind kind,
+            KindPayload payload, SemanticValue result, OpResultType resultType,
+            FailurePolicyId policy, OpId parent) {
+        SourceOrigin origin = new SourceOrigin(HOST_VALUE_SOURCE_ID,
+            SourceSpan.synthetic(HOST_VALUE_SOURCE_ID), SourceOriginKind.SYNTHETIC,
+            new AnchorId(0), parent);
+        OperationContractSnapshot contract = hostValueContract(kind, payload,
+            resultType, policy, "placeholder");
+        contract = hostValueContract(kind, payload, resultType, policy,
+            ContractSnapshotCanonicalizer.digest(contract));
+        return new SemanticOp(id, kind, origin, result, resultType, List.of(),
+            List.of(), payload, policy, contract);
+    }
+
+    private static OperationContractSnapshot hostValueContract(SemanticOpKind kind,
+            KindPayload payload, OpResultType resultType, FailurePolicyId policy,
+            String digest) {
+        ClosedSelector selector = payload instanceof KindPayload.SelectorCarrying carrying
+            ? carrying.selector() : null;
+        return new OperationContractSnapshot(OperationContractSnapshot.VERSION, kind,
+            resultType, List.of(), selector, payload, policy, List.of(), digest);
+    }
+
     /** The LuaJIT probe: the init walk, then the fixture's test export. */
     private static String luaDriver(Path artifact, String entryPath) {
             String luaEntry = entryPath;
@@ -1036,6 +1529,8 @@ public class HostCallRealizationTest {
         testTwoAliasCall();
         testJvmCrossingProjection();
         testFailClosedSeeds();
+        testJvmHostFunctionValueCall();
+        testLuaHostFunctionValueCall();
         System.out.println();
         System.out.println("Passed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

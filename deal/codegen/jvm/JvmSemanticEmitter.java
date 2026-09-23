@@ -3109,10 +3109,17 @@ public final class JvmSemanticEmitter {
                 out.append(indent(indent)).append("Object ").append(result)
                     .append(" = null;\n");
             } else {
-                String carrier = hostAbi.needsReturnProjection(declaredReturn)
-                    ? "java.lang.Object"
-                    : hostAbi.carrierType(declaredReturn,
-                        declaredReturn instanceof Type.Nullable);
+                // The direct host arm assigns the emitted wrapper's
+                // declared return carrier; the HostFunctionValue arm
+                // assigns the emitted host-check seam's java.lang.Object
+                // result (the wrapper is not involved), so the held slot
+                // is Object there and the checked value is reconciled
+                // with the declared production carrier after the seam.
+                String carrier = targetChecksReturn
+                        && !hostAbi.needsReturnProjection(declaredReturn)
+                    ? hostAbi.carrierType(declaredReturn,
+                        declaredReturn instanceof Type.Nullable)
+                    : "java.lang.Object";
                 String held = "__hw_" + op.opId().id();
                 out.append(indent(indent)).append(carrier).append(" ").append(held)
                     .append(";\n");
@@ -3121,7 +3128,9 @@ public final class JvmSemanticEmitter {
                     .append(call).append(";\n");
                 emitHostCallCatch(op, payload, indent);
                 out.append(indent(indent)).append("Object ").append(result)
-                    .append(" = ").append(productionValueOf(declaredReturn, held))
+                    .append(" = ").append(targetChecksReturn
+                        ? productionValueOf(declaredReturn, held)
+                        : checkedResultOf(declaredReturn, held))
                     .append(";\n");
             }
             for (int i = 0; i < arguments.arrays().size(); i++) {
@@ -3203,6 +3212,46 @@ public final class JvmSemanticEmitter {
             }
             if (inner instanceof Type.Boolean && !nullable) {
                 return "java.lang.Boolean.valueOf(" + expression + ")";
+            }
+            return expression;
+        }
+
+        /**
+         * The production projection of one checked host return held as
+         * the host-check seam's {@code java.lang.Object} result (the
+         * {@code HostFunctionValue} indirect and callback arms; H3/H7):
+         * the declared carrier is reconciled with the production value
+         * carrier — a numeric or boolean position unboxes through its
+         * boxed form (a {@code null}-safe form for a {@code ?} position),
+         * a declared array or function return crosses back into the
+         * production carriers through the host-to-DEAL projection, and
+         * every other reference carrier is the production value itself.
+         */
+        private String checkedResultOf(Type declaredReturn, String expression) {
+            Type inner = innerOf(declaredReturn);
+            boolean nullable = declaredReturn instanceof Type.Nullable;
+            if (inner instanceof Type.Int) {
+                String unbox = "java.lang.Long.valueOf(((java.lang.Number) "
+                    + expression + ").longValue())";
+                return nullable
+                    ? "(" + expression + " == null ? null : " + unbox + ")"
+                    : unbox;
+            }
+            if (inner instanceof Type.Number) {
+                String unbox = "java.lang.Double.valueOf(((java.lang.Number) "
+                    + expression + ").doubleValue())";
+                return nullable
+                    ? "(" + expression + " == null ? null : " + unbox + ")"
+                    : unbox;
+            }
+            if (inner instanceof Type.Boolean && !nullable) {
+                return "java.lang.Boolean.valueOf(((java.lang.Boolean) "
+                    + expression + ").booleanValue())";
+            }
+            if (inner instanceof Type.Array || inner instanceof Type.Func) {
+                return "__hostToDeal("
+                    + javaString(JvmHostAbiEmission.descriptorText(declaredReturn))
+                    + ", " + expression + ")";
             }
             return expression;
         }
@@ -4520,6 +4569,8 @@ public final class JvmSemanticEmitter {
                 case FunctionExecutionBinding.HostFunction host ->
                     emitHostCallbackInvoke(op, payload,
                         hostAbi.requireWrapper(host.hostModuleId().path(),
+                            host.exportName()),
+                        hostAbi.declaredFunction(host.hostModuleId().path(),
                             host.exportName()), indent);
                 case FunctionExecutionBinding.HostFunctionValue hostValue -> {
                     SemanticOp crossing = opsById.get(
@@ -4571,7 +4622,8 @@ public final class JvmSemanticEmitter {
          * op's own return projection (its single return boundary child).
          */
         private void emitHostCallbackInvoke(SemanticOp op,
-                KindPayload.CallbackInvokePayload payload, String wrapper, int indent) {
+                KindPayload.CallbackInvokePayload payload, String wrapper,
+                Type.Func declared, int indent) {
             StringBuilder call = new StringBuilder(wrapper).append('(');
             for (int i = 0; i < payload.parameterBoundaryOpIds().size(); i++) {
                 SemanticOp boundary = opsById.get(payload.parameterBoundaryOpIds().get(i));
@@ -4579,8 +4631,17 @@ public final class JvmSemanticEmitter {
             }
             call.append(originArgs(op)).append(')');
             out.append(indent(indent)).append("  try {\n");
-            out.append(indent(indent)).append("    __res = ").append(call)
-                .append(";\n");
+            if (declared.returnType() instanceof Type.Null) {
+                // The emitted wrapper of a declared null return is void:
+                // the invocation is a statement and the callback value is
+                // the language null (the op's own return cell below checks
+                // it).
+                out.append(indent(indent)).append("    ").append(call).append(";\n");
+                out.append(indent(indent)).append("    __res = null;\n");
+            } else {
+                out.append(indent(indent)).append("    __res = ").append(call)
+                    .append(";\n");
+            }
             out.append(indent(indent))
                 .append("  } catch (JvmRuntime.DealError __e) {\n");
             if (trace) {
