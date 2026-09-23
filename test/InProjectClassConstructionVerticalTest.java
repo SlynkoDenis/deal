@@ -23,6 +23,7 @@ import deal.semantic.SemanticRequirementManifest;
 import deal.semantic.SemanticRuntimeModel;
 import deal.semantic.ir.AddressChainProtocol;
 import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.ClassFactoryId;
 import deal.semantic.ir.ClassFactoryRegistry;
 import deal.semantic.ir.ClassId;
 import deal.semantic.ir.ClassInterface;
@@ -125,26 +126,35 @@ import java.util.TreeMap;
  *       at the call. The structural assertions pin the pre-declaration
  *       before every reference and its assignment; no second fact
  *       producer and no imported-class-specific emission arm is added;</li>
- *   <li><b>the owner-resolution namespace boundary is recorded, not
- *       repaired.</b> The oracle and both emitters resolve a
- *       {@code SHARED_FACTORY}
- *       owner as {@code new ModuleId(payload.classId().modulePath())} — the
- *       class descriptor namespace. In the conventional root/module layout
- *       (root {@code src}, module {@code owner.deal}) that namespace
- *       ({@code @src/Address}) is not the module identity ({@code owner}),
- *       so the same drive fails closed there (the oracle's producer defect
- *       and the production arm's E6005). The probe therefore uses the
- *       identity-coherent layout (root directory {@code owner}, module
- *       {@code owner.deal}) under which the landed chain resolves, and the
- *       conventional-layout boundary is pinned and recorded as a finding —
- *       never repaired here by a second fact producer.</li>
+ *   <li><b>the conventional root/module layout resolves through the same
+ *       chain.</b> The oracle and both emitters resolve a
+ *       {@code SHARED_FACTORY} owner from the delivered per-module
+ *       class-factory registries — the unique module whose registry binds
+ *       the construction entry — never from the class descriptor
+ *       namespace ({@code ClassId.modulePath()} is the configured
+ *       module-root text, {@code @src/Address} for the class of the
+ *       module {@code owner} under the root {@code src}, not the module
+ *       identity).
+ *       {@link #testConventionalLayoutOwnerResolution()} asserts that
+ *       distinction and drives the same vertical chain — the oracle's
+ *       success with the owner's factory events and the constructed field
+ *       values, and both production artifacts executing under the real
+ *       toolchains — on the conventional layout, with byte-identical
+ *       repeated staging.</li>
+ *   <li><b>the owner-resolution fault seeds.</b> The delivered-fact
+ *       resolution is the one authority both targets and the oracle
+ *       share, so its fail-closed arms are load-bearing: the unique
+ *       binding module resolves the owner, an unregistered construction
+ *       entry resolves to no factory, and an ambiguous binding, a
+ *       registration naming a foreign module's op, and a null factory
+ *       reference each fail closed
+ *       ({@link #testOwnerResolutionFaultSeeds()}).</li>
  * </ol>
  */
 public class InProjectClassConstructionVerticalTest {
 
     private static int passed = 0;
     private static int failed = 0;
-    private static final List<String> findings = new ArrayList<>();
 
     private static void check(boolean condition, String message) {
         if (condition) {
@@ -165,16 +175,6 @@ public class InProjectClassConstructionVerticalTest {
             message + " (expected " + expected + ", got " + actual + ")");
     }
 
-    /**
-     * Records a seam finding outside this leaf's repair scope (the
-     * owner-resolution namespace boundary: the consumers' owner-module
-     * resolution, not the imported-class construct).
-     */
-    private static void recordFinding(String finding) {
-        findings.add(finding);
-        System.out.println("FINDING (recorded, not repaired): " + finding);
-    }
-
     // =========================================================================
     // The probe project
     // =========================================================================
@@ -185,11 +185,11 @@ public class InProjectClassConstructionVerticalTest {
     /**
      * The identity-coherent probe layout: the module root directory's
      * configured text (its final path component, {@code owner}) equals
-     * the owner module's identity, so the class descriptor namespace the
-     * landed owner resolution derives from the {@code CLASS_NEW} payload's
-     * class identity ({@code @owner/Address}) is the owner's module
-     * identity ({@code owner}). The conventional layout's boundary is
-     * recorded by {@link #testRecordedOwnerResolutionBoundary()}.
+     * the owner module's identity, so the class descriptor namespace of
+     * the {@code CLASS_NEW} payload's class identity
+     * ({@code @owner/Address}) is also the owner's module identity
+     * ({@code owner}). The conventional layout — where the two differ —
+     * is driven by {@link #testConventionalLayoutOwnerResolution()}.
      */
     private static final String COHERENT_ROOT = "owner";
 
@@ -942,104 +942,246 @@ public class InProjectClassConstructionVerticalTest {
     }
 
     // =========================================================================
-    // 4. The recorded owner-resolution namespace boundary
+    // 4. The conventional root/module layout
     // =========================================================================
 
     /**
      * The conventional root/module layout (root {@code src}, modules
-     * {@code owner.deal}/{@code app.deal}) through the same drive: the
-     * checker-valid literal still lowers to {@code CLASS_NEW(SHARED_FACTORY)},
-     * but the landed owner resolution derives the owner module from the
-     * class descriptor namespace ({@code @src/Address} → module {@code src}),
-     * which is not the owner's module identity ({@code owner}) — the oracle
-     * rejects the run as a producer defect and the production arm fails
-     * closed with E6005 and stages nothing. Pinned and recorded as a
-     * finding, never repaired here.
+     * {@code owner.deal}/{@code app.deal}) through the same vertical chain.
+     * The imported class's descriptor namespace is {@code @src/Address} —
+     * the configured module-root text, not the owner module identity
+     * {@code owner} — and the oracle and both emitters resolve the
+     * {@code SHARED_FACTORY} owner from the delivered per-module
+     * class-factory registries (the unique module whose registry binds the
+     * construction entry), so the conventional layout constructs through
+     * the owner's factory end to end: the oracle's factory transfer and
+     * field reads, and the two production artifacts under the real
+     * toolchains.
      */
-    private static void testRecordedOwnerResolutionBoundary() throws Exception {
-        System.out.println("-- the conventional root/module layout: the class "
-            + "descriptor namespace is not the module identity, so the landed "
-            + "owner resolution fails closed; recorded as a finding --");
+    private static void testConventionalLayoutOwnerResolution() throws Exception {
+        System.out.println("-- the conventional root/module layout (root src): the "
+            + "class descriptor namespace is not the module identity, and the "
+            + "delivered class-factory registries resolve the owner through the "
+            + "oracle and both production artifacts --");
         Fixture fixture = compileFixture("src");
+        Path luaOut = fixture.root().resolve("out-luajit");
+        Path luaOutRepeat = fixture.root().resolve("out-luajit-repeat");
+        Path jvmOut = fixture.root().resolve("out-jvm");
+        Path jvmOutRepeat = fixture.root().resolve("out-jvm-repeat");
         try {
             SemanticLowerer.ProjectLoweringResult result = lower(fixture);
             check(!result.hasErrors() && result.project() != null,
-                "the conventional-layout probe still lowers through the one project "
-                    + "entry with zero RETAINED_ABI_DEFERRED: "
-                    + result.diagnostics());
+                "the conventional-layout probe lowers through the one project "
+                    + "entry with zero diagnostics: " + result.diagnostics());
             if (result.project() == null) {
                 return;
             }
-            LoweredModuleUnit app = result.project().modules().get(APP);
-            ClassId ownerClassId = null;
-            for (SemanticOp op : ofKind(app, SemanticOpKind.CLASS_NEW)) {
-                if (op.payload() instanceof KindPayload.ClassNewPayload payload
-                        && payload.defaultOwner() == DefaultOwner.SHARED_FACTORY) {
-                    ownerClassId = payload.classId();
+            boolean retainedAbiDeferred = false;
+            for (CompilerDiagnostic diagnostic : result.diagnostics()) {
+                if (diagnostic.message().contains("RETAINED_ABI_DEFERRED")) {
+                    retainedAbiDeferred = true;
                 }
             }
-            check(ownerClassId != null,
-                "the conventional-layout literal lowers CLASS_NEW(SHARED_FACTORY)");
-            if (ownerClassId == null) {
+            check(!retainedAbiDeferred,
+                "the conventional-layout input reports zero "
+                    + "RETAINED_ABI_DEFERRED");
+            OwnerFacts facts = ownerFacts(fixture, result);
+            if (facts == null) {
                 return;
             }
-            checkEq("src", ownerClassId.modulePath(),
-                "the class descriptor namespace is the configured root text");
-            check(!ownerClassId.modulePath().equals(OWNER.path()),
+            checkEq("src", facts.classId().modulePath(),
+                "the conventional-layout class descriptor namespace is the "
+                    + "configured root text");
+            check(!facts.classId().modulePath().equals(OWNER.path()),
                 "the class descriptor namespace is not the owner module identity");
-            recordFinding("the landed owner resolution derives a SHARED_FACTORY "
-                + "owner module as new ModuleId(payload.classId().modulePath()) — "
-                + "the class descriptor namespace — in the semantic oracle and both "
-                + "emitters, so it resolves the owner only when that namespace "
-                + "equals the module identity. In the conventional root/module "
-                + "layout (root 'src', module 'owner.deal') the class identity is "
-                + ownerClassId.text() + " while the module identity is '"
-                + OWNER.path() + "', and the drive fails closed there: the oracle "
-                + "rejects the run as a producer defect naming owner module 'src', "
-                + "and the production arm returns E6005 SHARED_EMITTER_COVERAGE and "
-                + "stages nothing. The failing seam is the consumers' owner-module "
-                + "resolution (the semantic oracle and both emitters); the landing "
-                + "fix belongs to them (or to the fact channel that supplies the "
-                + "owner module identity), never to a second fact producer. The "
-                + "probe's identity-coherent layout is the boundary's evidence.");
-
-            // The oracle's producer defect: the owner module derived from the
-            // class namespace has no registry in the closure.
-            try {
-                SemanticOracle.executeProjectInits(result.project(),
-                    result.tables(), result.registries(), null);
-                fail("the oracle should reject the conventional-layout run (the "
-                    + "owner module derived from the class namespace is not in the "
-                    + "closure)");
-            } catch (IllegalStateException rejection) {
-                check(rejection.getMessage() != null
-                        && rejection.getMessage().contains("has no ClassFactoryRegistry"),
-                    "the oracle rejects the conventional layout with its "
-                        + "owner-resolution producer defect: "
-                        + rejection.getMessage());
+            LoweredModuleUnit app = result.project().modules().get(APP);
+            List<SemanticOp> constructions =
+                addressConstructions(app, facts.classId());
+            checkEq(2, constructions.size(),
+                "the conventional-layout dependent module lowers one "
+                    + "CLASS_NEW(SHARED_FACTORY) per constructed imported class");
+            if (constructions.size() != 2) {
+                return;
+            }
+            for (SemanticOp construction : constructions) {
+                KindPayload.ClassNewPayload payload =
+                    (KindPayload.ClassNewPayload) construction.payload();
+                checkEq(DefaultOwner.SHARED_FACTORY, payload.defaultOwner(),
+                    "the conventional-layout literal carries SHARED_FACTORY");
+                checkEq(facts.interfaceEntry().constructionEntry(),
+                    payload.classFactoryRef(),
+                    "the conventional-layout literal carries the owner interface's "
+                        + "constructionEntry as its factory reference");
             }
 
-            // The production arm fails closed and stages nothing.
-            Path out = fixture.root().resolve("out-arm");
-            PublicationStager stager = PublicationStager.forRoot(out);
-            ProductionProjectEmission.Result arm;
-            try {
-                arm = emit(fixture, Backend.LUAJIT, stager);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the conventional-layout production arm stages nothing");
-            } finally {
-                stager.discard();
+            // The oracle: the owner factory transfer runs (the delivered
+            // registries resolve the owner module), its events parent to the
+            // caller's CLASS_NEW with the owner module attribution, and the
+            // field reads observe the constructed values.
+            SemanticRuntimeModel.ConsumerRun oracle =
+                SemanticOracle.executeProjectInits(result.project(), result.tables(),
+                    result.registries(), null);
+            check(oracle.terminal() instanceof SemanticRuntimeModel.Terminal.Success,
+                "the oracle executes the conventional-layout closure: "
+                    + oracle.comparisonReport());
+            List<SemanticRuntimeModel.TraceEvent> factoryEvents =
+                traceEvents(oracle, SemanticOpKind.CLASS_FACTORY);
+            checkEq(4, factoryEvents.size(),
+                "the oracle emits one START/SUCCESS pair per factory transfer "
+                    + "through the delivered registries; got " + factoryEvents.size());
+            for (int i = 0; i < factoryEvents.size() && i / 2 < constructions.size(); i++) {
+                SemanticRuntimeModel.TraceEvent event = factoryEvents.get(i);
+                checkEq(OWNER.path(), event.module(),
+                    "the conventional-layout factory event carries the owner "
+                        + "module attribution");
+                check(event.parentOp() != null
+                        && event.parentOp().equals(constructions.get(i / 2).opId()),
+                    "the conventional-layout factory event parents to the "
+                        + "triggering caller CLASS_NEW: " + event.text());
             }
-            check(!arm.emitted(), "the conventional-layout production arm fails "
-                + "closed: " + arm.diagnostics());
-            check(arm.firstDiagnostic() != null
-                    && "E6005".equals(arm.firstDiagnostic().code())
-                    && arm.firstDiagnostic().message()
-                        .contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the conventional-layout arm returns the mapped E6005 "
-                    + "SHARED_EMITTER_COVERAGE: " + arm.diagnostics());
+            checkEq(List.of("int:10115", "str:berlin", "int:9", "str:munich"),
+                traceEvents(oracle, SemanticOpKind.FIELD_READ).stream()
+                    .filter(event -> event.phase()
+                        == SemanticRuntimeModel.Phase.SUCCESS)
+                    .map(SemanticRuntimeModel.TraceEvent::output).toList(),
+                "the conventional-layout oracle field reads publish the "
+                    + "constructed values");
+
+            // (a) The LuaJIT production artifact: emitted, staged (byte-identical
+            // on a repeated run), and executed under real luajit.
+            Map<String, String> luaTree = emitAndPublish(fixture, Backend.LUAJIT,
+                luaOut, "app.lua");
+            Map<String, String> luaTreeRepeat = emitAndPublish(fixture, Backend.LUAJIT,
+                luaOutRepeat, "app.lua");
+            checkEq(luaTree, luaTreeRepeat,
+                "the conventional-layout LuaJIT staged set is byte-identical on a "
+                    + "repeated run");
+            check(luaTree.containsKey("app.lua"),
+                "the conventional-layout LuaJIT staged set carries the one project "
+                    + "artifact (the conventional layout no longer fails closed)");
+            writeFileIn(luaOut, "vertical_probe.lua", LUA_DRIVER);
+            ProcessOutcome luaRun = runProcess(List.of("luajit", "vertical_probe.lua"),
+                luaOut);
+            checkEq(0, luaRun.exitCode(),
+                "the conventional-layout LuaJIT artifact constructs the imported "
+                    + "instances through the owner's factory under real luajit: "
+                    + luaRun.output());
+            check(luaRun.stdout().contains("PROBE-OK"),
+                "the conventional-layout LuaJIT driver's construction probe and "
+                    + "its published-surface re-invocation hold: "
+                    + luaRun.stdout().replace("\n", "\\n"));
+
+            // (b) The JVM production artifact: emitted, staged (byte-identical on a
+            // repeated run), compiled and executed under javac --release 25
+            // -proc:none + java.
+            Map<String, String> jvmTree = emitAndPublish(fixture, Backend.JVM,
+                jvmOut, "App.java");
+            Map<String, String> jvmTreeRepeat = emitAndPublish(fixture, Backend.JVM,
+                jvmOutRepeat, "App.java");
+            checkEq(jvmTree, jvmTreeRepeat,
+                "the conventional-layout JVM staged set is byte-identical on a "
+                    + "repeated run");
+            checkEq(Set.of("App.java"), jvmTree.keySet(),
+                "the conventional-layout JVM staged set is the one project "
+                    + "artifact and nothing else");
+            String classpath = absoluteClasspath();
+            Path classes = fixture.root().resolve("jvm-classes");
+            Files.createDirectories(classes);
+            writeFileIn(jvmOut, "VerticalProbe.java", JVM_DRIVER);
+            ProcessOutcome javacRun = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                jvmOut.resolve("App.java").toAbsolutePath().toString(),
+                jvmOut.resolve("VerticalProbe.java").toAbsolutePath().toString()),
+                jvmOut);
+            checkEq(0, javacRun.exitCode(),
+                "the conventional-layout JVM artifact compiles with javac --release "
+                    + "25 -proc:none: " + javacRun.output());
+            if (javacRun.exitCode() == 0) {
+                ProcessOutcome jvmRun = runProcess(List.of("java", "-cp",
+                    classpath + java.io.File.pathSeparator + classes,
+                    "VerticalProbe"), jvmOut);
+                checkEq(0, jvmRun.exitCode(),
+                    "the conventional-layout JVM artifact constructs the imported "
+                        + "instances through the owner's factory and its field reads "
+                        + "observe the constructed values under real java: "
+                        + jvmRun.output());
+                check(jvmRun.stdout().contains("PROBE-OK"),
+                    "the conventional-layout JVM driver's construction probe "
+                        + "re-invocation all holds: "
+                        + jvmRun.stdout().replace("\n", "\\n"));
+            }
         } finally {
             deleteRecursively(fixture.root());
+        }
+    }
+
+    // =========================================================================
+    // 5. The owner-resolution fault seeds
+    // =========================================================================
+
+    /**
+     * The delivered-fact owner resolution is the one authority shared by
+     * the oracle and both emitters, so its fail-closed arms are
+     * load-bearing: the unique binding module resolves the owner, an
+     * unregistered construction entry resolves to no factory, an ambiguous
+     * binding (two modules binding one entry), a registration naming a
+     * foreign module's op, and a null factory reference each fail closed.
+     */
+    private static void testOwnerResolutionFaultSeeds() {
+        System.out.println("-- the owner-resolution fault seeds: the unique binding "
+            + "module resolves the owner; an unregistered entry resolves none; an "
+            + "ambiguous, foreign-module, or null-ref construction fails closed --");
+        ClassFactoryId entry = new ClassFactoryId(7L);
+        ClassFactoryId otherEntry = new ClassFactoryId(8L);
+        OpId ownerFactory = new OpId(OWNER, 11L);
+        OpId otherFactory = new OpId(APP, 12L);
+        ClassFactoryRegistry ownerRegistry =
+            new ClassFactoryRegistry(Map.of(entry, ownerFactory));
+        ClassFactoryRegistry otherRegistry =
+            new ClassFactoryRegistry(Map.of(otherEntry, otherFactory));
+
+        checkEq(ownerFactory,
+            ClassFactoryRegistry.ownerFactoryOp(
+                Map.of(OWNER, ownerRegistry, APP, otherRegistry), entry),
+            "the unique binding module resolves the owner's factory op (never the "
+                + "class descriptor namespace)");
+        checkEq(null,
+            ClassFactoryRegistry.ownerFactoryOp(Map.of(OWNER, ownerRegistry),
+                new ClassFactoryId(9L)),
+            "an unregistered construction entry resolves to no factory");
+
+        try {
+            ClassFactoryRegistry.ownerFactoryOp(Map.of(OWNER, ownerRegistry, APP,
+                new ClassFactoryRegistry(Map.of(entry, otherFactory))), entry);
+            fail("an ambiguous construction entry binding must fail closed");
+        } catch (IllegalStateException expected) {
+            check(expected.getMessage() != null
+                    && expected.getMessage().contains("exactly one owner"),
+                "an ambiguous construction entry fails closed with its producer "
+                    + "defect: " + expected.getMessage());
+        }
+
+        try {
+            ClassFactoryRegistry.ownerFactoryOp(
+                Map.of(OWNER, new ClassFactoryRegistry(Map.of(entry, otherFactory))),
+                entry);
+            fail("a registration naming a foreign module's op must fail closed");
+        } catch (IllegalStateException expected) {
+            check(expected.getMessage() != null
+                    && expected.getMessage().contains(
+                        "binds a factory op of that module"),
+                "a registration naming a foreign module's op fails closed with its "
+                    + "producer defect: " + expected.getMessage());
+        }
+
+        try {
+            ClassFactoryRegistry.ownerFactoryOp(Map.of(OWNER, ownerRegistry), null);
+            fail("a null classFactoryRef must fail closed");
+        } catch (IllegalStateException expected) {
+            check(expected.getMessage() != null
+                    && expected.getMessage().contains("null classFactoryRef"),
+                "a null classFactoryRef fails closed with its producer defect: "
+                    + expected.getMessage());
         }
     }
 
@@ -1169,12 +1311,8 @@ public class InProjectClassConstructionVerticalTest {
         testLoweringAndClassNewFacts();
         testOracleEvents();
         testProductionArtifacts();
-        testRecordedOwnerResolutionBoundary();
-        System.out.println();
-        System.out.println("Recorded findings: " + findings.size());
-        for (String finding : findings) {
-            System.out.println("  - " + finding);
-        }
+        testConventionalLayoutOwnerResolution();
+        testOwnerResolutionFaultSeeds();
         System.out.println();
         System.out.println("Passed: " + passed + ", Failed: " + failed);
         if (failed > 0) {

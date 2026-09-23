@@ -467,10 +467,16 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # factory names and assigns them (instead of declaring them with
   # `local function` after the factories that reference them), and no
   # second fact producer or imported-class-specific emission arm is
-  # added. The landed owner resolution still derives the owner module from
-  # the class descriptor namespace, so the conventional root/module layout
-  # fails closed; that boundary is pinned and recorded as a finding by the
-  # run (printed, not a failure) and is not repaired here.
+  # added. The SHARED_FACTORY owner resolution is the delivered per-module
+  # class-factory registry fact (the unique module whose registry binds the
+  # construction entry), never the class descriptor namespace, so the
+  # conventional root/module layout (root `src`, modules
+  # `owner.deal`/`app.deal`) constructs through the owner's factory end to
+  # end: the conventional-layout drive asserts the class-identity namespace
+  # `@src/Address` against the module identity `owner`, the oracle's
+  # success with the owner-attributed factory events and the constructed
+  # field values, and both production artifacts executing under the real
+  # toolchains with byte-identical repeated staging.
   'fg|=== Running In-Project Imported-Class Construction Vertical Tests (ISSUE-0644) ===|java -ea -cp build deal.test.InProjectClassConstructionVerticalTest'
   # ISSUE-0650 registration: the host module load and the JVM host ABI
   # emission surface (host-module-load-and-host-call-realization H1, H2

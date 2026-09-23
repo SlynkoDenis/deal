@@ -483,12 +483,8 @@ public final class SemanticDifferentialHarness {
                 if (payload.defaultOwner() != deal.semantic.ir.DefaultOwner.SHARED_FACTORY) {
                     continue;
                 }
-                ClassFactoryRegistry registry =
-                    registries.get(new ModuleId(payload.classId().modulePath()));
-                if (registry == null) {
-                    continue;
-                }
-                OpId factoryOpId = registry.factoryFor(payload.classFactoryRef());
+                OpId factoryOpId = ClassFactoryRegistry.ownerFactoryOp(registries,
+                    payload.classFactoryRef());
                 if (factoryOpId != null) {
                     overrides.computeIfAbsent(factoryOpId, k -> new ArrayDeque<>())
                         .add(op.opId());

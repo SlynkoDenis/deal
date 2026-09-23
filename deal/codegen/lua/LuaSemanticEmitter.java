@@ -3024,20 +3024,22 @@ public final class LuaSemanticEmitter {
                 .append(", __resT), nil)\n");
         }
 
-        /** The registered owner factory op of a SHARED_FACTORY CLASS_NEW. */
+        /**
+         * The registered owner factory op of a SHARED_FACTORY CLASS_NEW,
+         * resolved through the delivered per-module class-factory
+         * registries (the one fact channel shared with the oracle and the
+         * JVM session): the owner module is the module whose registry
+         * binds the construction entry, never the class descriptor
+         * namespace.
+         */
         private OpId factoryOpIdOf(SemanticOp op, KindPayload.ClassNewPayload payload) {
-            ModuleId ownerModule = new ModuleId(payload.classId().modulePath());
-            ClassFactoryRegistry registry = registries.get(ownerModule);
-            if (registry == null) {
-                throw new IllegalStateException("CLASS_NEW " + op.opId()
-                    + " SHARED_FACTORY owner " + ownerModule
-                    + " has no ClassFactoryRegistry in the closure (producer defect)");
-            }
-            OpId factoryOpId = registry.factoryFor(payload.classFactoryRef());
+            OpId factoryOpId = ClassFactoryRegistry.ownerFactoryOp(registries,
+                payload.classFactoryRef());
             if (factoryOpId == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId()
                     + " classFactoryRef " + payload.classFactoryRef()
-                    + " does not resolve in the owner's registry (producer defect)");
+                    + " resolves in no module's ClassFactoryRegistry in the closure"
+                    + " (producer defect)");
             }
             return factoryOpId;
         }

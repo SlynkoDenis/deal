@@ -2026,21 +2026,26 @@ public final class SemanticOracle {
                     checkRunner(op, payload, boundaryOps, null),
                     bodyRunner(op));
                 case SHARED_FACTORY -> {
-                    ModuleId ownerModule = new ModuleId(payload.classId().modulePath());
-                    ClassFactoryRegistry registry = registries.get(ownerModule);
-                    if (registry == null) {
-                        throw new IllegalStateException("CLASS_NEW " + op.opId()
-                            + " SHARED_FACTORY owner " + ownerModule
-                            + " has no ClassFactoryRegistry in the executable closure "
-                            + "(an owner outside the shared route is never executed "
-                            + "here — producer defect)");
-                    }
-                    OpId factoryOpId = registry.factoryFor(payload.classFactoryRef());
+                    OpId factoryOpId = ClassFactoryRegistry.ownerFactoryOp(registries,
+                        payload.classFactoryRef());
                     if (factoryOpId == null) {
                         throw new IllegalStateException("CLASS_NEW " + op.opId()
                             + " classFactoryRef " + payload.classFactoryRef()
-                            + " does not resolve in the owner's registry "
-                            + "(producer defect)");
+                            + " resolves in no module's ClassFactoryRegistry of the"
+                            + " executable closure (the owner module is a fact of the"
+                            + " delivered registries, never the class descriptor"
+                            + " namespace; an owner outside the shared closure is never"
+                            + " executed here — producer defect)");
+                    }
+                    // The resolved factory op names the owner module, whose
+                    // registry is the binding's own carrier (the helper's
+                    // postcondition).
+                    ClassFactoryRegistry registry = registries.get(factoryOpId.module());
+                    if (registry == null) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " resolves factory op " + factoryOpId + " of module "
+                            + factoryOpId.module() + " carrying no registry in the"
+                            + " closure (producer defect)");
                     }
                     SemanticOp factoryOp = opOf(factoryOpId);
                     if (factoryOp.kind() != SemanticOpKind.CLASS_FACTORY) {
