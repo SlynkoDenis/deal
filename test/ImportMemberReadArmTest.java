@@ -37,6 +37,7 @@ import deal.ast.WhileStatement;
 import deal.checker.BuiltinErrorDeclaration;
 import deal.checker.CheckResult;
 import deal.checker.NameResolver;
+import deal.checker.Symbol;
 import deal.checker.SymbolTable;
 import deal.checker.TypeChecker;
 import deal.codegen.Backend;
@@ -47,8 +48,10 @@ import deal.identity.CanonicalModuleIdentity;
 import deal.lexer.LexResult;
 import deal.lexer.Lexer;
 import deal.module.CompilationOrchestrator;
+import deal.module.ProductionProjectEmission;
 import deal.parser.ParseResult;
 import deal.parser.Parser;
+import deal.publication.PublicationStager;
 import deal.semantic.CapabilityRegistry;
 import deal.semantic.CheckedModuleInput;
 import deal.semantic.ModuleRoute;
@@ -66,6 +69,7 @@ import deal.semantic.StdlibFunctionCatalog;
 import deal.semantic.FunctionBindingRegistry;
 import deal.semantic.ir.ConstructKind;
 import deal.semantic.ir.ExportInterface;
+import deal.semantic.ir.ExternalModuleInterface;
 import deal.semantic.ir.ExternalExecutionOwner;
 import deal.semantic.ir.ExternalModuleKind;
 import deal.semantic.ir.FunctionAllocationIdentity;
@@ -110,7 +114,11 @@ import java.util.Set;
  * {@code module-export-reads-and-in-project-class-construction} M1 and
  * the export-read (lowering) contract;
  * {@code semantic-ir-construct-coverage-cutover} K2/K9;
- * {@code luajit-jvm-single-lowering-production-cutover} C1).
+ * {@code luajit-jvm-single-lowering-production-cutover} C1). This child
+ * (ISSUE-0660) adds the remaining guard rows — G3 (the declared-export
+ * channel: the resolved alias's checker {@code Symbol.ModuleSymbol}), G4
+ * (the closed produced kind set) and G7 (the class-descriptor read) —
+ * and locks every row with the guard-seed battery.
  *
  * <ol>
  *   <li><b>The stub battery (per import kind, both positions).</b> A
@@ -149,6 +157,27 @@ import java.util.Set;
  *       function-typed read result carries zero registrations fails the
  *       closed gate with {@code R-FUNCTION-BINDING}; the unmodified unit
  *       is admitted on the typed and the text surface.</li>
+ *   <li><b>The guard-seed battery (ISSUE-0660).</b> Each double of the
+ *       seven guard-table rows fails closed with the exact E6005
+ *       {@code CONSTRUCT_UNLOWERED} and no unit: G1 (a non-module member
+ *       base on the callee path, including a local binding shadowing an
+ *       import alias — the current checker scope's symbol decides), G2
+ *       (an alias without a resolved import fact), G3 (a member name
+ *       absent from the resolved import's declared-export map, and the
+ *       same doctored fact against the real project entry whose index
+ *       <em>does</em> declare the export), G4 (a doctored
+ *       {@code DECLARATION}-kind fact), G5 (a STDLIB member outside the
+ *       closed catalog), G6 (a STDLIB descriptor mismatch), and G7 (a
+ *       class-descriptor read). The failure detail names the module and
+ *       the member, no read op is emitted, and no registration exists.
+ *       The G1 seed's project is also driven through the production arm:
+ *       the exact E6005, nothing staged, and the prior artifact set
+ *       byte-identical. The combination positive control (the
+ *       {@code std.console} read plus its typed-binding invocation) still
+ *       lowers and validates with exactly one {@code EXPORT_READ} and
+ *       exactly one registration; the per-kind batteries above stay
+ *       green, so no guard over-triggers for a declared member, a closed
+ *       kind, or a value descriptor.</li>
  * </ol>
  *
  * <p>This slice changes lowering only: the typed-binding invocation of a
@@ -864,7 +893,536 @@ public class ImportMemberReadArmTest {
     }
 
     // =========================================================================
-    // 4. The guards of the arm
+    // 4a. The guard-seed battery — G1-G7
+    // =========================================================================
+
+    /** The first function declaration with the given name (exported or not). */
+    private static FunctionDeclaration functionNamed(ProgramNode program, String name) {
+        for (StatementNode statement : program.statements()) {
+            if (statement instanceof ExportDeclaration exported) {
+                if (exported.declaration() instanceof FunctionDeclaration function
+                        && function.name().equals(name)) {
+                    return function;
+                }
+                continue;
+            }
+            if (statement instanceof FunctionDeclaration function
+                    && function.name().equals(name)) {
+                return function;
+            }
+        }
+        return null;
+    }
+
+    /** The checked input of one slice with the given resolved imports. */
+    private static CheckedModuleInput inputOf(Slice slice,
+                                              List<ResolvedImport> imports) {
+        return new CheckedModuleInput(MODULE, SOURCE_ID, Path.of(SOURCE_ID),
+            slice.program(), slice.checks(), imports, exportsOf(slice.program()),
+            CheckedModuleKind.IMPLEMENTATION);
+    }
+
+    /** One E7 drive of one hand-built checked input. */
+    private static SemanticLowerer.FullProgramE7Result driveInput(
+            CheckedModuleInput input, Map<ModuleId, ModuleRoute> routes,
+            ConstructKind... coverageKinds) {
+        return SemanticLowerer.lowerModuleFullProgramE7(input,
+            SemanticProfile.DEAL_V1_2_INT32, coverage(coverageKinds), INTERFACE_HASH,
+            REGISTRY_HASH, deal.semantic.ir.SemanticIdAllocator.over(List.of(MODULE)),
+            routes, Map.of(), Set.of());
+    }
+
+    /** The direct read-production drive result: the session and its defect. */
+    private record DirectDrive(SemanticLowerer.ModuleLowerer lowerer,
+                               RuntimeException defect) {
+    }
+
+    /**
+     * The direct read-production drive: one {@code ModuleLowerer} session that
+     * installed no resolved import facts, lowering the read expression
+     * itself (the carrier-session shape).
+     */
+    private static DirectDrive lowerReadDirect(Slice slice, MemberAccessExpr access) {
+        SemanticLowerer.ModuleLowerer lowerer = new SemanticLowerer.ModuleLowerer(
+            MODULE, SOURCE_ID, slice.checks(),
+            deal.semantic.ir.SemanticIdAllocator.over(List.of(MODULE)));
+        try {
+            lowerer.lowerExpression(access);
+            return new DirectDrive(lowerer, null);
+        } catch (RuntimeException defect) {
+            return new DirectDrive(lowerer, defect);
+        }
+    }
+
+    /**
+     * The G3 doctored checker fact (R4): the read site's current checker
+     * scope resolves a module symbol whose declared-export map lacks the
+     * member. The per-module session's own checker scope is the fact
+     * channel, so the doctored symbol shadows the root import binding in
+     * the read's owning function body — the project interface index's
+     * declared-export entries never enter the decision.
+     */
+    private static void doctorDeclaredExports(CheckResult checks, Block body,
+                                              String alias, Map<String, Type> exports) {
+        SymbolTable scope = checks.scopeMap().get(body);
+        if (scope == null) {
+            fail("the doctored read's function body carries a checker scope");
+            return;
+        }
+        Symbol original = checks.symbolTable().resolve(alias);
+        if (!(original instanceof Symbol.ModuleSymbol module)) {
+            fail("alias '" + alias + "' resolves to a checker module symbol");
+            return;
+        }
+        scope.define(alias, new Symbol.ModuleSymbol(alias, exports, module.importSpan()));
+    }
+
+    /** The E7 guard-seed assertion: E6005, the rule, the member, and no unit. */
+    private static void assertFailsClosedMember(
+            SemanticLowerer.FullProgramE7Result result, String member, String what) {
+        if (result == null || result.lowering() == null) {
+            fail(what + ": the E7 drive returns a result");
+            return;
+        }
+        check(result.lowering().hasErrors() && result.lowering().unit() == null,
+            what + " fails closed with no unit (no read op, no registration); got "
+                + (result.lowering().hasErrors() ? "diagnostics" : "a unit"));
+        if (!result.lowering().hasErrors()) {
+            return;
+        }
+        CompilerDiagnostic diagnostic = result.lowering().diagnostics().get(0);
+        check("E6005".equals(diagnostic.code())
+                && diagnostic.message().contains(SemanticLowerer.CONSTRUCT_UNLOWERED),
+            what + " converts to E6005 CONSTRUCT_UNLOWERED: " + diagnostic);
+        check(diagnostic.message().contains(member),
+            what + " names the member '" + member + "': " + diagnostic);
+    }
+
+    /** The guard-seed assertion plus the module identity in the failure detail. */
+    private static void assertFailsClosedNaming(
+            SemanticLowerer.FullProgramE7Result result, String modulePath, String member,
+            String what) {
+        assertFailsClosedMember(result, member, what);
+        if (result == null || result.lowering() == null
+                || !result.lowering().hasErrors()) {
+            return;
+        }
+        CompilerDiagnostic diagnostic = result.lowering().diagnostics().get(0);
+        check(diagnostic.message().contains(modulePath),
+            what + " names the module '" + modulePath + "': " + diagnostic);
+    }
+
+    static void testGuardSeedBattery() {
+        System.out.println("-- the guard-seed battery: G1-G7, each E6005 "
+            + "CONSTRUCT_UNLOWERED with no unit --");
+
+        // G2: an alias without a resolved import fact — the read
+        // production's own guard, driven in a session that installed no
+        // import facts (the carrier-session shape; the checker symbol still
+        // declares the member).
+        Slice g2Slice = checkSlice(HOST_SLICE, MODULE, SOURCE_ID, hostResolver());
+        if (g2Slice != null) {
+            MemberAccessExpr g2Access = memberAccess(g2Slice.program(), "ping");
+            DirectDrive g2 = g2Access == null ? null : lowerReadDirect(g2Slice, g2Access);
+            check(g2 != null
+                    && g2.defect() instanceof SemanticLowerer.ConstructUnlowered,
+                "G2 the unresolved-alias read raises ConstructUnlowered: "
+                    + (g2 == null ? "no access" : g2.defect()));
+            if (g2 != null && g2.defect() instanceof SemanticLowerer.ConstructUnlowered) {
+                check(g2.defect().getMessage().contains("without a resolved import fact"),
+                    "G2 names the missing resolved import fact: "
+                        + g2.defect().getMessage());
+                check(g2.defect().getMessage().contains("host.ping"),
+                    "G2 names the member 'host.ping': " + g2.defect().getMessage());
+                List<SemanticOp> emitted = new ArrayList<>();
+                for (SemanticOp op : g2.lowerer().ops()) {
+                    if (op.kind() == SemanticOpKind.EXPORT_READ) {
+                        emitted.add(op);
+                    }
+                }
+                check(emitted.isEmpty(),
+                    "G2 emits no EXPORT_READ (and therefore registers nothing); got "
+                        + emitted);
+            }
+        }
+        // The session-level shape: a full-program drive without installed
+        // import facts fails closed at the import declaration.
+        assertFailsClosed(drive(STDLIB_SLICE, STDLIB_IMPORTS, Map.of(),
+                new StubModuleResolver(), true, SLICE_COVERAGE_IF),
+            "without a resolved import fact", "the import-fact-less session");
+
+        // G3: a member name absent from the resolved import's
+        // declared-export map (doctored checker facts). The realized drive
+        // installs the resolved import fact; only the checker module
+        // symbol's export map diverges.
+        Slice g3Slice = checkSlice(HOST_SLICE, MODULE, SOURCE_ID, hostResolver());
+        if (g3Slice != null) {
+            FunctionDeclaration g3Main = functionNamed(g3Slice.program(), "main");
+            if (g3Main != null) {
+                doctorDeclaredExports(g3Slice.checks(), g3Main.body(), "host",
+                    Map.of());
+                assertFailsClosedNaming(driveInput(inputOf(g3Slice, List.of(
+                        new ResolvedImport("host", "stub/host", HOST,
+                            ExternalModuleKind.HOST))),
+                    Map.of(), SLICE_COVERAGE),
+                    "stub.host", "host.ping", "G3 the undeclared-member read");
+            }
+        }
+
+        // G4: a resolved import kind outside the closed produced set (a
+        // doctored resolved-import fact carrying DECLARATION; DECLARATION
+        // has no producer). The read never falls through to a read or a
+        // registration.
+        assertFailsClosedNaming(drive(HOST_SLICE, List.of(
+                new ResolvedImport("host", "stub/host", HOST,
+                    ExternalModuleKind.DECLARATION)),
+            Map.of(), hostResolver(), SLICE_COVERAGE),
+            "stub.host", "host.ping", "G4 the DECLARATION-kind read");
+
+        // G5: a STDLIB member outside the closed catalog.
+        StubModuleResolver outsideCatalog = new StubModuleResolver();
+        outsideCatalog.register("std/console",
+            Map.of("localMarker", new Type.Func(List.of(), Type.String.INSTANCE)));
+        assertFailsClosedNaming(drive("""
+            import * as console from "std/console"
+
+            export function main(): null {
+              let m: () => string = console.localMarker
+              return null
+            }
+            """, STDLIB_IMPORTS, Map.of(), outsideCatalog, SLICE_COVERAGE),
+            "std.console", "console.localMarker", "G5 the out-of-catalog stdlib read");
+
+        // G6: a STDLIB read whose checked descriptor differs from the
+        // catalog row's declared descriptor (the stub's declaration
+        // diverges from the row).
+        StubModuleResolver drifted = new StubModuleResolver();
+        drifted.register("std/console",
+            Map.of("log", new Type.Func(List.of(Type.Int.INSTANCE), Type.Null.INSTANCE)));
+        assertFailsClosedNaming(drive("""
+            import * as console from "std/console"
+
+            export function main(): null {
+              let g: (x: int) => null = console.log
+              return null
+            }
+            """, STDLIB_IMPORTS, Map.of(), drifted, SLICE_COVERAGE),
+            "std.console", "console.log", "G6 the stdlib descriptor-mismatch read");
+
+        // G7: a checked class-descriptor read — a class used as a value.
+        // The stub declares the class export (a declared member, so G3
+        // passes); the read's checked descriptor is a Class descriptor.
+        StubModuleResolver classExport = new StubModuleResolver();
+        classExport.register("./util", Map.of("Point",
+            IdentityTestFixtures.classType("Point", "./util")));
+        classExport.registerClassSymbol("./util", new Symbol.ClassSymbol("Point",
+            List.of(), "./util", IdentityTestFixtures.identityOf("./util", "Point")));
+        assertFailsClosedNaming(drive("""
+            import * as lib from "./util"
+
+            export function main(): null {
+              let p: lib.Point = lib.Point
+              return null
+            }
+            """, COMPILED_IMPORTS, Map.of(LIB, ModuleRoute.SHARED), classExport,
+            SLICE_COVERAGE),
+            "lib.util", "lib.Point", "G7 the class-descriptor read");
+    }
+
+    // =========================================================================
+    // 4b. The project guard seeds: the G1 rows, the fact-channel seed, and the
+    // production-arm staging assertion
+    // =========================================================================
+
+    /**
+     * The G1 project seed: a class-field call — the member callee's base is
+     * a local class-typed binding, never a module alias. The callee path
+     * ({@code lowerUserCallImport}) reaches the read production with the
+     * non-module base.
+     */
+    private static final String GUARD_G1_APP_SOURCE = """
+        class Holder {
+          f: () => int = compute
+        }
+
+        function compute(): int {
+          return 1
+        }
+
+        export function main(): null {
+          let h: Holder = {f: compute}
+          let n: int = h.f()
+          return null
+        }
+        """;
+
+    /**
+     * The G1 shadowing seed: the local binding carries the import alias's
+     * name but a non-module type. The current checker scope's symbol decides
+     * — a root-table-only fact would wrongly produce a read.
+     */
+    private static final String GUARD_G1_SHADOW_APP_SOURCE = """
+        import * as probe from "host/probe"
+
+        class Holder {
+          ping: () => string = compute
+        }
+
+        function compute(): string {
+          return "x"
+        }
+
+        export function main(): null {
+          let probe: Holder = {ping: compute}
+          probe.ping()
+          return null
+        }
+        """;
+
+    private static SemanticLowerer.ProjectLoweringResult lower(Fixture fixture,
+            CheckedProjectInput project) {
+        return SemanticLowerer.lowerProject(productionInvocation(),
+            project, fixture.index(), fixture.manifests(),
+            fixture.surface(), fixture.declarationIdentities(),
+            fixture.externCModules(),
+            BuiltinErrorDeclaration.synthesized(
+                project.modules().get(0).ast().span()),
+            List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
+            Set.of());
+    }
+
+    /**
+     * The project input with the entry module's declared-export fact doctored
+     * (the G3 seed's fact channel): the entry module's checker scope resolves
+     * a doctored module symbol for the alias while the project interface
+     * index keeps its own declared-export entries.
+     */
+    private static CheckedProjectInput doctorEntryExports(Fixture fixture,
+            String alias, Map<String, Type> exports) {
+        CheckedProjectInput project = fixture.checkedProject();
+        List<CheckedModuleInput> modules = new ArrayList<>();
+        for (CheckedModuleInput module : project.modules()) {
+            if (!module.moduleId().equals(project.entryModule())) {
+                modules.add(module);
+                continue;
+            }
+            FunctionDeclaration main = functionNamed(module.ast(), "main");
+            if (main == null) {
+                fail("the project entry module declares main");
+                return project;
+            }
+            doctorDeclaredExports(module.checks(), main.body(), alias, exports);
+            modules.add(new CheckedModuleInput(module.moduleId(), module.sourceId(),
+                module.sourcePath(), module.ast(), module.checks(), module.imports(),
+                module.exports(), module.kind()));
+        }
+        return new CheckedProjectInput(project.invocation(), project.entryModule(),
+            modules, project.releaseStateHash());
+    }
+
+    /** The project guard-seed assertion: E6005, the rule, the module and member. */
+    private static void assertProjectFailsClosed(
+            SemanticLowerer.ProjectLoweringResult lowered, String modulePath,
+            String member, String what) {
+        if (lowered == null) {
+            fail(what + ": the project lowering returns a result");
+            return;
+        }
+        check(lowered.hasErrors() && lowered.project() == null,
+            what + " fails closed with no project (no unit, no registration); got "
+                + (lowered.hasErrors() ? "diagnostics" : "a project"));
+        if (!lowered.hasErrors()) {
+            return;
+        }
+        CompilerDiagnostic diagnostic = lowered.diagnostics().get(0);
+        check("E6005".equals(diagnostic.code())
+                && diagnostic.message().contains(SemanticLowerer.CONSTRUCT_UNLOWERED),
+            what + " converts to E6005 CONSTRUCT_UNLOWERED: " + diagnostic);
+        check(diagnostic.message().contains(member),
+            what + " names the member '" + member + "': " + diagnostic);
+        check(diagnostic.message().contains(modulePath),
+            what + " names the module '" + modulePath + "': " + diagnostic);
+    }
+
+    /** One production-arm run of one fixture (the P9 pattern). */
+    private static ProductionProjectEmission.Result emit(Fixture fixture,
+            Backend backend, PublicationStager stager, boolean sourceMapExplicit)
+            throws Exception {
+        return ProductionProjectEmission.run(productionInvocation(),
+            fixture.checkedProject(), fixture.index(), fixture.manifests(),
+            fixture.surface(), fixture.declarationIdentities(),
+            fixture.externCModules(), BuiltinErrorDeclaration.synthesized(
+                fixture.checkedProject().modules().get(0).ast().span()),
+            List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
+            Set.of(), backend, sourceMapExplicit, fixture.distributionHome(), stager);
+    }
+
+    /** The published/previous artifact set of one tree: path → bytes. */
+    private static Map<String, String> snapshotTree(Path root) throws Exception {
+        Map<String, String> snapshot = new java.util.TreeMap<>();
+        if (!Files.exists(root)) {
+            return snapshot;
+        }
+        try (var walk = Files.walk(root)) {
+            for (Path file : walk.sorted().toList()) {
+                if (Files.isRegularFile(file)) {
+                    snapshot.put(root.relativize(file).toString().replace('\\', '/'),
+                        java.util.Arrays.toString(Files.readAllBytes(file)));
+                }
+            }
+        }
+        return snapshot;
+    }
+
+    static void testGuardSeedProjectSeeds() throws Exception {
+        System.out.println("-- the project guard seeds: G1 on the callee path, the "
+            + "fact-channel seed, and the production-arm staging assertion --");
+
+        // G1a: a local class-typed receiver's function-typed field call.
+        Fixture call = compileProject(Map.of("src/app.deal", GUARD_G1_APP_SOURCE),
+            Map.of());
+        try {
+            assertProjectFailsClosed(lower(call), "app", "h.f",
+                "G1a the non-module class-field callee");
+
+            // The same seed through the production arm: the exact E6005, no
+            // staged artifact, and the prior artifact set byte-identical.
+            Path out = call.root().resolve("out-arm");
+            writeFileIn(out, "app.lua", "-- previous artifact\n");
+            writeFileIn(out, "lib.lua", "-- previous sibling\n");
+            writeFileIn(out, "deal/runtime.lua", "-- previous runtime\n");
+            Map<String, String> before = snapshotTree(out);
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(call, Backend.LUAJIT, stager, false);
+            } finally {
+                stager.discard();
+            }
+            check(!result.emitted(), "the guard-seed project fails closed");
+            check(result.firstDiagnostic() != null
+                    && "E6005".equals(result.firstDiagnostic().code())
+                    && result.firstDiagnostic().message()
+                        .contains(SemanticLowerer.CONSTRUCT_UNLOWERED),
+                "the guard-seed project reports E6005 CONSTRUCT_UNLOWERED: "
+                    + result.diagnostics());
+            check(result.firstDiagnostic() != null
+                    && result.firstDiagnostic().message().contains("h.f"),
+                "the guard-seed failure names the member: " + result.diagnostics());
+            check(stager.stagedSet().relativePaths().isEmpty(),
+                "the guarded compile stages nothing");
+            check(before.equals(snapshotTree(out)),
+                "the guard-seed project leaves the previous artifact set "
+                    + "byte-identical");
+        } finally {
+            deleteRecursively(call.root());
+        }
+
+        // G1b: the local binding carries the import alias's name and a
+        // non-module type; the current checker scope's symbol decides.
+        Fixture shadow = compileProject(Map.of(
+                "src/probe.d.deal", "export function ping(): string;\n",
+                "src/app.deal", GUARD_G1_SHADOW_APP_SOURCE),
+            Map.of("host/probe", "src/probe.d.deal"));
+        try {
+            assertProjectFailsClosed(lower(shadow), "app", "probe.ping",
+                "G1b the shadowed non-module callee base");
+        } finally {
+            deleteRecursively(shadow.root());
+        }
+
+        // G7 through the production arm: a checker-valid class-descriptor
+        // read (an imported class used as a value) reports the exact E6005
+        // and stages nothing, preserving the prior artifact set.
+        Fixture classRead = compileProject(Map.of(
+                "src/lib.deal", """
+                    export class Point {
+                      x: int = 0
+                    }
+                    """,
+                "src/app.deal", """
+                    import * as lib from "./lib"
+
+                    export function main(): null {
+                      let p: lib.Point = lib.Point
+                      return null
+                    }
+                    """),
+            Map.of());
+        try {
+            assertProjectFailsClosed(lower(classRead), "lib", "lib.Point",
+                "G7 the project-entry class-descriptor read");
+            Path out = classRead.root().resolve("out-arm");
+            writeFileIn(out, "app.lua", "-- previous artifact\n");
+            writeFileIn(out, "deal/runtime.lua", "-- previous runtime\n");
+            Map<String, String> before = snapshotTree(out);
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(classRead, Backend.LUAJIT, stager, false);
+            } finally {
+                stager.discard();
+            }
+            check(!result.emitted(), "the class-descriptor read project fails closed");
+            check(result.firstDiagnostic() != null
+                    && "E6005".equals(result.firstDiagnostic().code())
+                    && result.firstDiagnostic().message()
+                        .contains(SemanticLowerer.CONSTRUCT_UNLOWERED),
+                "the class-descriptor read reports E6005 CONSTRUCT_UNLOWERED: "
+                    + result.diagnostics());
+            check(result.firstDiagnostic() != null
+                    && result.firstDiagnostic().message().contains("lib.Point"),
+                "the class-descriptor read names the member: " + result.diagnostics());
+            check(stager.stagedSet().relativePaths().isEmpty(),
+                "the class-descriptor read stages nothing");
+            check(before.equals(snapshotTree(out)),
+                "the class-descriptor read leaves the previous artifact set "
+                    + "byte-identical");
+        } finally {
+            deleteRecursively(classRead.root());
+        }
+
+        // G3 through the real project entry: the project interface index
+        // declares the export; the doctored checker module symbol does not.
+        // The read fails closed — the index's declared-export entries are
+        // not consulted (R4).
+        Fixture doctored = compileProject(Map.of(
+                "src/lib.deal", LIB_SOURCE,
+                "src/app.deal", """
+                    import * as lib from "./lib"
+
+                    export function main(): null {
+                      let f: (v: int) => string = lib.tag
+                      return null
+                    }
+                    """),
+            Map.of());
+        try {
+            CheckedProjectInput project = doctorEntryExports(doctored, "lib", Map.of());
+            assertProjectFailsClosed(lower(doctored, project), "lib", "lib.tag",
+                "G3 the project-entry declared-export guard");
+            // The index keeps its own declared-export entry while the checker
+            // symbol does not: the guard's fact channel is the checker
+            // symbol, never the index.
+            boolean indexDeclares = false;
+            for (ExternalModuleInterface entry
+                    : doctored.index().modules().values()) {
+                for (ExportInterface exported : entry.exports()) {
+                    if (exported.name().equals("tag")) {
+                        indexDeclares = true;
+                    }
+                }
+            }
+            check(indexDeclares,
+                "the project interface index still declares the export 'tag' while the "
+                    + "read fails closed (the checker symbol is the fact channel)");
+        } finally {
+            deleteRecursively(doctored.root());
+        }
+    }
+
+    // =========================================================================
+    // 4c. The guards of the arm (the ISSUE-0659 rows)
     // =========================================================================
 
     static void testGuards() {
@@ -918,6 +1476,65 @@ public class ImportMemberReadArmTest {
                 "the descriptor-mismatch failure names the checked descriptor and the "
                     + "catalog row's declared descriptor: " + message);
         }
+    }
+
+    // =========================================================================
+    // 4d. The positive control after the guards land
+    // =========================================================================
+
+    /**
+     * The combination fixture: the {@code std.console} read plus its
+     * typed-binding invocation. The declared member passes G3, the closed
+     * STDLIB kind passes G4, the catalog row passes G5/G6, and the function
+     * descriptor passes G7 — exactly one read and exactly one registration.
+     */
+    private static final String COMBINATION_SLICE = """
+        import * as console from "std/console"
+
+        export function main(): null {
+          let g: (x: string) => null = console.log
+          g("x")
+          return null
+        }
+        """;
+
+    static void testGuardPositiveControl() {
+        System.out.println("-- positive control: the std.console read plus its "
+            + "typed-binding invocation still lower and validate with exactly one read "
+            + "and one registration --");
+
+        LoweredModuleUnit unit = unitOf(drive(COMBINATION_SLICE, STDLIB_IMPORTS,
+            Map.of(), new StubModuleResolver(), SLICE_COVERAGE), "the combination slice");
+        if (unit == null) {
+            return;
+        }
+        check(readsOf(unit).size() == 1,
+            "exactly one EXPORT_READ for the read plus its invocation; got "
+                + readsOf(unit).size());
+        if (readsOf(unit).size() != 1) {
+            return;
+        }
+        SemanticOp read = readsOf(unit).get(0);
+        KindPayload.ExportReadPayload payload = payloadOf(read);
+        RuntimeDescriptor.Func row = rowDescriptorOf("std.console", "log");
+        check(payload.module().equals(CONSOLE) && payload.name().equals("log")
+                && payload.descriptor().equals(row),
+            "the read names std.console/log with the catalog row's declared "
+                + "descriptor; got " + payload.module() + "/" + payload.name() + " "
+                + payload.descriptor().canonicalSpecText());
+        FunctionExecutionBinding binding = bindingOf(unit, payload.value());
+        check(binding instanceof FunctionExecutionBinding.HostFunction host
+                && host.hostModuleId().equals(CONSOLE)
+                && host.exportName().equals("log")
+                && host.descriptor().equals(row),
+            "exactly one HostFunction registration keyed by the read's result "
+                + "identity; got " + binding);
+        check(SemanticIrValidator.validate(unit, facts()).isEmpty(),
+            "the combination unit passes the closed validator: "
+                + SemanticIrValidator.validate(unit, facts()));
+        check(genericCallWithStaticReading(unit) != null,
+            "the typed-binding invocation lowers CALL(INDIRECT) with the read's "
+                + "Static binding");
     }
 
     // =========================================================================
@@ -1352,6 +1969,9 @@ public class ImportMemberReadArmTest {
         testHostBothPositions();
         testCompiledValueReadSharedRoute();
         testGuards();
+        testGuardSeedBattery();
+        testGuardSeedProjectSeeds();
+        testGuardPositiveControl();
         testNonFunctionReadRegistersNothing();
         testDeterminism();
         testProjectCompiledReadOnly();

@@ -10340,13 +10340,20 @@ public final class SemanticLowerer {
          *
          * <p>Fail-closed guards (each E6005
          * {@code CONSTRUCT_UNLOWERED}, no unit): a member base that is not
-         * a module alias, an alias without a resolved import fact, an
-         * import kind outside the closed set, a STDLIB member outside the
-         * closed catalog, and a STDLIB descriptor mismatch. A missing
-         * callee-route record for an IMPLEMENTATION-kind read is the same
-         * producer defect: the realized drive installs the resolved import
-         * facts and the route facts (the call-machine and project
-         * entries), and a route-less carrier session fails closed.</p>
+         * a module alias, an alias without a resolved import fact, a
+         * member name not declared by the resolved import (the fact channel
+         * is the resolved alias's checker {@code Symbol.ModuleSymbol}
+         * resolved in the current module's checker scope — the project
+         * interface index's declared-export entries are not a session
+         * input), an import kind outside the closed set, a STDLIB member
+         * outside the closed catalog, a STDLIB descriptor mismatch, and a
+         * read whose checked descriptor is a class descriptor (a class
+         * used as a value is outside the closed runtime value domain and
+         * never emits or registers). A missing callee-route record for an
+         * IMPLEMENTATION-kind read is the same producer defect: the
+         * realized drive installs the resolved import facts and the route
+         * facts (the call-machine and project entries), and a route-less
+         * carrier session fails closed.</p>
          *
          * @param access the checked import-member access; non-null
          * @param alias  the access's base identifier (the import alias);
@@ -10360,19 +10367,48 @@ public final class SemanticLowerer {
         private ImportMaterialization materializeImportRead(MemberAccessExpr access,
                                                             IdentifierExpr alias,
                                                             ValueId slot) {
-            if (!(checks.symbolTable().resolve(alias.name()) instanceof Symbol.ModuleSymbol)) {
-                throw new ConstructUnlowered("callee member base '" + alias.name()
-                    + "' is not a module import (module member reads are EXPORT_READ "
-                    + "shapes)");
+            // The read resolves its alias in the current module's checker
+            // scope, never a root-table-only fact: the declared-export fact
+            // channel is the resolved Symbol.ModuleSymbol's exports() map.
+            SymbolTable scope = currentCheckerScope();
+            Symbol aliasSymbol = scope == null ? null : scope.resolve(alias.name());
+            if (!(aliasSymbol instanceof Symbol.ModuleSymbol moduleSymbol)) {
+                throw new ConstructUnlowered("member read '" + alias.name() + "."
+                    + access.field() + "' has a non-module base '" + alias.name()
+                    + "' (module member reads are EXPORT_READ shapes)");
             }
             ResolvedImport importFact = importByAlias(alias.name());
             if (importFact == null) {
                 throw new ConstructUnlowered("import alias '" + alias.name()
+                    + "' of '" + alias.name() + "." + access.field()
                     + "' without a resolved import fact (a missing checker fact is a "
                     + "producer defect)");
             }
+            // The declared-export guard (G3): the member name must be a key
+            // of the resolved alias's checker module symbol. The project
+            // interface index's declared-export entries are not a session
+            // input; the checker symbol stays the authority.
+            if (!moduleSymbol.exports().containsKey(access.field())) {
+                throw new ConstructUnlowered("module member '" + alias.name() + "."
+                    + access.field() + "' is not a declared export of module '"
+                    + importFact.resolvedModuleId().path()
+                    + "' (the resolved alias's checker module symbol carries the "
+                    + "declared-export facts; an undeclared member never lowers to an "
+                    + "EXPORT_READ)");
+            }
             RuntimeDescriptor checked = ContainerPayloadDescriptors
                 .resultDescriptorOf(checkedType(access));
+            // The class-descriptor guard (G7): a class used as a value is
+            // outside the closed runtime value domain. The read never emits
+            // an EXPORT_READ and never registers.
+            if (checked instanceof RuntimeDescriptor.Class) {
+                throw new ConstructUnlowered("module member '" + alias.name() + "."
+                    + access.field() + "' of module '"
+                    + importFact.resolvedModuleId().path()
+                    + "' is a class-descriptor read (a class used as a value is "
+                    + "outside the closed runtime value domain; the read never emits "
+                    + "and never registers)");
+            }
             RuntimeDescriptor descriptor;
             switch (importFact.kind()) {
                 case HOST, IMPLEMENTATION -> descriptor = checked;
@@ -10396,8 +10432,12 @@ public final class SemanticLowerer {
                     }
                 }
                 default -> throw new ConstructUnlowered("import kind "
-                    + importFact.kind() + " has no import-member read arm (the closed "
-                    + "set is IMPLEMENTATION/STDLIB/HOST)");
+                    + importFact.kind() + " of module member '" + alias.name() + "."
+                    + access.field() + "' of module '"
+                    + importFact.resolvedModuleId().path()
+                    + "' has no import-member read arm (the closed produced set is "
+                    + "IMPLEMENTATION/STDLIB/HOST; the parent-pinned DECLARATION "
+                    + "kind has no producer)");
             }
             FunctionBindingRegistry.FunctionValueImportFacts facts = null;
             if (descriptor instanceof RuntimeDescriptor.Func functionDescriptor) {
