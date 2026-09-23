@@ -635,4 +635,38 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # console.log === console.error program driving the oracle and both
   # production artifacts to the identical identity outcomes).
   'fg|=== Running Stdlib Export Read Realization Tests (ISSUE-0647) ===|java -ea -cp build deal.test.StdlibExportReadRealizationTest'
+  # ISSUE-0649 registration: the read-value integration verification leaf -
+  # the consolidated three-consumer probe matrix, the per-unit multi-chunk
+  # resolution probe, the exactly-one-binding and both-directions binding
+  # invariants, the five negative seeds through the production arm, and the
+  # emission-agreement/determinism assertions
+  # (module-export-reads-and-in-project-class-construction Verification 1
+  # (consolidated), 3, 5, 7, 8 and the Failure and operations section; the
+  # read execution and export-read contracts;
+  # semantic-ir-construct-coverage-cutover K2/K9;
+  # luajit-jvm-single-lowering-production-cutover C2): one composition
+  # project whose entry reads a compiled companion's declared function
+  # export twice plus a std.console value read, a std.string row read, and
+  # the console callee read lowers through the one project entry, validates,
+  # runs the oracle and the three-consumer differential matrix, and stages
+  # both production artifacts under the real toolchains (luajit;
+  # javac --release 25 -proc:none + java) with no placeholder text, the
+  # identical published object for two reads of one export, and the
+  # identical memoized catalog callable for two stdlib reads; the per-kind
+  # exactly-one registration (COMPILED/STDLIB/HOST) with the doctored
+  # duplicate, zero-registration, and re-keying seeds; the owner-side
+  # LoweredBody and read-side ExternalFunction(SHARED_BODY) directions; the
+  # five fail-closed seeds (a non-exported member read, an unresolved
+  # alias, an out-of-catalog stdlib member, a stdlib descriptor mismatch,
+  # and a class-descriptor read) each E6005 CONSTRUCT_UNLOWERED through the
+  # production arm with nothing staged and the previous artifact set
+  # byte-identical; the mode-shared read operation with the byte-identical
+  # body and repeated emissions; the absent-slot projection (missing)
+  # identical in the oracle, the LuaJIT chunk, and the JVM class; the
+  # two-chunk/two-class per-unit program-scoped registry resolution with
+  # the identical published object and the runtime-hosted catalog
+  # callable; and the retargeted-pin/registration assertions (the
+  # previously pinned value-read E6005 assertions assert the realized
+  # behavior, and the landed async-entry matrix stays registered).
+  'fg|=== Running Read-Value Integration Verification Tests (ISSUE-0649) ===|java -ea -cp build deal.test.ReadValueIntegrationVerificationTest'
 )
