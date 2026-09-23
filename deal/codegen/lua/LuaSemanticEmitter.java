@@ -2850,7 +2850,7 @@ public final class LuaSemanticEmitter {
                     "__errtext(__chkB)");
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
-                emitBoundarySuccessAtom(boundary, "__hostAtom("
+                emitBoundarySuccessAtom(boundary, "__hostCellAtom("
                     + luaString(staticKind(boundaryPayload.descriptor()))
                     + ", __chkB)");
                 out.append("__hbT[").append(index).append("] = __hostProjectArg(")
@@ -2902,7 +2902,7 @@ public final class LuaSemanticEmitter {
                 // atom (the deployed runtime's null sentinel is the
                 // language null, so a null return atomizes as "null"
                 // exactly like the oracle's NullValue).
-                emitBoundaryStartAtom(returnBoundary, "__hostAtom("
+                emitBoundaryStartAtom(returnBoundary, "__hostCellAtom("
                     + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
                         .payload()).descriptor())) + ", __resT)");
                 out.append("__okB, __chkB = pcall(__hostReturnCell, ")
@@ -2915,7 +2915,7 @@ public final class LuaSemanticEmitter {
                     "__errtext(__chkB)");
                 out.append("  error(__chkB, 0)\n");
                 out.append("end\n");
-                emitBoundarySuccessAtom(returnBoundary, "__hostAtom("
+                emitBoundarySuccessAtom(returnBoundary, "__hostCellAtom("
                     + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
                         .payload()).descriptor())) + ", __resT)");
             }
@@ -4397,12 +4397,30 @@ public final class LuaSemanticEmitter {
                     out.append("  return nil\n");
                     out.append("end), S.__sa").append(op.opId().id()).append(")\n");
                 }
-                case FunctionExecutionBinding.HostFunction host ->
-                    emitAsyncHostStart(op, token, host.hostModuleId().path(),
-                        host.exportName());
-                case FunctionExecutionBinding.HostFunctionValue hostValue ->
-                    emitAsyncHostStart(op, token, hostValue.hostModuleId().path(),
-                        "@value#" + hostValue.materializingBoundaryOpId().id());
+                case FunctionExecutionBinding.HostFunction host -> {
+                    if (hostSurface == null) {
+                        // A unit/surface-less session is the scenario drive:
+                        // its async host path is the landed deterministic
+                        // seam, which the production path never reaches.
+                        emitAsyncHostSeamStart(op, token, host.hostModuleId().path(),
+                            host.exportName());
+                    } else {
+                        emitAsyncHostStart(op, token,
+                            hostSurfaceEntry(host.hostModuleId().path(),
+                                host.exportName()),
+                            asyncStartArgs(op, payload));
+                    }
+                }
+                case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                    if (hostSurface == null) {
+                        emitAsyncHostSeamStart(op, token,
+                            hostValue.hostModuleId().path(),
+                            "@value#" + hostValue.materializingBoundaryOpId().id());
+                    } else {
+                        emitAsyncHostStart(op, token, hostValueTarget(hostValue),
+                            asyncStartArgs(op, payload));
+                    }
+                }
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitAsyncExternalStart(op, token, payload.externalAsyncLink());
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
@@ -4415,9 +4433,35 @@ public final class LuaSemanticEmitter {
             emitTokenSuccess(op, luaString(tokenAtom(token)));
         }
 
-        /** The ASYNC_START(HOST) terminal: the seam start + the bad-handle check. */
-        private void emitAsyncHostStart(SemanticOp op, AsyncTokenId token,
-                                        String module, String export) {
+        /**
+         * The completed argument slots of one {@code ASYNC_START} arm: the
+         * per-position entries of the {@code S.__sa<op>} carrier table.
+         * Each argument is passed as its own expression — a trailing
+         * {@code unpack} would be truncated to one value in a non-final
+         * argument position under Lua 5.1/LuaJIT semantics, silently
+         * dropping arguments and colliding with the trailing span triplet.
+         */
+        private List<String> asyncStartArgs(SemanticOp op,
+                KindPayload.AsyncStartPayload payload) {
+            int count = payload.parameterBoundaryMode() == ParameterBoundaryMode.RUN
+                ? payload.parameterBoundaryOpIds().size()
+                : op.operands().size();
+            List<String> args = new ArrayList<>();
+            for (int i = 1; i <= count; i++) {
+                args.add("S.__sa" + op.opId().id() + "[" + i + "]");
+            }
+            return args;
+        }
+
+        /**
+         * The scenario-drive {@code ASYNC_START(HOST)} terminal (the landed
+         * shape): the deterministic seam start plus the bad-handle check.
+         * Emitted only by a session without the compile's host declaration
+         * surface (a unit/surface-less session); the production and
+         * trace-mode project sessions take the operation-handle arm above.
+         */
+        private void emitAsyncHostSeamStart(SemanticOp op, AsyncTokenId token,
+                                            String module, String export) {
             KindPayload.AsyncStartPayload payload =
                 (KindPayload.AsyncStartPayload) op.payload();
             String label = payload.hostOperationLabel();
@@ -4444,6 +4488,79 @@ public final class LuaSemanticEmitter {
                 .append(luaString(label)).append(")\n");
         }
 
+        /**
+         * The ASYNC_START(HOST) terminal (ISSUE-0652;
+         * {@code host-module-load-and-host-call-realization} H4 and the
+         * async host start and completion contract): the loaded surface
+         * entry is invoked through the same host-boundary call shape as
+         * the sync arm ({@code <entry>.f(args..., file, line, column)}) —
+         * the loaded wrapper's declared-async shape check realizes the
+         * op's {@code ASYNC_OPERATION_HANDLE} terminal with the pinned
+         * E8010 {@code host async function must return an async operation,
+         * got {actual}} at the call origin — and the returned operation
+         * handle is bound to the canonical token. The deterministic
+         * {@code __callbacks.__hostStartAsync} seam is never referenced on
+         * the production path (the seam entry stays the scenario/oracle
+         * drive's).
+         */
+        private void emitAsyncHostStart(SemanticOp op, AsyncTokenId token,
+                                        String target, List<String> args) {
+            KindPayload.AsyncStartPayload payload =
+                (KindPayload.AsyncStartPayload) op.payload();
+            String label = payload.hostOperationLabel();
+            if (trace) {
+                out.append("io.stderr:write(\"F|ASYNC_START_OP|-|\"..__esc(")
+                    .append(luaString(label)).append(")..\"\\n\")\n");
+                out.append("io.stderr:flush()\n");
+            }
+            // The converged host-boundary call shape, identical to the
+            // sync arm: the trailing literal span triplet is how the
+            // loaded wrapper's declared-async shape check reports the DEAL
+            // call site byte-exact (the pinned E8010 at the call origin).
+            out.append("__okT, __resT = pcall((").append(target).append(").f");
+            for (String arg : args) {
+                out.append(", ").append(arg);
+            }
+            out.append(", ").append(spanTripletArgs(op)).append(")\n");
+            out.append("if not __okT then\n");
+            out.append("  __resT = __hostError(__resT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("  error(__resT, 0)\n");
+            out.append("end\n");
+            out.append("__asyncStartHost(").append(token.tokenId()).append(", ")
+                .append(luaString(label)).append(", __resT)\n");
+        }
+
+        /**
+         * The loaded surface entry of one declared host export: the
+         * module identity is the surface key (H1), so no alias is needed
+         * and the direct {@code ASYNC_START(HOST)}, the value-position
+         * {@code ASYNC_START} on the read's registration, and a
+         * {@code HostFunctionValue} crossing all resolve one entry.
+         */
+        private String hostSurfaceEntry(String modulePath, String exportName) {
+            return "__exportSurfaces[" + luaString(modulePath) + "]["
+                + luaString(exportName) + "]";
+        }
+
+        /**
+         * The materialized host-facing function value of one
+         * {@code HostFunctionValue} crossing ({@code .f} is the loaded
+         * wrapper's calling convention, exactly as the sync arm's).
+         */
+        private String hostValueTarget(FunctionExecutionBinding.HostFunctionValue hostValue) {
+            SemanticOp crossing = opsById.get(hostValue.materializingBoundaryOpId());
+            if (crossing == null
+                    || !(crossing.payload() instanceof KindPayload.BoundaryPayload boundary)) {
+                throw new IllegalStateException("ASYNC_START names the materializing"
+                    + " host crossing " + hostValue.materializingBoundaryOpId()
+                    + ", which is not a boundary op of the emitted closure"
+                    + " (a producer defect)");
+            }
+            return slot(boundary.input());
+        }
+
         /** The ASYNC_START(EXTERNAL) terminal: the callee artifact's async-entry dispatch. */
         private void emitAsyncExternalStart(SemanticOp op, AsyncTokenId token,
                                             ExternalAsyncLink link) {
@@ -4462,11 +4579,17 @@ public final class LuaSemanticEmitter {
         /**
          * AWAIT — the completion position (D13 step 6): the deterministic
          * FIFO drain first, then the canonical referent's completion. A
-         * pending host operation completes through the host seam (the
-         * ordered ASYNC_COMPLETE_* effects); a failed operation publishes
-         * the identical error — never a re-check or a synthesized copy —
-         * and a completed value crosses the single {@code ASYNC_COMPLETION}
-         * boundary at the await site.
+         * production host operation (a record carrying the loaded declared
+         * async export's operation handle) is driven to completion through
+         * the landed {@code __rt.async_step} machinery — the operation's
+         * own DEAL failure becomes the task's failure identical (never
+         * re-checked, copied, or re-projected) and a non-DEAL failure
+         * rethrows as infrastructure; a seam-registered record (no
+         * handle) keeps the landed deterministic host-seam completion. A
+         * failed operation publishes the identical error — never a
+         * re-check or a synthesized copy — and a completed value crosses
+         * the single {@code ASYNC_COMPLETION} boundary at the await site
+         * (a boundary failure is re-originated at that site).
          */
         private void emitAwait(SemanticOp op) {
             KindPayload.AwaitPayload payload = (KindPayload.AwaitPayload) op.payload();
@@ -4482,23 +4605,57 @@ public final class LuaSemanticEmitter {
                 .append(payload.token()).append(" (producer defect)\", 0)\n");
             out.append("end\n");
             out.append("if __tA.status == 2 then\n");
-            out.append("  local __oA = __callbacks.__hostCompleteAsync(__tA.label)\n");
-            out.append("  if __oA.ok then\n");
+            out.append("  if __tA.handle ~= nil then\n");
+            // The production host operation: the registered operation
+            // handle is driven through the landed async_step machinery.
+            // The operation's own DEAL failure (the runtime's error table
+            // or the chunk's tagged carrier) is the task's failure —
+            // converted once into the chunk's canonical carrier with its
+            // own code, message, origin, expected, and actual; anything
+            // else is an infrastructure failure and rethrows identical.
+            out.append("    local __okH, __errH = pcall(__rt.async_step, "
+                + "__tA.handle)\n");
+            out.append("    if not __okH then\n");
+            out.append("      if type(__errH) == \"table\" and (__errH.__d "
+                + "or (__errH.code ~= nil and __errH.message ~= nil)) then\n");
+            out.append("        __tA.err = __hostError(__errH, ")
+                .append(luaString(originOf(op))).append(")\n");
             if (trace) {
-                out.append("    io.stderr:write(\"F|ASYNC_COMPLETE_RETURN|-|\""
-                    + "..__esc(__tA.label..\"=\"..__hostAtom(__oA.v))..\"\\n\")\n");
-                out.append("    io.stderr:flush()\n");
+                out.append("        io.stderr:write(\"F|ASYNC_COMPLETE_THROW|-|\""
+                    + "..__esc(__tA.label..\"!\"..__tA.err.code)..\"\\n\")\n");
+                out.append("        io.stderr:flush()\n");
             }
-            out.append("    __tA.value = __oA.v\n");
+            out.append("      else\n");
+            out.append("        error(__errH, 0)\n");
+            out.append("      end\n");
+            out.append("    else\n");
+            out.append("      __tA.value = __tA.handle.__result\n");
+            if (trace) {
+                out.append("      io.stderr:write(\"F|ASYNC_COMPLETE_RETURN|-|\""
+                    + "..__esc(__tA.label..\"=\"..__hostAtom(__tA.value))..\"\\n\")\n");
+                out.append("      io.stderr:flush()\n");
+            }
+            out.append("    end\n");
             out.append("  else\n");
+            out.append("    local __oA = "
+                + "__callbacks.__hostCompleteAsync(__tA.label)\n");
+            out.append("    if __oA.ok then\n");
             if (trace) {
-                out.append("    io.stderr:write(\"F|ASYNC_COMPLETE_THROW|-|\""
-                    + "..__esc(__tA.label..\"!\"..__oA.code)..\"\\n\")\n");
-                out.append("    io.stderr:flush()\n");
+                out.append("      io.stderr:write(\"F|ASYNC_COMPLETE_RETURN|-|\""
+                    + "..__esc(__tA.label..\"=\"..__hostAtom(__oA.v))..\"\\n\")\n");
+                out.append("      io.stderr:flush()\n");
             }
-            out.append("    __tA.err = {__d = true, code = __oA.code, m = __oA.m, o = ")
+            out.append("      __tA.value = __oA.v\n");
+            out.append("    else\n");
+            if (trace) {
+                out.append("      io.stderr:write(\"F|ASYNC_COMPLETE_THROW|-|\""
+                    + "..__esc(__tA.label..\"!\"..__oA.code)..\"\\n\")\n");
+                out.append("      io.stderr:flush()\n");
+            }
+            out.append("      __tA.err = {__d = true, code = __oA.code, m = __oA.m, o = ")
                 .append(luaString(originOf(op)))
                 .append(", e = nil, a = nil, f = __framesText(), cause = nil}\n");
+            out.append("    end\n");
             out.append("  end\n");
             out.append("  __tA.status = 1\n");
             out.append("end\n");
@@ -4507,20 +4664,30 @@ public final class LuaSemanticEmitter {
             out.append("  error(__tA.err, 0)\n");
             out.append("end\n");
             // The single ASYNC_COMPLETION boundary at the await site: a
-            // host-scripted completion atomizes by its runtime carrier; a
-            // DEAL body value atomizes by the declared descriptor.
+            // host completion atomizes by its runtime carrier; a DEAL body
+            // value atomizes by the declared descriptor. A boundary
+            // failure is re-originated at the boundary's own origin (the
+            // await expression) and publishes the boundary's FAILURE
+            // beside the await op's — the oracle's boundary-child pair.
             if (canonicalOwnerOf(payload.token()) == AsyncTokenOwner.HOST_OPERATION) {
                 emitBoundaryStartAtom(boundary, "__hostAtom(__tA.value)");
             } else {
                 emitBoundaryStart(boundary, "__tA.value", boundaryPayload.descriptor());
             }
-            out.append("__chk = __bcheck(")
+            out.append("__okB, __chkB = pcall(__bcheck, ")
                 .append(luaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(luaString(staticKind(boundaryPayload.descriptor())))
                 .append(", __tA.value)\n");
-            emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
-            out.append(slot((ValueId) op.result())).append(" = __chk\n");
+            out.append("if not __okB then\n");
+            out.append("  __chkB.o = ").append(luaString(originOf(boundary))).append("\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "__errtext(__chkB)");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            emitBoundarySuccess(boundary, "__chkB", boundaryPayload.descriptor());
+            out.append(slot((ValueId) op.result())).append(" = __chkB\n");
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
         }
@@ -5811,11 +5978,15 @@ local function __hostParamCell(desc, index, v, origin)
   return error(__failExpr("E8010", "parameter "..index.." type mismatch: "..inner,
     origin, desc, __hostKindOf(v)), 0)
 end
--- The DEAL-null-aware event atom of one host-crossing value: the
--- deployed runtime's null sentinel and the chunk's own sentinel are the
--- language null, so every host boundary event atomizes a null position
--- as "null" exactly like the oracle's NullValue.
-local function __hostAtom(kind, v)
+-- The declared-kind event atom of one host-crossing value (the
+-- declared-cell boundaries of the host arms): the deployed runtime's
+-- null sentinel and the chunk's own sentinel are the language null, so
+-- a null position atomizes as "null" exactly like the oracle's
+-- NullValue. The value-derived atom (the completion-value effect) is
+-- the prelude's own 1-argument __hostAtom — this helper is
+-- deliberately named apart so the two never shadow each other in a
+-- chunk that carries both.
+local function __hostCellAtom(kind, v)
   if v == nil or v == __NULL or v == __rt.__NULL then return "null" end
   return __atom(kind, v)
 end
@@ -6662,12 +6833,16 @@ local function __asyncStartTask(tokenId, owner, co, args)
   table.insert(__ready, tokenId)
   return tokenId
 end
--- One async host operation record: its completion arrives through the
--- host seam at the awaiting site (never through the body drain).
-local function __asyncStartHost(tokenId, label)
+-- One async host operation record: a production operation carries the
+-- operation handle the loaded declared async export returned (its
+-- completion is driven at the awaiting site through the landed
+-- __rt.async_step machinery, never through the body drain); a
+-- scenario/seam record carries no handle and completes through the
+-- deterministic host seam at the awaiting site.
+local function __asyncStartHost(tokenId, label, handle)
   __tasks[tokenId] = {token = tokenId, owner = "HOST_OPERATION", co = nil,
                       args = nil, status = 2, value = nil, err = nil,
-                      label = label}
+                      label = label, handle = handle}
   table.insert(__ready, tokenId)
   return tokenId
 end

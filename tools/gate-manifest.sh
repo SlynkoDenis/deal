@@ -697,4 +697,24 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # carrying the declaration surface, the oracle's seam-supplied loaded
   # surface entry, and the event-for-event/terminal comparison).
   'fg|=== Running Sync Host Call Realization Tests (ISSUE-0651) ===|java -ea -cp build deal.test.HostCallRealizationTest'
+  # ISSUE-0652 registration: the async host path through the operation
+  # handle (host-module-load-and-host-call-realization H4 and the async
+  # host start and completion contract; semantic-ir-construct-coverage-
+  # cutover K4; sequencing step 4): ASYNC_START(HOST) invokes the loaded
+  # declared async export through the same host-boundary call shape as the
+  # sync arm (the loaded wrapper's declared-async shape check realizing the
+  # op's ASYNC_OPERATION_HANDLE terminal with the pinned E8010 at the call
+  # origin) and binds the returned operation handle to the canonical token;
+  # AWAIT drives a handle-carrying LuaJIT record through the landed
+  # __rt.async_step machinery (the operation's own DEAL error identical, a
+  # non-DEAL failure rethrown as infrastructure) and joins the JVM
+  # production JvmRuntime.startHostTask(tokenId, label, operation)
+  # registration without reading JvmRuntime.HOST_ASYNC; the single
+  # ASYNC_COMPLETION boundary at the await origin, the admitted async host
+  # fixture set under luajit and javac --release 25 -proc:none + java with
+  # the sidecar-pinned outcomes and origins, the pending-operation drive
+  # with poisoned seams, the operation-failure and unloaded-surface
+  # fail-closed seeds, and the combined trace-mode oracle agreement drive
+  # (one load, a sync host call, an async host start and its await).
+  'fg|=== Running Async Host Realization Tests (ISSUE-0652) ===|java -ea -cp build deal.test.AsyncHostRealizationTest'
 )

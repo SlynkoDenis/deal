@@ -928,8 +928,11 @@ public final class JvmRuntime {
     /**
      * One async task record per canonical token identity: the token's
      * {@link CompletableFuture}, the body supplier for DEAL body tasks
-     * (null for host operations), and the host operation label for host
-     * operations (null for body tasks).
+     * (null for host operations), the host operation label for host
+     * operations (null for body tasks), and the production operation
+     * handle of a host operation the loaded declared async export
+     * returned (null for a DEAL body task and for a seam-registered host
+     * operation, whose completion is scripted by the scenario host).
      */
     public static final class AsyncTask {
         public final long tokenId;
@@ -937,14 +940,23 @@ public final class JvmRuntime {
         public final CompletableFuture<Object> future;
         public final java.util.function.Supplier<Object> body;
         public final String hostLabel;
+        /** The production host operation handle; null for every non-production task. */
+        public final Object hostOperation;
 
         AsyncTask(long tokenId, String owner, CompletableFuture<Object> future,
                   java.util.function.Supplier<Object> body, String hostLabel) {
+            this(tokenId, owner, future, body, hostLabel, null);
+        }
+
+        AsyncTask(long tokenId, String owner, CompletableFuture<Object> future,
+                  java.util.function.Supplier<Object> body, String hostLabel,
+                  Object hostOperation) {
             this.tokenId = tokenId;
             this.owner = owner;
             this.future = future;
             this.body = body;
             this.hostLabel = hostLabel;
+            this.hostOperation = hostOperation;
         }
     }
 
@@ -1035,14 +1047,45 @@ public final class JvmRuntime {
     }
 
     /**
+     * Registers one production async host operation (ISSUE-0652;
+     * {@code host-module-load-and-host-call-realization} H4 and the async
+     * host start and completion contract): the operation handle the loaded
+     * declared async export returned is the task's completion — the
+     * {@code AWAIT} joins that operation and never reads
+     * {@link #HOST_ASYNC}, which stays the scenario/oracle seam of the
+     * seam-registered host task. A handle that is not a backend async
+     * operation is a producer defect, never a silent projection.
+     *
+     * @param tokenId   the canonical token identity; non-negative
+     * @param label     the deterministic operation label; non-null
+     * @param operation the host operation handle; non-null
+     */
+    @SuppressWarnings("unchecked")
+    public static void startHostTask(long tokenId, String label, Object operation) {
+        if (!(operation instanceof CompletableFuture<?> future)) {
+            throw new IllegalStateException("the async host operation of token "
+                + tokenId + " is not a backend async operation (got "
+                + (operation == null ? "nothing" : operation.getClass().getName())
+                + ") — the emitted wrapper's declared-async shape check is the"
+                + " single authority (a producer defect)");
+        }
+        AsyncTask task = new AsyncTask(tokenId, "HOST_OPERATION",
+            (CompletableFuture<Object>) future, null, label, future);
+        TASKS.put(tokenId, task);
+        PENDING.add(task);
+    }
+
+    /**
      * The deterministic FIFO drain (the oracle's {@code drainReadyTasks}):
      * every pending DEAL body task completes on the run-local single
      * thread serial executor in submission order. A body that runs an
      * inner {@code AWAIT} already executes on the serial thread — its
      * inner drain runs the nested bodies inline on that same serial
      * thread (still FIFO, never a self-join deadlock, never the common
-     * pool). Host operations complete only at their own {@code AWAIT}
-     * through the seam.
+     * pool). A production host operation completes only at its own
+     * {@code AWAIT} through the registered operation; a seam-registered
+     * host operation completes only at its own {@code AWAIT} through the
+     * deterministic host seam.
      */
     public static void drainTasks() {
         while (!PENDING.isEmpty()) {
@@ -1093,9 +1136,11 @@ public final class JvmRuntime {
 
     /**
      * AWAIT — the completion position (D13 step 6): the deterministic
-     * FIFO drain first, then the token's completion. A pending host
-     * operation completes through the seam (the ordered
-     * {@code ASYNC_COMPLETE_RETURN}/{@code ASYNC_COMPLETE_THROW}
+     * FIFO drain first, then the token's completion. A production host
+     * operation (a task registered with the loaded declared async export's
+     * operation handle) joins that operation and never reads the seam; a
+     * seam-registered host operation completes through the seam (the
+     * ordered {@code ASYNC_COMPLETE_RETURN}/{@code ASYNC_COMPLETE_THROW}
      * effects); a failed operation rethrows the identical error — never a
      * re-check or a synthesized copy — and a completed value is returned
      * for the single {@code ASYNC_COMPLETION} boundary at the await site.
@@ -1111,6 +1156,35 @@ public final class JvmRuntime {
         if (task == null) {
             throw new IllegalStateException("AWAIT consumes an unbound token " + tokenId
                 + " (producer defect)");
+        }
+        if (task.hostLabel != null && task.hostOperation != null) {
+            // The production host operation (ISSUE-0652): the registered
+            // operation is the task's completion — the seam field is never
+            // read. The ordered completion effect mirrors the seam
+            // terminal so the differential trace comparison stays
+            // event-for-event; the operation's own DEAL error is rethrown
+            // identical (never re-checked, copied, or re-projected).
+            try {
+                Object value = task.future.join();
+                effect("ASYNC_COMPLETE_RETURN", task.hostLabel + "="
+                    + hostAtom(value));
+                return value;
+            } catch (CompletionException completion) {
+                Throwable cause = completion.getCause();
+                if (cause instanceof DealError dealError) {
+                    effect("ASYNC_COMPLETE_THROW", task.hostLabel + "!"
+                        + dealError.code);
+                    throw dealError; // the identical error
+                }
+                if (cause instanceof RuntimeException runtime) {
+                    throw runtime;
+                }
+                if (cause instanceof Error error) {
+                    throw error;
+                }
+                throw new IllegalStateException("the async host operation " + tokenId
+                    + " failed with " + cause, cause);
+            }
         }
         if (task.hostLabel != null && !task.future.isDone()) {
             if (HOST_ASYNC == null) {

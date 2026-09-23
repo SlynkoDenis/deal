@@ -4989,12 +4989,27 @@ public final class JvmSemanticEmitter {
                     out.append(indent(indent + 1)).append("return null;\n");
                     out.append(indent(indent)).append("});\n");
                 }
-                case FunctionExecutionBinding.HostFunction host ->
-                    emitAsyncHostStart(op, indent, token, host.hostModuleId().path(),
-                        host.exportName(), args);
-                case FunctionExecutionBinding.HostFunctionValue hostValue ->
-                    emitAsyncHostStart(op, indent, token, hostValue.hostModuleId().path(),
-                        "@value#" + hostValue.materializingBoundaryOpId().id(), args);
+                case FunctionExecutionBinding.HostFunction host -> {
+                    if (hostAbi == null) {
+                        // A unit/surface-less session is the scenario drive:
+                        // its async host path is the landed deterministic
+                        // seam, which the production path never reaches.
+                        emitAsyncHostSeamStart(op, indent, token,
+                            host.hostModuleId().path(), host.exportName(), args);
+                    } else {
+                        emitAsyncHostStart(op, indent, token, host.hostModuleId(),
+                            host.exportName(), args);
+                    }
+                }
+                case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                    if (hostAbi == null) {
+                        emitAsyncHostSeamStart(op, indent, token,
+                            hostValue.hostModuleId().path(),
+                            "@value#" + hostValue.materializingBoundaryOpId().id(), args);
+                    } else {
+                        emitAsyncHostValueStart(op, indent, token, hostValue, args);
+                    }
+                }
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitAsyncExternalStart(op, indent, token, payload.externalAsyncLink(),
                         args);
@@ -5008,9 +5023,16 @@ public final class JvmSemanticEmitter {
             emitTokenSuccess(op, javaString(tokenAtom(token)), indent);
         }
 
-        /** The ASYNC_START(HOST) terminal: the seam start + the bad-handle check. */
-        private void emitAsyncHostStart(SemanticOp op, int indent, AsyncTokenId token,
-                                        String module, String export, List<String> args) {
+        /**
+         * The scenario-drive {@code ASYNC_START(HOST)} terminal (the landed
+         * shape): the deterministic seam start plus the bad-handle check.
+         * Emitted only by a session without the compile's host ABI emission
+         * surface (a unit/surface-less session); the production and
+         * trace-mode project sessions take the operation-handle arm.
+         */
+        private void emitAsyncHostSeamStart(SemanticOp op, int indent,
+                                            AsyncTokenId token, String module,
+                                            String export, List<String> args) {
             KindPayload.AsyncStartPayload payload =
                 (KindPayload.AsyncStartPayload) op.payload();
             String label = payload.hostOperationLabel();
@@ -5041,6 +5063,115 @@ public final class JvmSemanticEmitter {
                 .append(");\n");
         }
 
+        /**
+         * The ASYNC_START(HOST) terminal (ISSUE-0652;
+         * {@code host-module-load-and-host-call-realization} H4 and the
+         * async host start and completion contract): the loaded surface
+         * entry is invoked through the emitted per-export wrapper — the
+         * same host-boundary call shape as the sync arm, with the call
+         * origin triplet — whose declared-async shape check realizes the
+         * op's {@code ASYNC_OPERATION_HANDLE} terminal with the pinned
+         * E8010 {@code host async function must return an async operation,
+         * got {actual}} at the call origin, and the returned operation
+         * handle is bound to the canonical token through the production
+         * {@code startHostTask(tokenId, label, operation)} registration.
+         * The wrapper returns the handle instead of joining it (the shared
+         * {@code AWAIT} machine owns the token and the single completion
+         * boundary), and the deterministic {@code JvmRuntime.HOST_ASYNC}
+         * seam is never referenced on the production path.
+         */
+        private void emitAsyncHostStart(SemanticOp op, int indent, AsyncTokenId token,
+                                        ModuleId moduleId, String exportName,
+                                        List<String> args) {
+            KindPayload.AsyncStartPayload payload =
+                (KindPayload.AsyncStartPayload) op.payload();
+            String label = payload.hostOperationLabel();
+            if (hostAbi == null) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " resolves the host export '" + moduleId.path() + "."
+                    + exportName + "' but the session carries no host ABI emission"
+                    + " surface (a producer defect; only the production project"
+                    + " entry carries the compile's declaration surface)");
+            }
+            String wrapper = hostAbi.requireWrapper(moduleId.path(), exportName);
+            StringBuilder call = new StringBuilder(wrapper).append('(');
+            for (String arg : args) {
+                call.append(arg).append(", ");
+            }
+            call.append(originArgs(op)).append(')');
+            emitAsyncHostOperation(op, indent, token, label, call.toString());
+        }
+
+        /**
+         * The {@code HostFunctionValue} async arm: the value materialized
+         * at its producing host crossing is invoked through the production
+         * function carrier the crossing's declared-return projection
+         * published (the surface entry's own bridging wrapper), whose
+         * declared-async shape check carries the pinned projection — the
+         * same route as the sync{\@code HostFunctionValue} arm.
+         */
+        private void emitAsyncHostValueStart(SemanticOp op, int indent,
+                                             AsyncTokenId token,
+                                             FunctionExecutionBinding.HostFunctionValue hostValue,
+                                             List<String> args) {
+            KindPayload.AsyncStartPayload payload =
+                (KindPayload.AsyncStartPayload) op.payload();
+            String label = payload.hostOperationLabel();
+            if (hostAbi == null) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " resolves the host-materialized function value of module '"
+                    + hostValue.hostModuleId().path() + "' but the session carries"
+                    + " no host ABI emission surface (a producer defect)");
+            }
+            SemanticOp crossing = opsById.get(hostValue.materializingBoundaryOpId());
+            if (crossing == null
+                    || !(crossing.payload() instanceof KindPayload.BoundaryPayload boundary)) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " names the materializing host crossing "
+                    + hostValue.materializingBoundaryOpId()
+                    + ", which is not a boundary op of the emitted closure"
+                    + " (a producer defect)");
+            }
+            StringBuilder call = new StringBuilder("((JvmRuntime.FunctionValue) ")
+                .append(slot(boundary.input()))
+                .append(").fn.invoke(new java.lang.Object[]{ ");
+            for (int i = 0; i < args.size(); i++) {
+                if (i > 0) {
+                    call.append(", ");
+                }
+                call.append(args.get(i));
+            }
+            call.append(" })");
+            emitAsyncHostOperation(op, indent, token, label, call.toString());
+        }
+
+        /**
+         * The shared invocation half of one async host start: the
+         * declared-async shape check (inside the emitted wrapper) under the
+         * op's own failure path, then the operation handle bound to the
+         * canonical token through the production host-task registration.
+         */
+        private void emitAsyncHostOperation(SemanticOp op, int indent,
+                                            AsyncTokenId token, String label,
+                                            String invocation) {
+            out.append(indent(indent)).append("JvmRuntime.effect(\"ASYNC_START_OP\", ")
+                .append(javaString(label)).append(");\n");
+            String handle = "__ha_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(handle)
+                .append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(handle).append(" = ")
+                .append(invocation).append(";\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__e)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __e;\n");
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append("JvmRuntime.startHostTask(")
+                .append(token.tokenId()).append(", ").append(javaString(label))
+                .append(", ").append(handle).append(");\n");
+        }
+
         /** The ASYNC_START(EXTERNAL) terminal: the callee artifact's async-entry dispatch. */
         private void emitAsyncExternalStart(SemanticOp op, int indent, AsyncTokenId token,
                                             ExternalAsyncLink link, List<String> args) {
@@ -5057,12 +5188,16 @@ public final class JvmSemanticEmitter {
         /**
          * AWAIT — the completion position (D13 step 6): the deterministic
          * FIFO drain first (the serial executor's join), then the
-         * canonical referent's completion. A pending host operation
-         * completes through the host seam (the ordered ASYNC_COMPLETE_*
-         * effects); a failed operation publishes the identical error —
-         * never a re-check or a synthesized copy — and a completed value
-         * crosses the single {@code ASYNC_COMPLETION} boundary at the
-         * await site.
+         * canonical referent's completion. A production host operation
+         * joins its registered operation and never reads the seam; a
+         * seam-registered host operation completes through the host seam
+         * (the ordered ASYNC_COMPLETE_* effects); a failed operation
+         * publishes the identical error — never a re-check or a
+         * synthesized copy — and a completed value crosses the single
+         * {@code ASYNC_COMPLETION} boundary at the await site (a boundary
+         * failure is re-originated at that site and publishes the
+         * boundary's FAILURE beside the await op's, exactly the oracle's
+         * boundary-child pair).
          */
         private void emitAwait(SemanticOp op, int indent) {
             KindPayload.AwaitPayload payload = (KindPayload.AwaitPayload) op.payload();
@@ -5071,35 +5206,55 @@ public final class JvmSemanticEmitter {
             KindPayload.BoundaryPayload boundaryPayload =
                 (KindPayload.BoundaryPayload) boundary.payload();
             emitStart(op, indent);
+            String awaited = "__av_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(awaited)
+                .append(";\n");
             out.append(indent(indent)).append("try {\n");
-            out.append(indent(indent + 1)).append("Object __av = JvmRuntime.awaitTask(")
+            out.append(indent(indent + 1)).append(awaited)
+                .append(" = JvmRuntime.awaitTask(")
                 .append(canonicalId).append(", ").append(javaString(originOf(op)))
                 .append(");\n");
-            // The single ASYNC_COMPLETION boundary at the await site: a
-            // host-scripted completion atomizes by its runtime carrier; a
-            // DEAL body value atomizes by the declared descriptor.
-            if (canonicalOwnerOf(payload.token()) == AsyncTokenOwner.HOST_OPERATION) {
-                emitBoundaryStartAtom(boundary, "JvmRuntime.hostAtom(__av)", indent + 1);
-            } else {
-                emitBoundaryStart(boundary, "__av", boundaryPayload.descriptor(),
-                    indent + 1);
-            }
-            out.append(indent(indent + 1)).append("Object __avc = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ")
-                .append(javaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __av);\n");
-            emitBoundarySuccess(boundary, "__avc", boundaryPayload.descriptor(),
-                indent + 1);
-            out.append(indent(indent + 1)).append(slot((ValueId) op.result()))
-                .append(" = __avc;\n");
-            emitResultSuccess(op, slot((ValueId) op.result()),
-                (RuntimeDescriptor) op.resultType(), indent + 1);
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
             emitFailureEvent(op.opId(), op.kind().name(), op, "JvmRuntime.errtext(__e)",
                 indent + 1);
             out.append(indent(indent + 1)).append("throw __e;\n");
             out.append(indent(indent)).append("}\n");
+            // The single ASYNC_COMPLETION boundary at the await site: a
+            // host completion atomizes by its runtime carrier; a DEAL
+            // body value atomizes by the declared descriptor.
+            if (canonicalOwnerOf(payload.token()) == AsyncTokenOwner.HOST_OPERATION) {
+                emitBoundaryStartAtom(boundary, "JvmRuntime.hostAtom(" + awaited + ")",
+                    indent);
+            } else {
+                emitBoundaryStart(boundary, awaited, boundaryPayload.descriptor(),
+                    indent);
+            }
+            String checked = "__avc_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(checked).append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(checked).append(" = "
+                + "JvmRuntime.bcheck(")
+                .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(javaString(staticKind(boundaryPayload.descriptor())))
+                .append(", ").append(awaited).append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.DealError __bre = new "
+                + "JvmRuntime.DealError(__be.code, __be.msg, ")
+                .append(javaString(originOf(boundary)))
+                .append(", __be.expected, __be.actual, __be.frames, null);\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "JvmRuntime.errtext(__bre)", indent + 1);
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__bre)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __bre;\n");
+            out.append(indent(indent)).append("}\n");
+            emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor(),
+                indent);
+            out.append(indent(indent)).append(slot((ValueId) op.result()))
+                .append(" = ").append(checked).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
         }
 
         /**
