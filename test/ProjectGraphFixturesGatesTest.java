@@ -30,9 +30,9 @@ import java.util.regex.Pattern;
  * entry ({@link HarnessCompileEntry}; ISSUE-0643 P10 item 3, mechanism 1)
  * for the compile and artifact verdicts, the release-owned
  * {@link Main#run(String[])} CLI for the production-invocation probes of
- * the three compile-ok gates (their HOST-kind declaration imports fail
- * closed, while the F4 capture's cross-module call is realized by the
- * ISSUE-0654 {@code CALL(EXTERNAL)} {@code SHARED_BODY} arm), and a real
+ * the three compile-ok gates (their HOST-kind declaration imports are
+ * realized by the host load of the module init walk, so ISSUE-0656
+ * retargeted their probes to the emitted-and-staged outcome), and a real
  * {@link ProjectLocator#locate(String, deal.project.CliOverrides)} call
  * for the F5 locate verdict — with every pin transcribed from the landed
  * emission, never hand-authored from a message pattern.
@@ -184,44 +184,8 @@ public class ProjectGraphFixturesGatesTest {
     }
 
     /**
-     * The production-invocation fail-closed assertion of one re-expressed
-     * gate fixture (ISSUE-0643 P10 item 2): the release-owned
-     * {@link Main} compile exits nonzero with one E6005
-     * {@code SHARED_EMITTER_COVERAGE} (carrying the expected stable token
-     * when the fixture fails through the closure guard) and stages
-     * nothing.
-     *
-     * @param args          the CLI arguments of the fixture
-     * @param out           the fixture's fresh output directory (must not
-     *                      exist after the failed compile)
-     * @param expectedToken the stable guard detail token
-     *                      ({@code HOST_MODULE_IMPORT} or
-     *                      {@code EXTERNAL_ASYNC_CALL}); null when the
-     *                      fixture fails through the emission arm (no
-     *                      stable token)
-     * @param context       the assertion context
-     */
-    private static void checkProductionFailClosed(String[] args, Path out,
-            String expectedToken, String context) throws IOException {
-        String[] run = runProductionCliCapturingErr(args);
-        check(!"0".equals(run[0]),
-            context + ": the release-owned production invocation fails"
-                + " closed (exit " + run[0] + "): " + run[1]);
-        check(run[1].contains("E6005")
-                && run[1].contains("SHARED_EMITTER_COVERAGE")
-                && (expectedToken == null
-                    || run[1].contains(expectedToken)),
-            context + ": the production failure is E6005"
-                + " SHARED_EMITTER_COVERAGE (" + expectedToken + "): "
-                + run[1]);
-        check(!Files.exists(out),
-            context + ": the production failure stages no artifact under "
-                + out);
-    }
-
-    /**
      * The production-invocation emitted-and-staged assertion of one
-     * re-expressed gate fixture (ISSUE-0654): the release-owned
+     * re-expressed gate fixture (ISSUE-0654/ISSUE-0656): the release-owned
      * {@link Main} compile exits 0, reports no emitter gap, and publishes
      * exactly one project artifact for the entry module (whose identity is
      * the generated private module id here, because the fixture entry is
@@ -422,14 +386,15 @@ public class ProjectGraphFixturesGatesTest {
                     + " (declaration modules emit no artifacts), got "
                     + privateArtifacts + ": " + artifacts);
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same declaration-import fixture closed
-            // with E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
-            // stages nothing.
-            checkProductionFailClosed(new String[]{
+            // ISSUE-0656: the release-owned production invocation
+            // realizes the same two HOST-declaration-kind imports
+            // through the host load of the module init walk, so the
+            // production compile succeeds and publishes the entry
+            // module's one project artifact (no per-module sibling).
+            checkProductionEmits(new String[]{
                 "compile", entry.toString(), "--output",
                 base.resolve("prod_out").toString()},
-                base.resolve("prod_out"), "HOST_MODULE_IMPORT",
+                base.resolve("prod_out"),
                 "F1 declaration-cycle fixture");
         } finally {
             deleteRecursively(base);
@@ -514,14 +479,15 @@ public class ProjectGraphFixturesGatesTest {
                 "F3 emits exactly one private module artifact, got "
                     + privateArtifacts + ": " + artifacts);
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same declaration-import fixture closed
-            // with E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
-            // stages nothing.
-            checkProductionFailClosed(new String[]{
+            // ISSUE-0656: the release-owned production invocation
+            // realizes the same HOST-declaration-kind import through the
+            // host load of the module init walk, so the production
+            // compile succeeds and publishes the entry module's one
+            // project artifact.
+            checkProductionEmits(new String[]{
                 "compile", entry.toString(), "--output",
                 base.resolve("prod_out").toString()},
-                base.resolve("prod_out"), "HOST_MODULE_IMPORT",
+                base.resolve("prod_out"),
                 "F3 leading-import-type fixture");
         } finally {
             deleteRecursively(base);

@@ -352,22 +352,27 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # ISSUE-0642 registration: the production project emission unit
   # (deal.module.ProductionProjectEmission) — the C9 warning, the one
   # project lowering over the compile's declared inputs, the pre-emission
-  # closure guard (a HOST-kind MODULE_IMPORT and a cross-module async
-  # call), the one production emission per target, the one staged project
+  # closure guard's narrowed extern-C declaration-import shape (ISSUE-0656),
+  # the one production emission per target, the one staged project
   # artifact plus the unchanged LuaJIT runtime/stdlib deployment copies,
   # and the fail-closed E6005 mapping
   # (production-project-emission-and-atomic-cutover P5/P6/P7/P9/P11 and
   # the production-arm, source-map, and fail-closed producer-guard
   # contracts; luajit-jvm-single-lowering-production-cutover
-  # C3/C4/C5/C7/C8/C9): the one public static entry and its input set,
-  # the pinned warning texts and guard tokens, the two-module fixture's
+  # C3/C4/C5/C7/C8/C9; host-module-load-and-host-call-realization H6 and
+  # the extern-C remnant contract; cross-module-call-realization X3): the
+  # one public static entry and its input set, the pinned warning texts and
+  # the narrowed HOST_MODULE_IMPORT token, the two-module fixture's
   # one staged artifact per target (`app.lua`/`App.java`) with no sidecar
   # and the byte-identical repeated staging, the real luajit execution
   # (the one-main probe) and the javac --release 25 -proc:none + java
   # run, the atomic-failure cases (a bytes-bearing lowering and a
-  # cross-module sync-call emission each stage nothing), the HOST-import
-  # and cross-module-async fail-closed outcomes, the same-module async
-  # acceptance, and the source-map warning disposition. The fixture
+  # cross-module sync-call emission each stage nothing), the
+  # HOST-declaration import's emitted declared-map load and staged
+  # artifact, the extern-C declaration-import fail-closed outcome, the
+  # cross-module async emission with the executed alias-token transcript
+  # (the superseded EXTERNAL_ASYNC_CALL shape is removed), the same-module
+  # async acceptance, and the source-map warning disposition. The fixture
   # inputs are gathered through a harness-invocation compile (P10 item 3)
   # and the unit is driven with the release-owned production invocation.
   'fg|=== Running Production Project Emission Tests (ISSUE-0642) ===|java -ea -cp build deal.test.ProductionProjectEmissionTest'
@@ -387,11 +392,12 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # two-module realizable fixture with the executed per-module export
   # surfaces and the one-main probe, the conversion-overflow terminal,
   # the atomic-failure preservation of the previous artifact set, the
-  # fail-closed families (HOST import, cross-module async, cross-module
-  # sync, bytes, builtin Error construction, time.nowMillis,
-  # function-typed materialization, extern-C on LuaJIT with the JVM E6006
-  # preserved), the accepted same-module async closure, the C9 source-map
-  # disposition, and the harness-arm dispatch rows.
+  # realized families (HOST-declaration import with its declared-map load
+  # and one staged artifact, cross-module sync, cross-module async —
+  # ISSUE-0656 removed the EXTERNAL_ASYNC_CALL shape), the fail-closed
+  # families (bytes, function-typed materialization, extern-C on LuaJIT
+  # with the JVM E6006 preserved), the accepted same-module async closure,
+  # the C9 source-map disposition, and the harness-arm dispatch rows.
   'fg|=== Running Production Dispatch and Cutover Acceptance Tests (ISSUE-0643) ===|java -ea -cp build deal.test.ProductionDispatchTest'
   # ISSUE-0618 registration: the canonical v1.2 failure-text parity test
   # (semantic-ir-construct-coverage-cutover K8 and Verification 9;
@@ -589,10 +595,11 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the compiled read's published-value identity, the pinned E8001 at the
   # HOST read's function-typed binding boundary, and the surface-populated
   # seeds resolving exactly the seeded entry; and the production arm's
-  # unchanged HOST_MODULE_IMPORT guard (E6005 SHARED_EMITTER_COVERAGE, the
-  # raw specifier and resolved module named, nothing staged, the previous
-  # artifact set byte-identical). No loader surface and no executable
-  # value-position drive are added.
+  # HOST-declaration emit-and-stage outcome (ISSUE-0656 retargeted this
+  # pin: the declared-map __rt.load_host call in the module init walk, the
+  # one staged project artifact with no per-module sibling, no guard
+  # token). No loader surface and no executable value-position drive are
+  # added.
   'fg|=== Running Host Export Read Realization Tests (ISSUE-0648) ===|java -ea -cp build deal.test.HostExportReadRealizationTest'
   # ISSUE-0657 registration: the dynamic call shape production
   # (dynamic-call-shape-production-and-emission Y1/Y4 and the dynamic
@@ -786,8 +793,31 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the callee module on the callee entry and body events; and the
   # fail-closed seeds (an async start without its ExternalAsyncLink, an
   # entry reference resolving to no emitted entry) are rejected by both
-  # production emitters while the production arm keeps its landed E6005
-  # SHARED_EMITTER_COVERAGE outcome with nothing staged (the
-  # guard-replacement slice removes the guard shape).
+  # production emitters, and the production arm emits and stages the
+  # closure's one project artifact (ISSUE-0656 removed the guard shape).
   'fg|=== Running Cross-Module Async Realization Tests (ISSUE-0655) ===|java -ea -cp build deal.test.CrossModuleAsyncRealizationTest'
+
+  # ISSUE-0656 registration: the guard replacement, the pin retargeting,
+  # and the production-arm drives
+  # (host-module-load-and-host-call-realization H6 and the extern-C
+  # remnant contract; cross-module-call-realization X3;
+  # luajit-jvm-single-lowering-production-cutover C2/C4; read-only
+  # production-project-emission-and-atomic-cutover P9/P10; sequencing
+  # step 7): the narrowed HOST_MODULE_IMPORT guard (a HOST-kind import
+  # whose declaration-surface kind is EXTERN_C keeps the landed E6005
+  # SHARED_EMITTER_COVERAGE outcome with the stable token, the raw
+  # specifier, and the resolved module, stages nothing, and the
+  # release-owned production compile of the same closure publishes
+  # nothing), the removed EXTERNAL_ASYNC_CALL shape (the token has no
+  # producer in the production source set and appears in no production
+  # outcome), and the composed production-arm drives over
+  # ProductionProjectEmission.run: the host closure (two host declaration
+  # modules, the emitted declared-map loads, the sync and async host
+  # calls, and both host value-position read forms through the static
+  # arms) and the cross-module closure (the sync and async external
+  # calls through the callee module's own async entry and the caller's
+  # alias token), each with one project emission,
+  # retainedEmissionCount() == 0, one staged project artifact, and the
+  # pinned transcript under luajit and java.
+  'fg|=== Running Guard Replacement Tests (ISSUE-0656) ===|java -ea -cp build deal.test.GuardReplacementTest'
 )

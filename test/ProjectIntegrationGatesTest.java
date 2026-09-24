@@ -149,9 +149,9 @@ public class ProjectIntegrationGatesTest {
      *
      * @param args          the CLI arguments of the fixture
      * @param expectedToken the stable guard detail token
-     *                      ({@code HOST_MODULE_IMPORT} or
-     *                      {@code EXTERNAL_ASYNC_CALL}); null when the
-     *                      fixture fails through the emission arm (no
+     *                      ({@code HOST_MODULE_IMPORT} — the narrowed
+     *                      extern-C declaration-import remnant); null when
+     *                      the fixture fails through the emission arm (no
      *                      stable token)
      * @param artifactDir   the fixture's output directory (must not exist
      *                      after the failed compile); may be null

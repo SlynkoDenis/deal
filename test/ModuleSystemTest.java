@@ -963,29 +963,26 @@ public class ModuleSystemTest {
         check(Files.exists(outputDir.resolve("ai_await_lib.lua")),
             "await import retention: lib.lua exists");
 
-        // ISSUE-0643 P10 item 2: the release-owned production invocation
-        // fails the cross-module async closure closed with E6005
-        // SHARED_EMITTER_COVERAGE (EXTERNAL_ASYNC_CALL, the emitting
-        // module, the callee module, and the export name) and stages
-        // nothing (the realization belongs to the calls child).
+        // ISSUE-0656: the release-owned production invocation realizes the
+        // cross-module async closure through the callee module's own async
+        // entry and the caller's alias token (the EXTERNAL_ASYNC_CALL guard
+        // shape is gone), so the compile succeeds and stages the one entry
+        // project artifact (no per-module sibling).
         CompilationOrchestrator production = new CompilationOrchestrator(
             entryFile, tmpDir.resolve("build/ai_await_production"), false,
             null, moduleRoots, null);
-        check(!production.compile(),
-            "the release-owned production invocation fails the cross-module "
-                + "async closure closed");
-        check(production.diagnostics().stream().anyMatch(d ->
-                "E6005".equals(d.code())
-                    && d.message().contains("SHARED_EMITTER_COVERAGE")
-                    && d.message().contains("EXTERNAL_ASYNC_CALL")
-                    && d.message().contains("'ai_await_main'")
-                    && d.message().contains("'ai_await_lib'")
-                    && d.message().contains("'getValue'")),
-            "the production failure names the token, the emitting module, the "
-                + "callee module, and the export name: "
+        check(production.compile(),
+            "the release-owned production invocation compiles the "
+                + "cross-module async closure: " + production.diagnostics());
+        check(production.diagnostics().stream()
+                .noneMatch(d -> "E6005".equals(d.code())),
+            "the production compile reports no emitter gap: "
                 + production.diagnostics());
-        check(!Files.exists(tmpDir.resolve("build/ai_await_production")),
-            "the production failure stages no artifact");
+        Path prodOut = tmpDir.resolve("build/ai_await_production");
+        check(Files.exists(prodOut.resolve("ai_await_main.lua")),
+            "the production compile stages the entry project artifact");
+        check(!Files.exists(prodOut.resolve("ai_await_lib.lua")),
+            "the production compile stages no per-module sibling artifact");
     }
 
 

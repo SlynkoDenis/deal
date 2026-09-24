@@ -18,19 +18,15 @@ import deal.semantic.HostDeclarationSurface;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticRequirementManifest;
 import deal.semantic.ir.ExecutableLoweredProject;
-import deal.semantic.ir.ExternalAsyncLink;
 import deal.semantic.ir.ExternalModuleKind;
 import deal.semantic.ir.FailureContractRegistry;
 import deal.semantic.ir.IntrinsicKind;
-import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredModuleUnit;
 import deal.semantic.ir.LoweringFailureDetail;
 import deal.semantic.ir.ModuleId;
 import deal.semantic.ir.ProjectInterfaceIndex;
 import deal.semantic.ir.ResolvedImport;
 import deal.semantic.ir.SemanticCapability;
-import deal.semantic.ir.SemanticOp;
-import deal.semantic.ir.SemanticOpKind;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -54,13 +50,16 @@ import java.util.Set;
  *   <li>the C9 source-map warning (the pinned per-target text on stderr,
  *       once, before emission, only for an explicit {@code --source-map}
  *       request) — no sidecar is ever staged by this unit;</li>
- *   <li>the closure guard's shape 1 over the closure's resolved import
- *       facts, before the lowering: a HOST-kind module import (a host or
- *       extern-C declaration import) fails closed with E6005 {@code
+ *   <li>the closure guard's shape over the closure's resolved import
+ *       facts, before the lowering: a HOST-kind module import whose
+ *       declaration-surface kind is {@code EXTERN_C} (the {@code
+ *       @extern-c} declaration module whose load is the FFI child's
+ *       {@code __rt.load_ffi} table) fails closed with E6005 {@code
  *       SHARED_EMITTER_COVERAGE} naming the import (its raw specifier
- *       and its resolved module) — the shape is a whole-closure property,
- *       so a later-slice construct whose lowering fails first can never
- *       mask it; {@code STDLIB}/{@code COMPILED} imports pass;</li>
+ *       and its resolved module) — the shape is a whole-closure
+ *       property, so a later-slice construct whose lowering fails first
+ *       can never mask it; a HOST-declaration-kind import (and
+ *       {@code STDLIB}/{@code COMPILED}) passes;</li>
  *   <li>exactly one project lowering over the compile's declared inputs
  *       (the invocation, the checked project and interface index, the
  *       requirement manifests, the declaration surface, the declaration
@@ -68,13 +67,6 @@ import java.util.Set;
  *       {@code Error} declaration, the conversion intrinsics, and the
  *       production callback set); a failing lowering returns the first
  *       E6005 and stages nothing;</li>
- *   <li>the closure guard's shape 2 over the validated project's closed
- *       op walk, after the lowering: a cross-module async call ({@code
- *       ASYNC_START} carrying a non-null {@code ExternalAsyncLink})
- *       fails closed with E6005 {@code SHARED_EMITTER_COVERAGE} and its
- *       stable detail token, naming the emitting module, the callee
- *       module, and the export name — a whole-closure property
- *       independent of execution; same-module async calls pass;</li>
  *   <li>exactly one emission per target: the LuaJIT production project
  *       chunk (one chunk named for the entry module, staged at the entry
  *       module path with {@code '.'} replaced by {@code '/'} plus
@@ -104,11 +96,13 @@ public final class ProductionProjectEmission {
     /** The registered rule ID of every emitter-coverage failure. */
     public static final String SHARED_EMITTER_COVERAGE = "SHARED_EMITTER_COVERAGE";
 
-    /** The stable guard detail token of a HOST-kind module import. */
+    /**
+     * The stable guard detail token of the narrowed extern-C
+     * declaration-import remnant (ISSUE-0656;
+     * {@code host-module-load-and-host-call-realization} H6 and the
+     * extern-C remnant contract).
+     */
     public static final String HOST_MODULE_IMPORT = "HOST_MODULE_IMPORT";
-
-    /** The stable guard detail token of a cross-module async call. */
-    public static final String EXTERNAL_ASYNC_CALL = "EXTERNAL_ASYNC_CALL";
 
     /** The pinned C9 warning of the LuaJIT target (printed verbatim). */
     public static final String WARNING_LUAJIT =
@@ -185,10 +179,9 @@ public final class ProductionProjectEmission {
 
     /**
      * Runs the production arm for one release-owned production compile:
-     * the C9 warning, the closure guard's HOST-import shape over the
-     * closure's resolved import facts, the one project lowering, the
-     * closure guard's cross-module-async shape over the validated
-     * project's op walk, the one emission, the one staged project
+     * the C9 warning, the closure guard's narrowed extern-C
+     * declaration-import shape over the closure's resolved import facts,
+     * the one project lowering, the one emission, the one staged project
      * artifact, and the unchanged LuaJIT deployment copies. The caller
      * (the phase-4 dispatch) owns the arm selection, the emission record,
      * and the publication transaction; this unit stages artifacts only.
@@ -287,19 +280,19 @@ public final class ProductionProjectEmission {
             System.err.println(backend == Backend.JVM ? WARNING_JVM : WARNING_LUAJIT);
         }
 
-        // (2) The closure guard, shape 1: a HOST-kind module import (a
-        // host or extern-C declaration import) has no production
-        // emission arm — the host load and its load-time presence check
-        // belong to the calls and FFI children — so the whole closure
-        // fails closed before the lowering runs. The fact is read from
-        // the closure's resolved import facts, so a HOST-kind import can
-        // never be masked by a construct whose lowering fails first
-        // (the shape is a whole-closure property of the compile's
-        // checked closure). The guard's shape list stays exactly the two
-        // contract shapes; shape 2 is a lowered-IR fact and runs after
-        // the one lowering below.
+        // (2) The closure guard, shape 1 (narrowed): a HOST-kind module
+        // import whose declaration-surface kind is EXTERN_C (the
+        // @extern-c declaration module) has no production emission arm —
+        // its load is the FFI child's __rt.load_ffi table — so the whole
+        // closure fails closed before the lowering runs. The fact is read
+        // from the closure's resolved import facts plus the declaration
+        // surface, so an extern-C import can never be masked by a
+        // construct whose lowering fails first (the shape is a
+        // whole-closure property of the compile's checked closure). A
+        // HOST-declaration-kind import is realized by the host load of
+        // the module init walk and no longer trips the guard.
         Optional<CompilerDiagnostic> hostImport =
-            hostImportGuard(checkedProject, invocation);
+            hostImportGuard(checkedProject, declarationSurface, invocation);
         if (hostImport.isPresent()) {
             return new Result(Outcome.FAILED, List.of(hostImport.get()), null);
         }
@@ -316,20 +309,7 @@ public final class ProductionProjectEmission {
         }
         ExecutableLoweredProject project = lowering.project();
 
-        // (4) The closure guard, shape 2: a cross-module async call (an
-        // ASYNC_START carrying the statically resolved external async
-        // linkage) references a per-module async-entry surface the
-        // one-chunk project layout does not contain. The shape is a
-        // lowered-IR fact, so it is read from the validated project's
-        // closed op walk; it is a whole-closure property, independent of
-        // whether the containing body executes.
-        Optional<CompilerDiagnostic> guardFailure =
-            closureGuard(project, invocation);
-        if (guardFailure.isPresent()) {
-            return new Result(Outcome.FAILED, List.of(guardFailure.get()), null);
-        }
-
-        // (5) The one emission per target, then the one staged project
+        // (4) The one emission per target, then the one staged project
         // artifact. An emitter gap is E6005 SHARED_EMITTER_COVERAGE and
         // stages nothing.
         String artifactRelativePath;
@@ -366,7 +346,7 @@ public final class ProductionProjectEmission {
         stager.stage(artifactRelativePath,
             artifactSource.getBytes(StandardCharsets.UTF_8));
 
-        // (6) The unchanged LuaJIT deployment copies, staged from the
+        // (5) The unchanged LuaJIT deployment copies, staged from the
         // resolved distribution surface after the one project artifact. A
         // missing runtime is the pinned E6000; an absent stdlib module is
         // skipped silently (unchanged omission semantics). The JVM target
@@ -388,20 +368,36 @@ public final class ProductionProjectEmission {
     }
 
     /**
-     * The closure guard's shape 1 over the closure's resolved import
-     * facts: the first HOST-kind module import (a host or extern-C
-     * declaration import) fails the whole closure, naming the emitting
-     * module, the import's raw specifier, and the resolved module. Every
-     * other import kind — {@code STDLIB} and {@code COMPILED} — passes;
-     * their {@code MODULE_IMPORT} no-op is the landed realization (the
-     * closure's own module walks realize a compiled dependency, and the
-     * runtime supplies the stdlib surface).
+     * The closure guard over the closure's resolved import facts: the
+     * first HOST-kind module import whose declaration-surface kind is
+     * {@code EXTERN_C} (the {@code @extern-c} declaration module, whose
+     * load is the FFI child's {@code __rt.load_ffi} table) fails the
+     * whole closure, naming the emitting module, the import's raw
+     * specifier, and the resolved module. Every other import — a
+     * {@code HOST}-declaration-kind import (realized by the host load of
+     * the module init walk), {@code STDLIB}, and {@code COMPILED} —
+     * passes; their {@code MODULE_IMPORT} no-op is the landed realization
+     * (the closure's own module walks realize a compiled dependency, and
+     * the runtime supplies the stdlib surface). An import whose resolved
+     * module carries no declaration-surface entry is not classified here:
+     * the lowering's {@code DECLARATION_SURFACE_INCOMPLETE} agreement
+     * step fails such a closure closed (producer defect), so the guard
+     * never defaults a missing fact.
      */
     private static Optional<CompilerDiagnostic> hostImportGuard(
-            CheckedProjectInput checkedProject, CompilerInvocation invocation) {
+            CheckedProjectInput checkedProject,
+            HostDeclarationSurface declarationSurface,
+            CompilerInvocation invocation) {
         for (CheckedModuleInput module : checkedProject.modules()) {
             for (ResolvedImport importFact : module.imports()) {
-                if (importFact.kind() == ExternalModuleKind.HOST) {
+                if (importFact.kind() != ExternalModuleKind.HOST) {
+                    continue;
+                }
+                HostDeclarationSurface.DeclarationFacts facts =
+                    declarationSurface.modules()
+                        .get(importFact.resolvedModuleId());
+                if (facts != null && facts.kind()
+                        == HostDeclarationSurface.DeclarationKind.EXTERN_C) {
                     return Optional.of(hostModuleImportFailure(module.moduleId(),
                         importFact.modulePath(),
                         importFact.resolvedModuleId().path(), invocation));
@@ -412,37 +408,10 @@ public final class ProductionProjectEmission {
     }
 
     /**
-     * The closure guard's shape 2 over the validated project's closed op
-     * walk (every module's ops, payload-owned children included), in
-     * dependency order and op order: the first cross-module async call
-     * ({@code ASYNC_START} carrying a non-null {@code ExternalAsyncLink})
-     * fails the whole closure; every other op — including same-module
-     * async calls — passes.
-     */
-    private static Optional<CompilerDiagnostic> closureGuard(
-            ExecutableLoweredProject project, CompilerInvocation invocation) {
-        for (Map.Entry<ModuleId, LoweredModuleUnit> unit
-                : project.modules().entrySet()) {
-            ModuleId emitting = unit.getKey();
-            for (SemanticOp op : unit.getValue().ops()) {
-                if (op.kind() == SemanticOpKind.ASYNC_START) {
-                    KindPayload.AsyncStartPayload payload =
-                        (KindPayload.AsyncStartPayload) op.payload();
-                    if (payload.externalAsyncLink() != null) {
-                        return Optional.of(externalAsyncCallFailure(
-                            emitting, payload, invocation));
-                    }
-                }
-            }
-        }
-        return Optional.empty();
-    }
-
-    /**
-     * Guard 1: a HOST-kind module import (a host or extern-C declaration
-     * import) has no production emission arm — the host load and its
-     * load-time presence check belong to the calls and FFI children — so
-     * the whole closure fails closed.
+     * The narrowed guard: a HOST-kind module import of an extern-C
+     * declaration module has no production emission arm — its load is the
+     * FFI child's {@code __rt.load_ffi} table — so the whole closure fails
+     * closed.
      */
     private static CompilerDiagnostic hostModuleImportFailure(ModuleId emitting,
             String rawSpecifier, String resolvedModulePath,
@@ -454,24 +423,6 @@ public final class ProductionProjectEmission {
                 + HOST_MODULE_IMPORT + " (emitting module '" + emitting.path()
                 + "', import '" + rawSpecifier + "' resolved to '"
                 + resolvedModulePath + "')"));
-    }
-
-    /**
-     * Guard 2: a cross-module async call (an {@code ASYNC_START} carrying
-     * the statically resolved external async linkage) references a
-     * per-module async-entry surface the one-chunk project layout does
-     * not contain, so the whole closure fails closed.
-     */
-    private static CompilerDiagnostic externalAsyncCallFailure(ModuleId emitting,
-            KindPayload.AsyncStartPayload payload, CompilerInvocation invocation) {
-        ExternalAsyncLink link = payload.externalAsyncLink();
-        return FailureContractRegistry.e6005(new LoweringFailureDetail(
-            emitting.path(), SemanticCapability.CALLS, SHARED_EMITTER_COVERAGE,
-            invocation.semanticProfile(), LoweredModuleUnit.FORMAT_VERSION,
-            "ProductionProjectEmission " + SHARED_EMITTER_COVERAGE + " "
-                + EXTERNAL_ASYNC_CALL + " (emitting module '" + emitting.path()
-                + "', callee module '" + link.calleeModuleId().path()
-                + "', export '" + link.exportName() + "')"));
     }
 
     /**

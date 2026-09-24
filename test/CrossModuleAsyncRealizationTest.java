@@ -87,10 +87,10 @@ import java.util.Map;
  *       module;</li>
  *   <li>the fail-closed seeds (an async start without its link, an entry
  *       reference that resolves to no emitted entry) are rejected by both
- *       production emitters, and the production arm keeps its landed
- *       E6005 {@code SHARED_EMITTER_COVERAGE} outcome with nothing
- *       staged (the guard-replacement slice removes the guard shape; this
- *       slice's drives use the production emitter entry).</li>
+ *       production emitters, and the production arm emits and stages the
+ *       async closure's one project artifact (the ISSUE-0656
+ *       guard-replacement slice removed the guard shape and retargeted
+ *       this pin; this slice's drives use the production emitter entry).</li>
  * </ol>
  */
 public class CrossModuleAsyncRealizationTest {
@@ -879,8 +879,8 @@ public class CrossModuleAsyncRealizationTest {
 
     private static void testFailClosedSeeds() throws Exception {
         System.out.println("-- the fail-closed seeds: an async start without its link "
-            + "and a link resolving to no emitted entry; the production arm keeps its "
-            + "landed E6005 outcome with nothing staged --");
+            + "and a link resolving to no emitted entry; the production arm emits "
+            + "and stages the async closure --");
         Fixture fixture = asyncFixture();
         Path staged = Files.createTempDirectory("cross-module-async-staged");
         try {
@@ -925,10 +925,10 @@ public class CrossModuleAsyncRealizationTest {
                 replaceOpPayload(project, appUnit, start, danglingLink), result.tables(),
                 result.registries(), fixture.surface(), "resolves to no emitted");
 
-            // (c) The production arm's landed outcome over the unstaged async
-            // closure: E6005 SHARED_EMITTER_COVERAGE and nothing staged (the
-            // guard-replacement slice removes the guard shape and retargets
-            // this pin; this slice's drives use the emitter entry directly).
+            // (c) The production arm over the async closure: ISSUE-0656
+            // removed the EXTERNAL_ASYNC_CALL guard shape, so the one
+            // project artifact emits and stages with the caller's
+            // alias-token linkage and no per-module sibling.
             PublicationStager stager = PublicationStager.forRoot(staged);
             ProductionProjectEmission.Result production;
             try {
@@ -940,21 +940,20 @@ public class CrossModuleAsyncRealizationTest {
                     List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
                     java.util.Set.of(), Backend.LUAJIT, false,
                     fixture.distributionHome(), stager);
-                check(!production.emitted(),
-                    "the production arm keeps the async closure fail-closed");
-                check(production.firstDiagnostic() != null
-                        && "E6005".equals(production.firstDiagnostic().code())
-                        && production.firstDiagnostic().message()
-                            .contains("SHARED_EMITTER_COVERAGE"),
-                    "the fail-closed outcome is E6005 SHARED_EMITTER_COVERAGE: "
-                        + production.firstDiagnostic());
+                check(production.emitted(),
+                    "the production arm emits the async closure: "
+                        + production.diagnostics());
+                check(production.diagnostics().isEmpty(),
+                    "the production arm carries no diagnostic: "
+                        + production.diagnostics());
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the production arm stages the entry module's one project "
+                        + "artifact");
+                check(stager.stagedSet().artifact("lib.lua").isEmpty(),
+                    "the production arm stages no per-module sibling");
             } finally {
                 stager.discard();
             }
-            Path outDir = staged.resolve("src").resolve("app.lua");
-            check(!Files.exists(staged.resolve("app.lua"))
-                    && !Files.exists(outDir),
-                "no artifact staged for the fail-closed production run");
         } finally {
             deleteRecursively(staged);
             deleteRecursively(fixture.root());

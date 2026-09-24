@@ -56,11 +56,12 @@ import java.util.Set;
  *       sidecar, and byte-identical repeated staging;</li>
  *   <li>the C9 warning fires once for an explicit {@code --source-map}
  *       request and never for a {@code --dump-ir}-derived flag;</li>
- *   <li>the pre-emission closure guard fails closed for a HOST-kind
- *       module import ({@code HOST_MODULE_IMPORT}) and a cross-module
- *       async call ({@code EXTERNAL_ASYNC_CALL}) while a
- *       {@code STDLIB}/{@code COMPILED}-only closure and a same-module
- *       async call stay accepted and execute under the real toolchains;</li>
+ *   <li>the narrowed pre-emission closure guard fails closed for an
+ *       extern-C declaration import ({@code HOST_MODULE_IMPORT}) while a
+ *       HOST-declaration-kind import emits its declared-map host load
+ *       and stages its one project artifact, and the cross-module sync
+ *       and async calls emit and execute (ISSUE-0654/ISSUE-0655) with
+ *       the {@code EXTERNAL_ASYNC_CALL} shape removed (ISSUE-0656);</li>
  *   <li>a failing lowering (bytes) stages nothing and leaves the previous
  *       artifact set byte-identical, while a cross-module sync call emits
  *       through the realized {@code CALL(EXTERNAL)} {@code SHARED_BODY}
@@ -104,9 +105,12 @@ public class ProductionProjectEmissionTest {
     // =========================================================================
 
     private static final ModuleId LIB = new ModuleId("lib");
-    private static final ModuleId APP = new ModuleId("app");
     private static final ModuleId HOST_CFG = new ModuleId("host.cfg");
     private static final String HOST_CFG_SPECIFIER = "host/cfg";
+
+    /** The extern-C declaration module of the narrowed-guard probe. */
+    private static final ModuleId NATIVE_MATH = new ModuleId("native.math");
+    private static final String EXTERN_C_SPECIFIER = "native/math";
 
     private static final String LIB_SOURCE = """
         export function add(a: int, b: int): int {
@@ -165,9 +169,10 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
-    /** The HOST declaration: a declaration import with no classes. */
+    /** The HOST declaration: two function exports in declaration order. */
     private static final String HOST_DECLARATION = """
         export function version(): int;
+        export function describe(s: string): string;
         """;
 
     /** The host-import fixture: the import is never called or constructed. */
@@ -179,6 +184,21 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
+    /** The extern-C declaration: the narrowed guard's remaining shape. */
+    private static final String EXTERN_C_DECLARATION = """
+        // @extern-c
+        export function nativeAdd(a: int, b: int): int;
+        """;
+
+    /** The extern-C import fixture: the import is never called. */
+    private static final String EXTERN_C_APP_SOURCE = """
+        import * as native from "native/math"
+
+        export function main(): null {
+            return null;
+        }
+        """;
+
     /** The async library of the cross-module async fixture. */
     private static final String ASYNC_LIB_SOURCE = """
         export async function getValue(): int {
@@ -186,7 +206,10 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
-    /** The cross-module async call: one never-invoked body carries it. */
+    /**
+     * The cross-module async call: the exported worker really executes the
+     * caller's alias-token linkage (the callee is a non-entry module).
+     */
     private static final String CROSS_ASYNC_APP_SOURCE = """
         import * as lib from "./lib"
 
@@ -194,7 +217,7 @@ public class ProductionProjectEmissionTest {
           return null;
         }
 
-        async function worker(): int {
+        export async function worker(): int {
           return await lib.getValue();
         }
         """;
@@ -326,6 +349,33 @@ public class ProductionProjectEmissionTest {
             Map.of(HOST_CFG_SPECIFIER, "src/cfg.d.deal"));
     }
 
+    private static Fixture externCFixture() throws Exception {
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("src/native.d.deal", EXTERN_C_DECLARATION);
+        sources.put("src/app.deal", EXTERN_C_APP_SOURCE);
+        return compileProject(sources,
+            Map.of(EXTERN_C_SPECIFIER, "src/native.d.deal"));
+    }
+
+    /** The emitted declared-map literal of one host import (declaration order). */
+    private static String declaredMapLiteral(HostDeclarationSurface surface,
+            ModuleId module) {
+        HostDeclarationSurface.DeclarationFacts facts = surface.require(module);
+        StringBuilder map = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, deal.types.Type> export : facts.exports().entrySet()) {
+            if (!first) {
+                map.append(", ");
+            }
+            first = false;
+            map.append("[\"").append(export.getKey()).append("\"] = \"")
+                .append(deal.semantic.DescriptorService.describe(export.getValue())
+                    .canonicalSpecText())
+                .append("\"");
+        }
+        return map.append("}").toString();
+    }
+
     // =========================================================================
     // The unit driver
     // =========================================================================
@@ -424,9 +474,7 @@ public class ProductionProjectEmissionTest {
             ProductionProjectEmission.SHARED_EMITTER_COVERAGE,
             "the registered emitter-coverage rule id");
         checkEq("HOST_MODULE_IMPORT", ProductionProjectEmission.HOST_MODULE_IMPORT,
-            "the stable HOST-import guard token");
-        checkEq("EXTERNAL_ASYNC_CALL", ProductionProjectEmission.EXTERNAL_ASYNC_CALL,
-            "the stable cross-module-async guard token");
+            "the stable extern-C declaration-import guard token");
 
         // The JS target is not a production arm.
         Fixture fixture = twoModuleFixture(APP_SOURCE);
@@ -703,22 +751,82 @@ public class ProductionProjectEmissionTest {
     // =========================================================================
 
     private static void testHostImportGuard() throws Exception {
-        System.out.println("-- the HOST-kind import fails closed with "
-            + "HOST_MODULE_IMPORT --");
+        System.out.println("-- the HOST-declaration import emits its declared-map "
+            + "load and stages; the extern-C declaration import keeps the "
+            + "narrowed HOST_MODULE_IMPORT guard --");
+
+        // The HOST-declaration-kind import: realized by the host load of
+        // the module init walk (H1), so the production run stages its one
+        // project artifact and no guard fires.
         Fixture fixture = hostFixture();
         Path out = fixture.root().resolve("out-arm");
         try {
-            Map<String, String> before = snapshotTree(out);
             PublicationStager stager = PublicationStager.forRoot(out);
             ProductionProjectEmission.Result result;
+            String chunk;
             try {
                 result = emit(fixture, Backend.LUAJIT, stager, false);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the guarded compile stages nothing");
+                check(result.emitted(),
+                    "the HOST-declaration import emits: " + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the HOST-declaration import carries no diagnostic: "
+                        + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the HOST-declaration import stages the entry module's chunk");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the HOST-declaration import stages its one project artifact");
+                chunk = new String(stager.stagedSet().artifact("app.lua")
+                    .orElseThrow().content(), StandardCharsets.UTF_8);
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the host-importing closure fails closed");
+            HostDeclarationSurface.DeclarationFacts facts =
+                fixture.surface().require(HOST_CFG);
+            checkEq(HostDeclarationSurface.DeclarationKind.HOST, facts.kind(),
+                "the fixture's declaration module is HOST-kind");
+            String loadPrefix = "__exportSurfaces[\"" + HOST_CFG.path()
+                + "\"] = __exportSurfaces[\"" + HOST_CFG.path()
+                + "\"] or __rt.load_host(\"" + HOST_CFG_SPECIFIER + "\", ";
+            check(chunk.contains(loadPrefix
+                    + declaredMapLiteral(fixture.surface(), HOST_CFG) + ", "),
+                "the emitted artifact carries the load of " + HOST_CFG_SPECIFIER
+                    + " with the declared map in declaration order");
+            checkEq(1, countOccurrences(chunk,
+                    "__rt.load_host(\"" + HOST_CFG_SPECIFIER + "\""),
+                "the host module loads exactly once for the one import op");
+            check(chunk.indexOf("__dealMain = function()")
+                    < chunk.indexOf("__rt.load_host(\"" + HOST_CFG_SPECIFIER),
+                "the load runs inline in the module init walk");
+            check(!chunk.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
+                "the emitted chunk carries no guard token");
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+
+        // The narrowed guard: a HOST-kind import whose declaration-surface
+        // kind is EXTERN_C (the @extern-c declaration module) keeps the
+        // landed E6005 SHARED_EMITTER_COVERAGE outcome with the stable
+        // HOST_MODULE_IMPORT token, the raw specifier, and the resolved
+        // module, and stages nothing.
+        Fixture externC = externCFixture();
+        Path externCOut = externC.root().resolve("out-arm");
+        try {
+            checkEq(HostDeclarationSurface.DeclarationKind.EXTERN_C,
+                externC.surface().require(NATIVE_MATH).kind(),
+                "the probe's declaration module is EXTERN_C-kind");
+            writeFileIn(externCOut, "app.lua", "-- previous artifact\n");
+            Map<String, String> before = snapshotTree(externCOut);
+            PublicationStager stager = PublicationStager.forRoot(externCOut);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(externC, Backend.LUAJIT, stager, false);
+                check(stager.stagedSet().relativePaths().isEmpty(),
+                    "the narrowed guard stages nothing");
+            } finally {
+                stager.discard();
+            }
+            check(!result.emitted(),
+                "the extern-C declaration import fails closed");
             checkEq(1, result.diagnostics().size(),
                 "the guard returns exactly the first diagnostic");
             check(result.firstDiagnostic() != null
@@ -730,21 +838,26 @@ public class ProductionProjectEmissionTest {
                 "the guard names SHARED_EMITTER_COVERAGE: " + message);
             check(message.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
                 "the guard names the stable HOST_MODULE_IMPORT token: " + message);
-            check(message.contains("'" + HOST_CFG_SPECIFIER + "'"),
+            check(message.contains("'" + EXTERN_C_SPECIFIER + "'"),
                 "the guard names the import's raw specifier: " + message);
-            check(message.contains("'" + HOST_CFG.path() + "'"),
+            check(message.contains("'" + NATIVE_MATH.path() + "'"),
                 "the guard names the import's resolved module: " + message);
-            checkEq(before, snapshotTree(out),
+            checkEq(before, snapshotTree(externCOut),
                 "the guarded compile leaves the previous artifact set "
                     + "byte-identical");
         } finally {
-            deleteRecursively(fixture.root());
+            deleteRecursively(externC.root());
         }
     }
 
-    private static void testCrossModuleAsyncGuard() throws Exception {
-        System.out.println("-- the cross-module async call fails closed with "
-            + "EXTERNAL_ASYNC_CALL; a same-module async call emits --");
+    private static void testCrossModuleAsyncEmission() throws Exception {
+        System.out.println("-- the cross-module async call emits through the "
+            + "entity-local async entry and executes; a same-module async call "
+            + "emits --");
+
+        // The cross-module async call: one project artifact stages, no
+        // guard shape fires, and the exported async worker executes the
+        // caller's alias-token linkage end-to-end (ISSUE-0655/ISSUE-0656).
         Fixture cross = asyncFixture(ASYNC_LIB_SOURCE, CROSS_ASYNC_APP_SOURCE);
         Path crossOut = cross.root().resolve("out-arm");
         try {
@@ -752,31 +865,115 @@ public class ProductionProjectEmissionTest {
             ProductionProjectEmission.Result result;
             try {
                 result = emit(cross, Backend.LUAJIT, stager, false);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the guarded cross-module async compile stages nothing");
+                check(result.emitted(),
+                    "the cross-module async closure emits: "
+                        + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the cross-module async artifact is the entry chunk");
+                checkEq(1L, stager.stagedSet().relativePaths().stream()
+                        .filter(path -> path.endsWith(".lua")
+                            && !path.startsWith("std/")
+                            && !path.equals("deal/runtime.lua")).count(),
+                    "exactly one staged project artifact");
+                stager.publish();
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the cross-module async closure fails closed");
-            checkEq(1, result.diagnostics().size(),
-                "the guard returns exactly the first diagnostic");
-            String message = result.firstDiagnostic() == null
-                ? "" : result.firstDiagnostic().message();
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code()),
-                "the guard diagnostic is E6005: " + result.diagnostics());
-            check(message.contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the guard names SHARED_EMITTER_COVERAGE: " + message);
-            check(message.contains(ProductionProjectEmission.EXTERNAL_ASYNC_CALL),
-                "the guard names the stable EXTERNAL_ASYNC_CALL token: " + message);
-            check(message.contains("'" + APP.path() + "'"),
-                "the guard names the emitting module: " + message);
-            check(message.contains("'" + LIB.path() + "'"),
-                "the guard names the callee module: " + message);
-            check(message.contains("'getValue'"),
-                "the guard names the export: " + message);
+            String chunk = Files.readString(crossOut.resolve("app.lua"),
+                StandardCharsets.UTF_8);
+            check(!chunk.contains("EXTERNAL_ASYNC_CALL"),
+                "the emitted chunk carries no superseded guard token");
+            check(!chunk.contains("SharedM"),
+                "the emitted chunk references no per-module async-entry surface");
+            check(chunk.contains("__asyncEntries[\"" + LIB.path()
+                    + "#getValue\"]"),
+                "the chunk carries one async entry per async export of the "
+                    + "callee closure module");
+            writeFileIn(cross.root(), "probe.lua", """
+                local surfaces = dofile("out-arm/app.lua")
+                local worker = surfaces.worker
+                assert(type(worker) == "table" and worker.__kind == "function",
+                  "the entry surface publishes the cross-module async export")
+                local completion = worker.f()
+                assert(completion == 42,
+                  "the cross-module await completes with 42, got "
+                    .. tostring(completion))
+                print("PROBE|ASYNC-RESULT|" .. tostring(completion))
+                """);
+            ProcessOutcome luaRun = runProcess(List.of("luajit", "probe.lua"),
+                cross.root());
+            checkEq(0, luaRun.exitCode(),
+                "the cross-module await path executes under luajit: "
+                    + luaRun.output());
+            check(luaRun.stdout().contains("PROBE|ASYNC-RESULT|42"),
+                "the cross-module await completes with 42 under luajit: "
+                    + luaRun.stdout());
         } finally {
             deleteRecursively(cross.root());
+        }
+
+        // The JVM target of the same closure: the class source compiles
+        // with javac --release 25 -proc:none and the runner executes the
+        // exported async function through the artifact's published
+        // surface.
+        Fixture crossJvm = asyncFixture(ASYNC_LIB_SOURCE, CROSS_ASYNC_APP_SOURCE);
+        Path crossJvmOut = crossJvm.root().resolve("out-arm");
+        Path crossJvmClasses = crossJvm.root().resolve("cross-classes");
+        try {
+            PublicationStager stager = PublicationStager.forRoot(crossJvmOut);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(crossJvm, Backend.JVM, stager, false);
+                check(result.emitted(),
+                    "the cross-module async JVM closure emits: "
+                        + result.diagnostics());
+                stager.publish();
+            } finally {
+                stager.discard();
+            }
+            String source = Files.readString(crossJvmOut.resolve("App.java"),
+                StandardCharsets.UTF_8);
+            check(!source.contains("EXTERNAL_ASYNC_CALL"),
+                "the emitted JVM class carries no superseded guard token");
+            check(!source.contains("SharedM"),
+                "the emitted JVM class references no per-module class");
+            writeFileIn(crossJvmOut, "AsyncCrossRunner.java", """
+                import deal.codegen.jvm.JvmRuntime;
+
+                public final class AsyncCrossRunner {
+                  public static void main(String[] args) {
+                    App.main(new String[0]);
+                    JvmRuntime.Table surface = App.EXPORT_SURFACES.get("app");
+                    JvmRuntime.FunctionValue worker =
+                        (JvmRuntime.FunctionValue) surface.read("worker");
+                    Object completion = worker.fn.invoke(new Object[0]);
+                    System.out.println("PROBE|ASYNC-RESULT|" + completion);
+                  }
+                }
+                """);
+            Files.createDirectories(crossJvmClasses);
+            String classpath = absoluteClasspath();
+            ProcessOutcome javacRun = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", crossJvmClasses.toString(),
+                crossJvmOut.resolve("App.java").toAbsolutePath().toString(),
+                crossJvmOut.resolve("AsyncCrossRunner.java").toAbsolutePath().toString()),
+                crossJvm.root());
+            checkEq(0, javacRun.exitCode(),
+                "the cross-module async JVM artifact compiles: "
+                    + javacRun.output());
+            if (javacRun.exitCode() == 0) {
+                ProcessOutcome jvmRun = runProcess(List.of("java", "-cp",
+                    classpath + java.io.File.pathSeparator + crossJvmClasses,
+                    "AsyncCrossRunner"), crossJvm.root());
+                checkEq(0, jvmRun.exitCode(),
+                    "the cross-module await path executes under java: "
+                        + jvmRun.output());
+                check(jvmRun.stdout().contains("PROBE|ASYNC-RESULT|42"),
+                    "the cross-module await completes with 42 under java: "
+                        + jvmRun.stdout());
+            }
+        } finally {
+            deleteRecursively(crossJvm.root());
         }
 
         // The same-module async call: accepted, emitted, and executed on
@@ -1050,7 +1247,7 @@ public class ProductionProjectEmissionTest {
         testJvmToolchain();
         testAtomicFailures();
         testHostImportGuard();
-        testCrossModuleAsyncGuard();
+        testCrossModuleAsyncEmission();
         testSourceMapDisposition();
         System.out.println();
         System.out.println("Passed: " + passed + ", Failed: " + failed);

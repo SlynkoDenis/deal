@@ -17540,11 +17540,11 @@ public class JvmBackendTest {
             check(irPinOk, "jvm-async-slice :: jvm-async-multi-module: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the cross-module async closure closed with
-            // E6005 SHARED_EMITTER_COVERAGE (EXTERNAL_ASYNC_CALL) and
-            // stages nothing (the per-module async-entry linkage is the
-            // calls child's).
+            // ISSUE-0656: the release-owned production invocation realizes
+            // the cross-module async closure through the callee module's own
+            // async entry and the caller's alias token (the
+            // EXTERNAL_ASYNC_CALL guard shape is gone), so the compile
+            // succeeds and stages the one project class.
             CompilationOrchestrator irPinAsyncProduction =
                 new CompilationOrchestrator(
                     irPinEntry, irPinRoot.resolve("out-production"), false,
@@ -17552,16 +17552,15 @@ public class JvmBackendTest {
                     List.of(irPinRoot), null, null,
                     CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
                         ReleaseConfiguration.releaseCapabilityRegistry()));
-            check(!irPinAsyncProduction.compile()
-                    && irPinAsyncProduction.diagnostics().stream().anyMatch(d ->
-                        "E6005".equals(d.code())
-                            && d.message().contains("EXTERNAL_ASYNC_CALL")),
+            check(irPinAsyncProduction.compile()
+                    && irPinAsyncProduction.diagnostics().stream().noneMatch(d ->
+                        "E6005".equals(d.code())),
                 "jvm-async-slice :: jvm-async-multi-module: the release-owned "
-                    + "production invocation fails the closure closed: "
+                    + "production invocation compiles the closure: "
                     + irPinAsyncProduction.diagnostics());
-            check(!Files.exists(irPinRoot.resolve("out-production")),
+            check(Files.exists(irPinRoot.resolve("out-production/Main.java")),
                 "jvm-async-slice :: jvm-async-multi-module: the production "
-                    + "failure stages no artifact");
+                    + "compile stages the one project class");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {
@@ -17688,10 +17687,11 @@ module @<PROJECT>/main.deal:1:1-7:2
             check(irPinOk, "jvm-host-abi-slice :: jvm-host-export-presence: orchestrator --dump-ir compile succeeds: "
                 + irPinOrch.diagnostics());
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the host-importing closure closed with
-            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
-            // stages nothing (the host load is the calls/FFI children's).
+            // ISSUE-0656: the release-owned production invocation realizes
+            // the host-importing closure through the host load of the module
+            // init walk and this slice's host call arms, so the compile
+            // succeeds and stages the one project class (the fixture
+            // constructs no host-declared class).
             CompilationOrchestrator irPinHostProduction =
                 new CompilationOrchestrator(
                     irPinEntry, irPinRoot.resolve("out-production"), false,
@@ -17699,16 +17699,15 @@ module @<PROJECT>/main.deal:1:1-7:2
                     List.of(irPinRoot), null, null,
                     CompilerProfileProvider.resolve(ReleaseState.V1_2_ACTIVE,
                         ReleaseConfiguration.releaseCapabilityRegistry()));
-            check(!irPinHostProduction.compile()
-                    && irPinHostProduction.diagnostics().stream().anyMatch(d ->
-                        "E6005".equals(d.code())
-                            && d.message().contains("HOST_MODULE_IMPORT")),
+            check(irPinHostProduction.compile()
+                    && irPinHostProduction.diagnostics().stream().noneMatch(d ->
+                        "E6005".equals(d.code())),
                 "jvm-host-abi-slice :: jvm-host-export-presence: the "
-                    + "release-owned production invocation fails the closure "
-                    + "closed: " + irPinHostProduction.diagnostics());
-            check(!Files.exists(irPinRoot.resolve("out-production")),
+                    + "release-owned production invocation compiles the "
+                    + "closure: " + irPinHostProduction.diagnostics());
+            check(Files.exists(irPinRoot.resolve("out-production/Entry.java")),
                 "jvm-host-abi-slice :: jvm-host-export-presence: the "
-                    + "production failure stages no artifact");
+                    + "production compile stages the one project class");
             StringBuilder irPinActual = new StringBuilder();
             List<Path> irPinDumps = new ArrayList<>();
             try (var stream = Files.list(irPinOut)) {

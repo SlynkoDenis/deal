@@ -248,8 +248,8 @@ public class HostModuleLoadEmissionTest {
      * The harness invocation of the fixture compile: the orchestrator builds
      * the checked project and the declaration surface through its harness
      * arm, while this test drives the one project lowering and the
-     * production emitter entries directly (the guard replacement that lets a
-     * host import reach the production arm is a later slice).
+     * production emitter entries directly (the ISSUE-0656 guard replacement
+     * lets a host import reach the production arm).
      */
     private static CompilerInvocation harnessInvocation() {
         return CompilerProfileProvider.resolveCommonShadow(

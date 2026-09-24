@@ -55,14 +55,14 @@ import java.util.stream.Stream;
  *       cross-module sync call emits through the realized
  *       {@code CALL(EXTERNAL)} {@code SHARED_BODY} arm (ISSUE-0654) and
  *       publishes its one project artifact;</li>
- *   <li>the fail-closed families: a HOST-kind import
- *       ({@code HOST_MODULE_IMPORT}), a cross-module async call
- *       ({@code EXTERNAL_ASYNC_CALL}), bytes, and function-typed
+ *   <li>the fail-closed families: an extern-C declaration import
+ *       ({@code HOST_MODULE_IMPORT}), bytes, and function-typed
  *       materializations each fail with their named E6005
  *       and publish nothing, while a {@code STDLIB}/{@code COMPILED}-only
- *       closure, the builtin Error construction (ISSUE-0619), the
- *       {@code time.nowMillis} coverage (ISSUE-0623: the emitted artifacts
- *       publish the pinned E8004 terminal), and a
+ *       closure, a HOST-declaration-kind import (the emitted host load),
+ *       a cross-module sync and async call, the builtin Error construction
+ *       (ISSUE-0619), the {@code time.nowMillis} coverage (ISSUE-0623: the
+ *       emitted artifacts publish the pinned E8004 terminal), and a
  *       same-module async call emit and execute;</li>
  *   <li>the C9 source-map disposition: an explicit {@code --source-map}
  *       LuaJIT and JVM production compile succeeds, publishes the project
@@ -792,54 +792,84 @@ public class ProductionDispatchTest {
     // =========================================================================
 
     private static void testFailClosedFamilies() throws Exception {
-        System.out.println("-- fail-closed families: HOST import, "
+        System.out.println("-- accept-and-emit families: HOST import, "
             + "cross-module async, bytes, Error, time, function values --");
 
-        // (a) A HOST-kind declaration import (never called) fails closed
-        // with the import's raw specifier and resolved module.
+        // (a) A HOST-declaration-kind import (never called) is realized by
+        // the host load of the module init walk (ISSUE-0650, ISSUE-0656):
+        // the production compile succeeds and publishes the one project
+        // artifact carrying the declared-map load, with one project
+        // emission and no retained emission.
         Path host = Files.createTempDirectory("production-dispatch-host-");
         try {
             write(host, "deal.json", HOST_DEAL_JSON_LUA);
             write(host, "cfg.d.deal", HOST_DECLARATION);
             write(host, "src/main.deal", HOST_IMPORT_SOURCE);
-            ProjectOutcome compile = productionCompile(host, "src/main.deal",
-                "out");
-            check(compile.exitCode() != 0,
-                "the HOST-importing closure fails closed");
-            check(compile.stderr().contains("E6005")
-                    && compile.stderr().contains("SHARED_EMITTER_COVERAGE")
-                    && compile.stderr().contains("HOST_MODULE_IMPORT")
-                    && compile.stderr().contains("'host/cfg'")
-                    && compile.stderr().contains("'host.cfg'"),
-                "the guard names the stable token, the raw specifier, and the "
-                    + "resolved module: " + compile.stderr());
-            check(!Files.exists(host.resolve("out")),
-                "the guarded compile stages no artifact");
+            ArmCompile arm = compileWithInvocation(host, "src/main.deal",
+                productionInvocation());
+            check(arm.success(),
+                "the HOST-importing closure compiles: "
+                    + arm.orchestrator().diagnostics());
+            if (arm.success()) {
+                checkEq(1, arm.orchestrator().semanticEmissionCount(),
+                    "the HOST import records one project emission");
+                checkEq(0, arm.orchestrator().retainedEmissionCount(),
+                    "the HOST import increments no retained counter");
+                List<String> artifacts = artifactFiles(host.resolve("out"));
+                check(artifacts.contains("main.lua")
+                        && !artifacts.contains("cfg.lua"),
+                    "the HOST import publishes the one project artifact and "
+                        + "no per-module sibling: " + artifacts);
+                String chunk = Files.readString(host.resolve("out/main.lua"),
+                    StandardCharsets.UTF_8);
+                check(chunk.contains("__exportSurfaces[\"host.cfg\"] = "
+                        + "__exportSurfaces[\"host.cfg\"] or "
+                        + "__rt.load_host(\"host/cfg\", {")
+                        && chunk.contains("[\"version\"] = "),
+                    "the artifact carries the host load with the emitted "
+                        + "declared map");
+            }
         } finally {
             deleteRecursively(host);
         }
 
-        // (b) A cross-module async call fails closed with the emitting
-        // module, the callee module, and the export name.
+        // (b) A cross-module async call is realized through the callee
+        // module's own async entry and the caller's alias token
+        // (ISSUE-0655, ISSUE-0656): the production compile succeeds,
+        // publishes the one project artifact, and the artifact executes.
         Path async = Files.createTempDirectory("production-dispatch-async-");
         try {
             write(async, "deal.json", DEAL_JSON_LUA);
             write(async, "src/lib.deal", ASYNC_LIB_SOURCE);
             write(async, "src/main.deal", CROSS_ASYNC_SOURCE);
-            ProjectOutcome compile = productionCompile(async, "src/main.deal",
-                "out");
-            check(compile.exitCode() != 0,
-                "the cross-module async closure fails closed");
-            check(compile.stderr().contains("E6005")
-                    && compile.stderr().contains("SHARED_EMITTER_COVERAGE")
-                    && compile.stderr().contains("EXTERNAL_ASYNC_CALL")
-                    && compile.stderr().contains("'main'")
-                    && compile.stderr().contains("'lib'")
-                    && compile.stderr().contains("'getValue'"),
-                "the guard names the token, the emitting module, the callee "
-                    + "module, and the export name: " + compile.stderr());
-            check(!Files.exists(async.resolve("out")),
-                "the guarded async compile stages no artifact");
+            ArmCompile arm = compileWithInvocation(async, "src/main.deal",
+                productionInvocation());
+            check(arm.success(),
+                "the cross-module async closure compiles: "
+                    + arm.orchestrator().diagnostics());
+            if (arm.success()) {
+                checkEq(1, arm.orchestrator().semanticEmissionCount(),
+                    "the cross-module async call records one project emission");
+                checkEq(0, arm.orchestrator().retainedEmissionCount(),
+                    "the cross-module async call increments no retained "
+                        + "counter");
+                List<String> artifacts = artifactFiles(async.resolve("out"));
+                check(artifacts.contains("main.lua")
+                        && !artifacts.contains("lib.lua"),
+                    "the cross-module async call publishes the one project "
+                        + "artifact and no per-module sibling: " + artifacts);
+                String chunk = Files.readString(async.resolve("out/main.lua"),
+                    StandardCharsets.UTF_8);
+                check(!chunk.contains("EXTERNAL_ASYNC_CALL")
+                        && !chunk.contains("SharedM"),
+                    "the artifact carries no superseded guard token and no "
+                        + "per-module async-entry reference");
+                ProcessOutcome run = runProcess(async.resolve("out"), "luajit",
+                    "main.lua");
+                check(run.exitCode() == 0,
+                    "the cross-module async artifact executes: "
+                        + run.output());
+            }
         } finally {
             deleteRecursively(async);
         }

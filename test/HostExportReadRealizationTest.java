@@ -113,13 +113,14 @@ import java.util.TreeMap;
  *       exactly that entry (never the absent slot, never a re-wrap). The
  *       assertions fail if the read arm, the program-scoped surface
  *       registry, or the host projection is broken.</li>
- *   <li><b>The production arm's guard.</b> The HOST-importing closure
- *       still fails closed before the one lowering with E6005 {@code
- *       SHARED_EMITTER_COVERAGE} and the {@code HOST_MODULE_IMPORT}
- *       token, naming the raw specifier and the resolved module, staging
- *       nothing and leaving the previous artifact set byte-identical
- *       (the host load surface and the executable value-position drive
- *       stay with the calls and FFI children).</li>
+ *   <li><b>The production arm's host surface.</b> The HOST-importing
+ *       closure emits and stages its one project artifact (ISSUE-0656:
+ *       the narrowed guard no longer blocks the host load): the emitted
+ *       chunk carries the declared-map {@code __rt.load_host} call of the
+ *       HOST declaration module in the module init walk, so the
+ *       value-position HOST read resolves the loaded table's entry
+ *       through the same read arm the per-unit sessions use (the host load
+ *       surface and the executable drive are the calls child's).</li>
  * </ol>
  *
  * <p>No operation kind or payload shape is added, no loader surface is
@@ -182,6 +183,7 @@ public class HostExportReadRealizationTest {
 
     /** The HOST declaration module of the combined probe (externals-declared). */
     private static final String HOST_SPECIFIER = "host/read_probe";
+    private static final String HOST_MODULE_PATH = "host.read_probe";
     private static final String HOST_DECLARATION_SOURCE = """
         export function ping(v: int): string;
         """;
@@ -1168,19 +1170,20 @@ public class HostExportReadRealizationTest {
     }
 
     // =========================================================================
-    // 5. The production arm's host guard stays in force
+    // 5. The production arm's host surface
     // =========================================================================
 
     static void testProductionGuard() throws Exception {
-        System.out.println("-- the production arm: the HOST-importing closure still "
-            + "fails closed with the pinned E6005 guard and stages nothing --");
+        System.out.println("-- the production arm: the HOST-importing closure "
+            + "emits its declared-map load and stages the one project "
+            + "artifact --");
         Fixture fixture = combinedFixture();
         try {
             Path out = fixture.root().resolve("out-arm");
             writeFileIn(out, "app.lua", "-- previous artifact\n");
-            Map<String, String> before = snapshotTree(out);
             PublicationStager stager = PublicationStager.forRoot(out);
             ProductionProjectEmission.Result result;
+            String chunk;
             try {
                 result = ProductionProjectEmission.run(productionInvocation(),
                     fixture.checkedProject(), fixture.index(), fixture.manifests(),
@@ -1189,25 +1192,34 @@ public class HostExportReadRealizationTest {
                         fixture.checkedProject().modules().get(0).ast().span()),
                     List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
                     Set.of(), Backend.LUAJIT, false, fixture.distributionHome(), stager);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the guarded compile stages nothing");
+                check(result.emitted(),
+                    "the HOST-importing closure emits: " + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the HOST-importing closure carries no diagnostic: "
+                        + result.diagnostics());
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the HOST-importing closure stages its one project artifact");
+                chunk = new String(stager.stagedSet().artifact("app.lua")
+                    .orElseThrow().content(), StandardCharsets.UTF_8);
+                stager.publish();
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the HOST-importing closure fails closed");
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code()),
-                "the guard diagnostic is E6005: " + result.diagnostics());
-            String message = result.firstDiagnostic() == null
-                ? "" : result.firstDiagnostic().message();
-            check(message.contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the guard names SHARED_EMITTER_COVERAGE: " + message);
-            check(message.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
-                "the guard names the HOST_MODULE_IMPORT token: " + message);
-            check(message.contains("'" + HOST_SPECIFIER + "'"),
-                "the guard names the import's raw specifier: " + message);
-            checkEq(before, snapshotTree(out),
-                "the guarded compile leaves the previous artifact set byte-identical");
+            Map<String, String> after = snapshotTree(out);
+            check(!after.containsKey("lib.lua")
+                    && !after.containsKey("host/read_probe.lua"),
+                "the HOST-importing closure stages no per-module sibling: "
+                    + after.keySet());
+            check(after.containsKey("app.lua")
+                    && !"-- previous artifact\n".equals(after.get("app.lua")),
+                "the one project artifact replaces the previous app.lua");
+            check(chunk.contains("__rt.load_host(\"" + HOST_SPECIFIER + "\", "),
+                "the emitted artifact carries the declared-map host load");
+            check(chunk.contains("__exportSurfaces[\"" + HOST_MODULE_PATH + "\"]"),
+                "the loaded table is published under the resolved module "
+                    + "identity");
+            check(!chunk.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
+                "the emitted artifact carries no guard token");
         } finally {
             deleteRecursively(fixture.root());
         }

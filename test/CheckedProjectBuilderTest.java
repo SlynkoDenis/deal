@@ -269,12 +269,13 @@ public class CheckedProjectBuilderTest {
             check(ok, "declaration-only-import-compile.deal compiles through phase 3 + builder: "
                 + orchestrator.diagnostics());
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same declaration-import fixture closed
-            // with E6005 SHARED_EMITTER_COVERAGE naming the HOST-kind
-            // import and publishes nothing (the host load is the calls
-            // child's), while the harness invocation above keeps the
-            // builder facts arm-independent.
+            // ISSUE-0656: the release-owned production invocation realizes
+            // the same HOST-declaration-kind import through the host load of
+            // the module init walk, so the production compile succeeds and
+            // publishes its one project artifact under the probe output (the
+            // fixture carries no call and no construction), while the
+            // harness invocation above keeps the builder facts
+            // arm-independent.
             Path prodOutput = tmp.resolve("prod-build");
             CompilationOrchestrator production = new CompilationOrchestrator(
                 entry, prodOutput, false, false, false, false, Backend.LUAJIT,
@@ -283,21 +284,19 @@ public class CheckedProjectBuilderTest {
                 CompilerProfileProvider.resolve(
                     ReleaseConfiguration.CURRENT_RELEASE_STATE,
                     ReleaseConfiguration.releaseCapabilityRegistry()));
-            check(!production.compile(),
-                "the release-owned production invocation fails the"
-                    + " declaration-import fixture closed");
+            check(production.compile(),
+                "the release-owned production invocation compiles the"
+                    + " declaration-import fixture: " + production.diagnostics());
             List<CompilerDiagnostic> productionDiagnostics =
                 production.diagnostics();
-            check(productionDiagnostics.stream().anyMatch(diagnostic ->
-                    "E6005".equals(diagnostic.code())
-                        && diagnostic.message()
-                            .contains("SHARED_EMITTER_COVERAGE")
-                        && diagnostic.message()
-                            .contains("HOST_MODULE_IMPORT")),
-                "the production failure is E6005 SHARED_EMITTER_COVERAGE"
-                    + " HOST_MODULE_IMPORT: " + productionDiagnostics);
-            check(!Files.exists(prodOutput),
-                "the production failure publishes nothing under " + prodOutput);
+            check(productionDiagnostics.stream().noneMatch(diagnostic ->
+                    "E6005".equals(diagnostic.code())),
+                "the production compile reports no emitter gap: "
+                    + productionDiagnostics);
+            check(Files.exists(prodOutput.resolve(
+                    "declaration-only-import-compile.lua")),
+                "the production compile publishes its one project artifact"
+                    + " under " + prodOutput);
 
             CheckedProjectBuildResult result = orchestrator.checkedProject();
             check(result != null && !result.hasErrors(),

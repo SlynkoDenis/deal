@@ -879,13 +879,14 @@ public class E2IdentityIntegrationGatesTest {
                 "no producer emits the dotted v1.1 emission shape"
                     + " @host.cfg/ServerConfig");
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same fixture closed with E6005
-            // SHARED_EMITTER_COVERAGE naming the HOST-kind declaration
-            // import (the host load and the declaration-owned construction
-            // are the calls and construction children's) and stages
-            // nothing, while the harness invocation above keeps the
-            // dotted-externals identity subject green.
+            // ISSUE-0656: the release-owned production invocation no
+            // longer trips the narrowed HOST_MODULE_IMPORT guard (the
+            // HOST-declaration-kind import is realized by the host load of
+            // the module init walk), so the fixture keeps failing closed at
+            // the declaration-owned class-construction shape: the landed
+            // ClassConstructionValidator CONSTRUCTION_COHERENCE rejection
+            // over the HOST_DEFAULTS registration seed, with nothing staged.
+            // ISSUE-0624 retargets this again when the construction lands.
             Path prodOut = base.resolve("prod_probe");
             String[] prod = runProductionCliCapturingErr(new String[]{
                 "compile", entry.toString(), "--output", prodOut.toString()});
@@ -893,11 +894,13 @@ public class E2IdentityIntegrationGatesTest {
                 "the release-owned production invocation fails the"
                     + " dotted-externals fixture closed: " + prod[1]);
             check(prod[1].contains("E6005")
-                    && prod[1].contains("SHARED_EMITTER_COVERAGE")
-                    && prod[1].contains("HOST_MODULE_IMPORT")
-                    && prod[1].contains("'host.cfg'"),
-                "the production failure names E6005 SHARED_EMITTER_COVERAGE"
-                    + " HOST_MODULE_IMPORT and the raw specifier: " + prod[1]);
+                    && prod[1].contains("CONSTRUCTION_COHERENCE")
+                    && prod[1].contains("@$external/host.cfg/Endpoint"),
+                "the production failure names E6005 and the declaration-owned"
+                    + " construction rule: " + prod[1]);
+            check(!prod[1].contains("HOST_MODULE_IMPORT"),
+                "the narrowed guard no longer fires for a HOST-declaration"
+                    + " import: " + prod[1]);
             check(!Files.exists(prodOut),
                 "the production failure stages nothing under " + prodOut);
 

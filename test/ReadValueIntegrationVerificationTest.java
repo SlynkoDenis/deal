@@ -2108,10 +2108,11 @@ public class ReadValueIntegrationVerificationTest {
         String productionEmission = Files.readString(
             root.resolve("test/ProductionProjectEmissionTest.java"),
             StandardCharsets.UTF_8);
-        check(productionEmission.contains("the guarded compile stages nothing")
+        check(productionEmission.contains("the narrowed guard stages nothing")
                 && productionEmission.contains("SHARED_EMITTER_COVERAGE"),
             "the fail-closed SHARED_EMITTER_COVERAGE family with nothing staged "
-                + "stays asserted where emission is driven");
+                + "stays asserted where emission is driven (ISSUE-0656 narrowed "
+                + "the guard to the extern-C declaration import)");
         String callsChild = Files.readString(
             root.resolve("test/CrossModuleCallRealizationTest.java"),
             StandardCharsets.UTF_8);
