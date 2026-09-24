@@ -25,11 +25,16 @@ package deal.semantic.ir;
  * loaded extern-C module's validated {@code <C>_plan} entry;
  * {@code BUILTIN_DEFAULTS}: the builtin {@code Error} class's constant
  * empty-string defaults). The seeds register these members as facts; every
- * execution, emission, and default-evaluation consumer keeps rejecting
- * them as fail-closed producer defects until the construction children
- * realize them — a registration fact is never silently executed as
- * another owner. {@code RETAINED_ABI} keeps its own never-produced
- * rejection (the retained route does not exist on the production path).</p>
+ * consumer resolves an unrecognized or unrealized owner as a fail-closed
+ * producer defect — a registration fact is never silently executed as
+ * another owner. {@code HOST_DEFAULTS} is realized by the host
+ * declaration class construction (ISSUE-0624),
+ * {@code BUILTIN_DEFAULTS} by the builtin {@code Error} construction
+ * (ISSUE-0619), and {@code FFI_PLAN} by the extern-C C-struct
+ * construction (the FFI child) — until it lands that owner stays a
+ * fail-closed consumer rejection. {@code RETAINED_ABI} keeps its own
+ * never-produced rejection (the retained route does not exist on the
+ * production path).</p>
  */
 public enum DefaultOwner {
 
@@ -44,15 +49,18 @@ public enum DefaultOwner {
 
     /**
      * A host declaration class's defaults are the loaded host module's
-     * {@code <C>_defaults} entry (registration fact; the host-construction
-     * execution is not realized in this slice).
+     * {@code <C>_defaults} entry (ISSUE-0624; realized by the host
+     * declaration class construction: the loaded defaults are deep-copied
+     * per attempt, the provided overlay raises the E8007 extra-key
+     * projection, the omitted optional sentinels are removed, and the
+     * instance is tagged with the canonical class identity).
      */
     HOST_DEFAULTS,
 
     /**
      * An extern-C declaration class's defaults are the loaded module's
      * validated {@code <C>_plan} entry (registration fact; the
-     * C-struct-construction execution is not realized in this slice).
+     * C-struct-construction execution is the FFI child's, not realized yet).
      */
     FFI_PLAN,
 

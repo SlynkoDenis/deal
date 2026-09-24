@@ -2373,7 +2373,8 @@ public final class SemanticLowerer {
         StructuredBodyTable table = lowerer.bodyTable();
         Optional<CompilerDiagnostic> unitChain = validateProjectUnit(unit, table,
             comparisonFacts, lowerer.pinnedWriteFacts(), lowerer.factoryRegistry(),
-            lowerer.jsonDefaultChildren(), ownInterface, Map.copyOf(sharedFactories));
+            lowerer.jsonDefaultChildren(), ownInterface, Map.copyOf(sharedFactories),
+            seeds.registrations());
         if (unitChain.isPresent()) {
             return LoweredProjectModule.failure(List.of(unitChain.get()));
         }
@@ -2479,6 +2480,40 @@ public final class SemanticLowerer {
             deal.semantic.ir.JsonDefaultChildTable jsonDefaults,
             deal.semantic.ir.ExternalModuleInterface ownInterface,
             Map<ClassId, SharedFactoryFacts> sharedFactories) {
+        return validateProjectUnit(unit, table, facts, pinnedWrites, factories,
+            jsonDefaults, ownInterface, sharedFactories, Map.of());
+    }
+
+    /**
+     * The declaration-class seam of {@link #validateProjectUnit(
+     * LoweredModuleUnit, StructuredBodyTable,
+     * SemanticIrValidator.ComparisonFacts,
+     * BindingsProductionValidator.PinnedWriteFacts,
+     * deal.semantic.ir.ClassFactoryRegistry,
+     * deal.semantic.ir.JsonDefaultChildTable,
+     * deal.semantic.ir.ExternalModuleInterface,
+     * Map)} (ISSUE-0624; {@code semantic-ir-construct-coverage-cutover}
+     * K10): the project's class registration seeds, so a host declaration
+     * class's construction and field operations validate against exactly
+     * the registered declaration layout. The project entry passes the
+     * seeds it produced before the walk; a unit-local window passes an
+     * empty context and keeps the fail-closed behavior for a
+     * declaration-class owner.
+     *
+     * @param declarationClasses the class registration seeds' entries by
+     *                           {@link ClassId}; non-null
+     * @return empty on pass, otherwise the first E6005
+     */
+    public static Optional<CompilerDiagnostic> validateProjectUnit(
+            LoweredModuleUnit unit,
+            StructuredBodyTable table,
+            SemanticIrValidator.ComparisonFacts facts,
+            BindingsProductionValidator.PinnedWriteFacts pinnedWrites,
+            deal.semantic.ir.ClassFactoryRegistry factories,
+            deal.semantic.ir.JsonDefaultChildTable jsonDefaults,
+            deal.semantic.ir.ExternalModuleInterface ownInterface,
+            Map<ClassId, SharedFactoryFacts> sharedFactories,
+            Map<ClassId, ClassRegistrationSeeds.ClassRegistration> declarationClasses) {
         Objects.requireNonNull(unit, "unit must not be null");
         Objects.requireNonNull(table, "table must not be null");
         Objects.requireNonNull(facts, "facts must not be null");
@@ -2487,6 +2522,8 @@ public final class SemanticLowerer {
         Objects.requireNonNull(jsonDefaults, "jsonDefaults must not be null");
         Objects.requireNonNull(ownInterface, "ownInterface must not be null");
         Objects.requireNonNull(sharedFactories, "sharedFactories must not be null");
+        Objects.requireNonNull(declarationClasses,
+            "declarationClasses must not be null");
         Optional<CompilerDiagnostic> validation =
             SemanticIrValidator.validate(unit, facts);
         if (validation.isPresent()) {
@@ -2507,7 +2544,7 @@ public final class SemanticLowerer {
             return bindings;
         }
         return ClassConstructionValidator.validate(unit, table, factories,
-            jsonDefaults, ownInterface, sharedFactories);
+            jsonDefaults, ownInterface, sharedFactories, declarationClasses);
     }
 
     /** The requirement manifest of one module, or {@code null} when absent. */
@@ -6162,10 +6199,14 @@ public final class SemanticLowerer {
                     // default child (the omitted fields take the compiler
                     // constant empty string at the construction site), the
                     // null factory ref, and the empty default-op list. The
-                    // declaration-class owners (HOST_DEFAULTS/FFI_PLAN) stay
-                    // fail-closed until their construction children land — a
-                    // registration fact is never silently executed as
-                    // another owner.
+                    // host declaration class construction (ISSUE-0624; K10)
+                    // is realized by the host arm: the same provided-field
+                    // boundaries over the seed layout with the loaded
+                    // {@code <C>_defaults} data supplying the omitted
+                    // fields — no default child and the null factory ref. The
+                    // extern-C FFI_PLAN owner stays fail-closed until the FFI
+                    // child lands — a registration fact is never silently
+                    // executed as another owner.
                     layout = seed.layout();
                     defaultOwner = seed.owner();
                 }

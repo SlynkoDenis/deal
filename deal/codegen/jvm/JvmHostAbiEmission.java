@@ -4,6 +4,7 @@ import deal.identity.CanonicalClassIdentity;
 import deal.identity.CanonicalModuleIdentity;
 import deal.semantic.DescriptorService;
 import deal.semantic.HostDeclarationSurface;
+import deal.semantic.ir.ClassId;
 import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredModuleUnit;
@@ -76,8 +77,30 @@ final class JvmHostAbiEmission {
                               String identityText, List<FieldInfo> fields) {
     }
 
-    /** One declared field of a synthesized record. */
-    private record FieldInfo(String javaName, String storageType, boolean optional) {
+    /**
+     * One declared field of a synthesized record: the declared field name,
+     * its translated Java name, the optional flag, the declared type's
+     * canonical descriptor text (the host-crossing projections' key), and
+     * the settled host-facing storage type.
+     */
+    private record FieldInfo(String name, String javaName, String storageType,
+                             String descriptorText, boolean optional) {
+    }
+
+    /**
+     * The construction facts of one declared host class (ISSUE-0624;
+     * {@code semantic-ir-construct-coverage-cutover} K10): the synthesized
+     * record's simple name, the load-time-captured {@code <C>_defaults}
+     * field, the canonical identity text, and the declared fields in
+     * declaration order.
+     */
+    record HostClassFacts(String recordSimpleName, String defaultsField,
+                          String identityText, List<HostFieldFacts> fields) {
+    }
+
+    /** One declared field of a host class construction (declaration order). */
+    record HostFieldFacts(String name, String javaName, String storageType,
+                          String descriptorText, boolean optional) {
     }
 
     private final List<HostModule> modules;
@@ -92,6 +115,8 @@ final class JvmHostAbiEmission {
     private final Map<String, Type.Func> shapes = new LinkedHashMap<>();
     /** The synthesized records by simple name (declaration order). */
     private final Map<String, RecordInfo> records = new LinkedHashMap<>();
+    /** The synthesized records by canonical identity text (the class identity join). */
+    private final Map<String, RecordInfo> recordsByIdentity = new LinkedHashMap<>();
     /** The per-class array-wrapper simple names by class-carrying specifier/name key. */
     private final Map<String, String> classArrayWrappers = new LinkedHashMap<>();
     /** The declared array descriptor → element type (the crossing source). */
@@ -191,6 +216,42 @@ final class JvmHostAbiEmission {
         return JvmBackend.escapedIdentifier(modulePath);
     }
 
+    /**
+     * The construction facts of one declared host class (ISSUE-0624; K10),
+     * or {@code null} when the class identity is not a declared host class
+     * of this compile's surface — the fail-closed resolution the host
+     * construction arm requires.
+     */
+    HostClassFacts hostClassFacts(ClassId classId) {
+        Objects.requireNonNull(classId, "classId must not be null");
+        RecordInfo record = recordsByIdentity.get(classId.text());
+        if (record == null) {
+            return null;
+        }
+        for (HostModule module : modules) {
+            for (HostDeclarationSurface.DeclaredClass declared
+                    : module.facts().classes().values()) {
+                if (!declared.name().equals(classId.name())) {
+                    continue;
+                }
+                Type.Class classType = classTypeOf(module, classId.name());
+                if (classType == null
+                        || !descriptorText(classType).equals(record.identityText())) {
+                    continue;
+                }
+                List<HostFieldFacts> fields = new ArrayList<>();
+                for (FieldInfo field : record.fields()) {
+                    fields.add(new HostFieldFacts(field.name(), field.javaName(),
+                        field.storageType(), field.descriptorText(), field.optional()));
+                }
+                return new HostClassFacts(record.simpleName(),
+                    defaultsField(key(module.modulePath()), classId.name()),
+                    record.identityText(), List.copyOf(fields));
+            }
+        }
+        return null;
+    }
+
     static String loadedFlag(String key) {
         return "__hostLoaded$" + key;
     }
@@ -232,18 +293,29 @@ final class JvmHostAbiEmission {
         List<FieldInfo> fields = new ArrayList<>();
         for (HostDeclarationSurface.DeclaredField field : declared.fields()) {
             Type fieldType = field.type();
-            Type inner = fieldType instanceof Type.Nullable nullable
-                ? nullable.inner() : fieldType;
-            String storage = carrierType(inner, field.declaration().optional());
-            fields.add(new FieldInfo(JvmBackend.javaName(field.declaration().name()),
-                storage, field.declaration().optional()));
-            collectType(module, fieldType);
+            // The declared field type carries its own nullability: a
+            // required-present `T | null` field stores the boxed/reference
+            // carrier exactly like an optional field does (the optional flag
+            // is the omission rule, not the nullability rule).
+            String storage = carrierType(fieldType, field.declaration().optional());
+            fields.add(new FieldInfo(field.declaration().name(),
+                JvmBackend.javaName(field.declaration().name()), storage,
+                descriptorText(fieldType), field.declaration().optional()));
         }
         String arrayWrapper = "$HostArr$" + JvmBackend.escapedIdentifier(
             specifier.replace('.', '/')) + "$" + JvmBackend.javaName(className);
-        records.put(simple, new RecordInfo(simple, arrayWrapper, identityText, fields));
+        RecordInfo record = new RecordInfo(simple, arrayWrapper, identityText, fields);
+        // The record registers before its field types are collected: a
+        // self-referential declared class (a class-typed or class-array
+        // field naming its own class, the `presence.Config` shape) must
+        // resolve its own record, never re-enter this declaration.
+        records.put(simple, record);
+        recordsByIdentity.put(identityText, record);
         classArrayWrappers.putIfAbsent(classNameKey(specifier, className),
             arrayWrapper);
+        for (HostDeclarationSurface.DeclaredField field : declared.fields()) {
+            collectType(module, field.type());
+        }
     }
 
     /** Collects every shape the declared type positions need. */
@@ -953,6 +1025,11 @@ final class JvmHostAbiEmission {
         out.append("    return \"expected \" + d;\n");
         out.append("  }\n\n");
         emitCheckValue(out);
+        out.append("  static java.lang.Object __hostDefault(java.util.Map<java.lang.String, java.lang.Object> defaults, java.lang.String name, java.lang.String cls, java.lang.String oFile, int oLine, int oCol) {\n");
+        out.append("    java.lang.Object v = defaults.get(name);\n");
+        out.append("    if (v == null) throw JvmRuntime.fail(\"E8001\", \"missing default for field '\" + name + \"' of class '\" + cls + \"'\", oFile + \":\" + oLine + \":\" + oCol, null, null);\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
         out.append("  static java.lang.reflect.Method __hostMethod(java.lang.Class<?> h,"
             + " java.lang.String module, java.lang.String name, java.lang.String"
             + " desc, java.lang.Class<?>[] params, java.lang.String oFile, int"
@@ -1228,6 +1305,8 @@ final class JvmHostAbiEmission {
             case Type.Boolean ignored -> "((java.lang.Boolean) (" + expression + ")).booleanValue()";
             case Type.String ignored -> "(java.lang.String) (" + expression + ")";
             case Type.Bytes ignored -> "($DealRt.Bytes) (" + expression + ")";
+            case Type.Class cls -> "($DealRt." + recordSimpleNameOf(cls) + ") ("
+                + expression + ")";
             default -> "(" + expression + ")";
         };
     }
@@ -1417,8 +1496,11 @@ final class JvmHostAbiEmission {
     /** One synthesized host-class record with declared fields in declaration order. */
     private void emitRecord(StringBuilder out, RecordInfo record) {
         out.append("  // Synthesized host-class record ").append(record.identityText())
-            .append(" (the declared fields in declaration order).\n");
-        out.append("  static final class ").append(record.simpleName()).append(" {\n");
+            .append(" (the declared fields in declaration order; the\n")
+            .append("  // JvmRuntime.ClassInstance surface is the production"
+                + " field-op entry — ISSUE-0624/K10).\n");
+        out.append("  static final class ").append(record.simpleName())
+            .append(" implements JvmRuntime.ClassInstance {\n");
         out.append("    final java.lang.String $identity;\n");
         for (FieldInfo field : record.fields()) {
             out.append("    ").append(field.storageType()).append(' ')
@@ -1463,7 +1545,151 @@ final class JvmHostAbiEmission {
                     .append(field.javaName()).append("$present = true; return v; }\n");
             }
         }
+        emitRecordClassInstance(out, record);
         out.append("  }\n");
+    }
+
+    /**
+     * The {@link JvmRuntime.ClassInstance} surface of one synthesized
+     * record (ISSUE-0624; K10): the closed field-op entry the production
+     * arms already speak — {@code FIELD_READ} reads the presence-aware
+     * field with the production value carriers projected back (an absent
+     * field is {@link JvmRuntime#MISSING}), {@code FIELD_WRITE} stores the
+     * boundary-checked production value, {@code FIELD_DELETE} clears an
+     * optional field, and {@code HAS_FIELD} resolves presence — with the
+     * declared field's host-facing storage as the record's own state the
+     * deployed host implementation reads directly. A required-field delete
+     * is unreachable from the checker (E4004) and stays a fail-closed
+     * producer defect.
+     */
+    private void emitRecordClassInstance(StringBuilder out, RecordInfo record) {
+        out.append("    @Override public java.lang.String classIdText() { return $identity; }\n");
+        out.append("    @Override public boolean isPresent(java.lang.String key) {\n");
+        for (FieldInfo field : record.fields()) {
+            out.append("      if (").append(javaString(field.name()))
+                .append(".equals(key)) return ")
+                .append(field.optional() ? field.javaName() + "$present" : "true")
+                .append(";\n");
+        }
+        out.append("      return false;\n");
+        out.append("    }\n");
+        out.append("    @Override public java.lang.Object read(java.lang.String key) {\n");
+        for (FieldInfo field : record.fields()) {
+            out.append("      if (").append(javaString(field.name()))
+                .append(".equals(key)) ");
+            if (field.optional()) {
+                out.append("return ").append(field.javaName()).append("$present ? ")
+                    .append(readProjection(field, field.javaName()))
+                    .append(" : JvmRuntime.MISSING;\n");
+            } else {
+                out.append("return ")
+                    .append(readProjection(field, field.javaName())).append(";\n");
+            }
+        }
+        out.append("      return JvmRuntime.MISSING;\n");
+        out.append("    }\n");
+        out.append("    @Override public void write(java.lang.String key, "
+            + "java.lang.Object value) {\n");
+        for (FieldInfo field : record.fields()) {
+            out.append("      if (").append(javaString(field.name()))
+                .append(".equals(key)) { ").append(field.javaName()).append(" = ")
+                .append(writeProjection(field, "value")).append(";");
+            if (field.optional()) {
+                out.append(" ").append(field.javaName()).append("$present = true;");
+            }
+            out.append(" return; }\n");
+        }
+        out.append("      throw new java.lang.IllegalStateException("
+            + "\"host class field write to undeclared field '\" + key + \"' (producer defect)\");\n");
+        out.append("    }\n");
+        out.append("    @Override public void delete(java.lang.String key) {\n");
+        for (FieldInfo field : record.fields()) {
+            out.append("      if (").append(javaString(field.name()))
+                .append(".equals(key)) ");
+            if (field.optional()) {
+                out.append("{ ").append(field.javaName()).append(" = null; ")
+                    .append(field.javaName()).append("$present = false; return; }\n");
+            } else {
+                out.append("throw new java.lang.IllegalStateException(\"delete of"
+                    + " required host class field '" + field.name()
+                    + "' (the checker's E4004 rejects the shape — producer defect)\");\n");
+            }
+        }
+        out.append("      throw new java.lang.IllegalStateException(\"host class field"
+            + " delete of undeclared field '\" + key + \"' (producer defect)\");\n");
+        out.append("    }\n");
+    }
+
+    /**
+     * The record storage → production carrier projection of one declared
+     * field (the {@code FIELD_READ} direction): the primitive-int and
+     * primitive-number storages box into the closed production carriers,
+     * a declared array/function storage crosses through the emitted
+     * host-to-DEAL projections, and every other storage (string, boolean,
+     * record, bytes) is the production value itself.
+     */
+    private String readProjection(FieldInfo field, String expression) {
+        String inner = field.descriptorText().startsWith("?")
+            ? field.descriptorText().substring(1) : field.descriptorText();
+        // A primitive storage cannot carry the language null (the declared
+        // boundary rejects it); every reference storage can (an optional
+        // field's present null), so the boxing forms guard it.
+        boolean primitive = switch (field.storageType()) {
+            case "int", "double", "boolean" -> true;
+            default -> false;
+        };
+        if (inner.equals("int")) {
+            String boxed = "java.lang.Long.valueOf((long) " + expression + ")";
+            return primitive ? boxed
+                : "(" + expression + " == null ? null : " + boxed + ")";
+        }
+        if (inner.equals("number")) {
+            String boxed = "java.lang.Double.valueOf((double) " + expression + ")";
+            return primitive ? boxed
+                : "(" + expression + " == null ? null : " + boxed + ")";
+        }
+        if (inner.startsWith("[") || inner.startsWith("(")
+                || inner.startsWith("async(")) {
+            return artifactClass + ".__hostToDeal(" + javaString(inner) + ", "
+                + expression + ")";
+        }
+        return expression;
+    }
+
+    /**
+     * The production carrier → record storage projection of one declared
+     * field (the {@code FIELD_WRITE} direction): the declared host-facing
+     * projection ({@code __hostProjectArg}) then the storage's own
+     * unboxing/cast.
+     */
+    private String writeProjection(FieldInfo field, String expression) {
+        return hostFieldWriteProjection(field.descriptorText(), field.storageType(),
+            expression, artifactClass + ".__hostProjectArg");
+    }
+
+    /**
+     * The production carrier &#8594; record storage projection of one
+     * declared field (the {@code FIELD_WRITE} and construction-argument
+     * direction, ISSUE-0624/K10): the declared host-facing projection
+     * ({@code __hostProjectArg}) then the storage's own unboxing/cast — the
+     * one producer the record's {@code write} surface and the production
+     * construction arm share. The projection helper's reference is qualified
+     * explicitly inside the {@code $DealRt} scope (the artifact class owns
+     * the crossing helpers) and unqualified inside the artifact class's own
+     * emitted members.
+     */
+    static String hostFieldWriteProjection(String descriptorText, String storageType,
+                                           String expression, String projectArgRef) {
+        String projected = projectArgRef + "(" + javaString(descriptorText)
+            + ", " + expression + ")";
+        return switch (storageType) {
+            case "int" -> "((java.lang.Number) " + projected + ").intValue()";
+            case "double" -> "((java.lang.Number) " + projected + ").doubleValue()";
+            case "boolean" -> "((java.lang.Boolean) " + projected + ").booleanValue()";
+            default -> storageType.equals("java.lang.Object")
+                ? projected
+                : "(" + storageType + ") " + projected;
+        };
     }
 
     /** One per-signature function wrapper class (the landed shape id). */

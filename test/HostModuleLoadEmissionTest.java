@@ -883,10 +883,12 @@ public class HostModuleLoadEmissionTest {
                 "the scope carries the declared element-shape array carriers");
             check(source.contains("static final class Bytes {"),
                 "the scope carries the declared bytes descriptor's carrier type");
-            check(source.contains("static final class $Host$host$scfg$ServerConfig {")
+            check(source.contains("static final class $Host$host$scfg$ServerConfig"
+                        + " implements JvmRuntime.ClassInstance {")
                     && source.contains("$Host$host$scfg$ServerConfig(int port,"),
                 "the scope carries one synthesized record per declared host class with "
-                    + "its declared fields in declaration order");
+                    + "its declared fields in declaration order and the production "
+                    + "field-op surface (ISSUE-0624's construction/field realization)");
             check(source.contains("static final class $HostArr$host$scfg$ServerConfig "
                     + "extends __RefArray {"),
                 "the scope carries the per-class array carrier of a declared class element");

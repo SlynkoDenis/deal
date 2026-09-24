@@ -820,4 +820,25 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # retainedEmissionCount() == 0, one staged project artifact, and the
   # pinned transcript under luajit and java.
   'fg|=== Running Guard Replacement Tests (ISSUE-0656) ===|java -ea -cp build deal.test.GuardReplacementTest'
+
+  # ISSUE-0624 registration: host-declared class construction over the loaded
+  # <C>_defaults (semantic-ir-construct-coverage-cutover K10, the K10 contract,
+  # and K9 item 3; luajit-jvm-single-lowering-production-cutover C1;
+  # host-module-abi D2 and the host-load contract; sequencing step 3): the
+  # CLASS_NEW(HOST_DEFAULTS) lowering shape (the resolved class identity, the
+  # null factory ref, the empty default-child list, exactly one
+  # CLASS_LITERAL_FIELD boundary per provided field in declaration order, zero
+  # RETAINED_ABI_DEFERRED, no RETAINED_ABI), the five pinned construction
+  # phases over the loaded defaults entry (the per-attempt deep copy with the
+  # sentinel identities preserved, the provided overlay with the E8007
+  # extra-key rejection at the literal origin, the __MISSING removal, the
+  # canonical identity tag), the field operations and has() through the
+  # registered declaration layout with the alias-observed commits, the
+  # combined host-class corpus fixtures (host-class-export,
+  # host-class-default-isolation, host-export-presence,
+  # plan-host-discriminator, host-class-extra-field) under real luajit and
+  # javac --release 25 -proc:none + java together with the deployed corpus host
+  # implementations and through the oracle's host-seam defaults projection,
+  # and the call-free negative load seeds' pinned E8011 at the import origin.
+  'fg|=== Running Host-Class Construction Tests (ISSUE-0624) ===|java -ea -cp build deal.test.HostClassConstructionTest'
 )

@@ -306,6 +306,16 @@ public final class LuaSemanticEmitter {
          * production project session, null in the trace/unit sessions.
          */
         final HostDeclarationSurface hostSurface;
+        /**
+         * The declared host classes of the compile's declaration surface by
+         * canonical class identity (ISSUE-0624; K10): a host declaration
+         * class construction resolves its declaring module — the
+         * {@code __exportSurfaces} key whose loaded surface carries the
+         * class's {@code <C>_defaults} entry — through this map, never from
+         * a dotted-path derivation. Empty outside the host-aware project
+         * sessions.
+         */
+        final Map<ClassId, ModuleId> hostClassModules = new LinkedHashMap<>();
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
         final boolean entryModule;
         /** Ops the block walk skips (the entry delegation of a non-entry module). */
@@ -385,6 +395,7 @@ public final class LuaSemanticEmitter {
             }
             this.trace = trace;
             this.entryModule = true;
+            registerHostClasses();
             for (Map.Entry<ModuleId, LoweredModuleUnit> entry
                     : project.modules().entrySet()) {
                 registerUnit(entry.getValue(), tables.get(entry.getKey()),
@@ -407,6 +418,65 @@ public final class LuaSemanticEmitter {
                     }
                 }
             }
+        }
+
+        /**
+         * Registers the compile's declared host classes (ISSUE-0624; K10):
+         * one entry per host declaration module class export, keyed by the
+         * canonical class identity projected through the single
+         * {@link DescriptorService} producer — the same identity the
+         * {@code CLASS_NEW} payloads and the field-op payloads carry. An
+         * extern-C declaration class contributes no entry (its construction
+         * is the FFI child's).
+         */
+        private void registerHostClasses() {
+            if (hostSurface == null) {
+                return;
+            }
+            for (ModuleId declarationModule : hostSurface.moduleIds()) {
+                HostDeclarationSurface.DeclarationFacts facts =
+                    hostSurface.require(declarationModule);
+                if (facts.kind()
+                        != HostDeclarationSurface.DeclarationKind.HOST) {
+                    continue;
+                }
+                for (Map.Entry<String, Type> export : facts.exports().entrySet()) {
+                    if (!(export.getValue() instanceof Type.Class)) {
+                        continue;
+                    }
+                    RuntimeDescriptor descriptor =
+                        DescriptorService.describe(export.getValue());
+                    if (descriptor instanceof RuntimeDescriptor.Class classDescriptor) {
+                        hostClassModules.put(classDescriptor.classId(),
+                            declarationModule);
+                    }
+                }
+            }
+        }
+
+        /** Whether one class identity is a declared host class of the compile. */
+        private boolean isHostClass(ClassId classId) {
+            return hostClassModules.containsKey(classId);
+        }
+
+        /**
+         * The emitted expression of one declared host class's loaded
+         * {@code <C>_defaults} entry (K10): the module's published surface
+         * entry — the module table {@code __rt.load_host} returned — read
+         * back by the construction site. An absent surface or entry is a
+         * fail-closed producer defect in the prelude helper, never a silent
+         * default.
+         */
+        private String hostDefaultsExpr(ClassId classId) {
+            ModuleId declarationModule = hostClassModules.get(classId);
+            if (declarationModule == null) {
+                throw new IllegalStateException("the class " + classId
+                    + " is not a declared host class of the compile's declaration"
+                    + " surface (the class defaults entry has exactly one source —"
+                    + " a producer defect)");
+            }
+            return "__hostClassDefaults(" + luaString(declarationModule.path())
+                + ", " + luaString(classId.name()) + ")";
         }
 
         /** Registers one module's unit/table/registry into the session closure. */
@@ -1910,9 +1980,51 @@ public final class LuaSemanticEmitter {
                 (KindPayload.HasFieldPayload) op.payload();
             emitStart(op);
             String target = slot((ValueId) op.result());
+            if (isHostClassReceiver(op)) {
+                // A declared host class instance (ISSUE-0624; K10): the
+                // deployed construction carrier stores the declared fields
+                // directly (an absent optional field is absent, a present
+                // null is the deployed runtime's sentinel), so presence is
+                // exactly the retained host representation's rule.
+                out.append(target).append(" = (")
+                    .append(slot(payload.receiver())).append("[")
+                    .append(luaString(payload.key())).append("] ~= nil)\n");
+                emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+                return;
+            }
             out.append(target).append(" = (__member(").append(slot(payload.receiver()))
                 .append(", ").append(luaString(payload.key())).append(") ~= __MISSING)\n");
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * Whether one op's receiver operand is a declared host class
+         * (ISSUE-0624; K10): the {@code HAS_FIELD} payload names no class
+         * id, so the receiver's producing op (or, for an operand-carrying
+         * op, its first operand type) resolves the checked descriptor — a
+         * class-typed receiver whose identity is a declared host class of
+         * the compile's declaration surface. A nullable wrap (an optional
+         * class field read) is unwrapped first.
+         */
+        private boolean isHostClassReceiver(SemanticOp op) {
+            RuntimeDescriptor descriptor = null;
+            if (!op.operandTypes().isEmpty()) {
+                descriptor = op.operandTypes().get(0);
+            } else if (op.payload() instanceof KindPayload.HasFieldPayload payload) {
+                for (SemanticOp producer : opsById.values()) {
+                    if (payload.receiver().equals(producer.result())
+                            && producer.resultType() instanceof RuntimeDescriptor
+                                produced) {
+                        descriptor = produced;
+                        break;
+                    }
+                }
+            }
+            if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
+                descriptor = nullable.inner();
+            }
+            return descriptor instanceof RuntimeDescriptor.Class classDescriptor
+                && isHostClass(classDescriptor.classId());
         }
 
         // =====================================================================
@@ -1951,6 +2063,17 @@ public final class LuaSemanticEmitter {
                 // declared field to the carrier's own field.
                 out.append("__rvT = __instT.")
                     .append(errorCarrierField(op, payload.field())).append("\n");
+            } else if (isHostClass(payload.classId())) {
+                // A declared host class instance (ISSUE-0624; K10): the
+                // deployed construction carrier stores the declared fields
+                // directly, so the presence-aware read is the field itself
+                // (an absent optional field is nil) with the present-null
+                // sentinel pre-mapped to the language null, exactly like the
+                // in-project carrier's presence-map read.
+                out.append("__rvT = __instT[").append(luaString(payload.field()))
+                    .append("]\n");
+                out.append("if __rvT == __NULL or __rvT == __rt.__NULL then "
+                    + "__rvT = nil end\n");
             } else {
                 // The presence-aware read: missing → nil before the boundary;
                 // present (present null included) → the stored value.
@@ -1997,6 +2120,14 @@ public final class LuaSemanticEmitter {
                 out.append("__instT.")
                     .append(errorCarrierField(op, payload.field()))
                     .append(" = __chkB\n");
+            } else if (isHostClass(payload.classId())) {
+                // A declared host class field write (ISSUE-0624; K10): the
+                // commit stores the boundary-published value into the
+                // deployed construction carrier's own field, the language
+                // null as the deployed runtime's sentinel (the retained host
+                // representation's present-null convention).
+                out.append("__instT[").append(luaString(payload.field()))
+                    .append("] = (__chkB == nil) and __rt.__NULL or __chkB\n");
             } else {
                 out.append("__instT.__f[").append(luaString(payload.field()))
                     .append("] = (__chkB == nil) and __NULL or __chkB\n");
@@ -2031,6 +2162,15 @@ public final class LuaSemanticEmitter {
             SemanticOp receiverBoundary =
                 boundaryChildOfKind(op, BoundaryKind.UNTYPED_CLASS_INPUT);
             emitFieldBoundaryCheck(op, receiverBoundary, slot(payload.classValue()));
+            if (isHostClass(payload.classId())) {
+                // A declared host class field delete (ISSUE-0624; K10): the
+                // deployed construction carrier clears the direct field —
+                // deleting an already-absent field is a no-op SUCCESS.
+                out.append("__chkB[").append(luaString(payload.field()))
+                    .append("] = nil\n");
+                emitPlainSuccess(op);
+                return;
+            }
             out.append("__chkB.__p[").append(luaString(payload.field()))
                 .append("] = nil\n");
             out.append("__chkB.__f[").append(luaString(payload.field()))
@@ -3516,6 +3656,14 @@ public final class LuaSemanticEmitter {
                 // generated class carriers and the JSON plans).
                 layout = ClassLayout.BUILTIN_ERROR;
             }
+            if (layout == null && payload.defaultOwner() == DefaultOwner.HOST_DEFAULTS) {
+                // The host declaration class's registered layout (ISSUE-0624;
+                // K10): the payload carries exactly the project lowering's
+                // registration-seed layout (the validator checks the
+                // equality against the seeds), and the declaration layouts
+                // are never merged into a unit's own classLayouts.
+                layout = payload.layout();
+            }
             if (layout == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId() + " classId "
                     + payload.classId() + " has no layout in the resolution context "
@@ -3528,13 +3676,19 @@ public final class LuaSemanticEmitter {
             switch (payload.defaultOwner()) {
                 case LOCAL -> emitClassNewLocalDefaults(op, payload, provided);
                 case SHARED_FACTORY -> emitClassNewFactoryTransfer(op, payload, provided);
-                case HOST_DEFAULTS, FFI_PLAN ->
+                case HOST_DEFAULTS -> {
+                    // The host declaration class construction (ISSUE-0624;
+                    // K10 and the K10 contract): dispatched after the
+                    // static extra-key scan below — the shape carries no
+                    // default children and no factory transfer, and its
+                    // phases run through the loaded <C>_defaults entry.
+                }
+                case FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class owners are the project lowering's"
-                        + " class registration seeds (ISSUE-0631) and their construction"
-                        + " is not emitted in this slice — a fail-closed producer"
-                        + " defect, never emitted");
+                        + ": the extern-C C-struct construction is the FFI"
+                        + " child's and is not emitted here — a fail-closed"
+                        + " producer defect, never emitted");
                 case BUILTIN_DEFAULTS -> {
                     // The builtin Error construction (K13 items 2-4): the
                     // builtin defaults are compiler constants, so no default
@@ -3564,6 +3718,10 @@ public final class LuaSemanticEmitter {
             }
             if (payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
                 emitClassNewBuiltinDefaults(op, payload, layout);
+                return;
+            }
+            if (payload.defaultOwner() == DefaultOwner.HOST_DEFAULTS) {
+                emitClassNewHostDefaults(op, payload, layout);
                 return;
             }
             // K-D4 steps 4-5: instance building plus field validation in
@@ -3686,6 +3844,113 @@ public final class LuaSemanticEmitter {
                 .append(code == null ? luaString("") : code)
                 .append(", m = ")
                 .append(message == null ? luaString("") : message).append("}\n");
+            out.append(target).append(" = __instT\n");
+            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The host declaration class construction (ISSUE-0624;
+         * {@code semantic-ir-construct-coverage-cutover} K10 and the K10
+         * contract): the provided values evaluate in literal order by the
+         * caller (already completed operands), the construction runs
+         * through the deployed runtime's {@code __rt.class_} over the
+         * declaring module's loaded {@code <C>_defaults} entry — the
+         * per-attempt deep copy with the sentinel identities preserved, the
+         * provided overlay with the extra provided name raising E8007 at the
+         * literal origin before any field validation, the
+         * {@code __MISSING} removal of the omitted optionals, and the
+         * canonical identity tag — then the pinned
+         * {@code CLASS_LITERAL_FIELD} boundary children run in declaration
+         * order and the admitted values are written back into the instance
+         * (the language null as the deployed runtime's own sentinel, so the
+         * host side observes the retained convention and the emitted field
+         * ops read present null as null). The instance carries the shared
+         * carrier markers ({@code __c}/{@code __id}) so every boundary and
+         * field-op byte-exact identity check applies unchanged. A failed
+         * construction publishes no instance.
+         */
+        private void emitClassNewHostDefaults(SemanticOp op,
+                KindPayload.ClassNewPayload payload, ClassLayout layout) {
+            if (!isHostClass(payload.classId())) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner HOST_DEFAULTS for " + payload.classId()
+                    + ", which is not a declared host class of the compile's"
+                    + " declaration surface (the class defaults entry has exactly"
+                    + " one source — a producer defect)");
+            }
+            if (payload.classFactoryRef() != null
+                    || !payload.classDefaultOpIds().isEmpty()) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner HOST_DEFAULTS with a non-null factory"
+                    + " ref or a non-empty default child list: the host construction"
+                    + " carries neither (the loaded defaults are data — a producer"
+                    + " defect)");
+            }
+            // (1) The provided values in literal order, normalized to the
+            // deployed runtime's own language-null sentinel.
+            out.append("__provT = {}\n");
+            for (KindPayload.ProvidedField field : payload.providedFields()) {
+                out.append("__pvT = ").append(slot(field.valueOpId())).append("\n");
+                out.append("if __pvT == nil or __pvT == __NULL then __pvT = "
+                    + "__rt.__NULL end\n");
+                out.append("__provT[").append(luaString(field.name()))
+                    .append("] = __pvT\n");
+            }
+            // (2)-(4) The deep copy, the provided overlay with the extra-key
+            // rejection, the sentinel removal, and the tag: the deployed
+            // construction entry (the one authority the retained route and
+            // the shared route share).
+            out.append("__okB, __instT = pcall(__rt.class_, ")
+                .append(luaString(payload.classId().text())).append(", ")
+                .append(hostDefaultsExpr(payload.classId())).append(", __provT, ")
+                .append(classLiteralOriginArgs(op)).append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  __eT = __hostError(__instT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__eT)");
+            out.append("  error(__eT, 0)\n");
+            out.append("end\n");
+            out.append("__instT.__c = true\n");
+            out.append("__instT.__id = ")
+                .append(luaString(payload.classId().text())).append("\n");
+            // (5) The CLASS_LITERAL_FIELD boundary children in declaration
+            // order; the admitted value replaces the overlaid one (the
+            // language null renormalizes to the runtime sentinel, so a
+            // present null stays present for the host side and the
+            // presence-aware reads).
+            for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                SemanticOp boundary = opsById.get(entry.boundaryOpId());
+                if (boundary == null) {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " field boundary " + entry.boundaryOpId() + " does not "
+                        + "resolve (producer defect)");
+                }
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String inputExpr = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                String checked = "__hccT" + boundary.opId().id();
+                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
+                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(luaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", ").append(inputExpr).append(")\n");
+                out.append("if not __okB then\n");
+                out.append("  ").append(checked).append(".o = ")
+                    .append(luaString(originOf(boundary))).append("\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(" + checked + ")");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(" + checked + ")");
+                out.append("  error(").append(checked).append(", 0)\n");
+                out.append("end\n");
+                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                out.append("__instT[").append(luaString(entry.field()))
+                    .append("] = (").append(checked)
+                    .append(" == nil) and __rt.__NULL or ").append(checked)
+                    .append("\n");
+            }
+            String target = slot((ValueId) op.result());
             out.append(target).append(" = __instT\n");
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
         }
@@ -5352,6 +5617,21 @@ public final class LuaSemanticEmitter {
         }
 
         /**
+         * The literal origin triplet of a construction's call site: the
+         * literal's own file, line, and column, so the pinned E8007 the
+         * deployed construction entry raises names the literal origin (a
+         * span-less op projects the retained {@code "-", 0, 0} triplet).
+         */
+        private String classLiteralOriginArgs(SemanticOp op) {
+            SourceSpan span = op.origin().span();
+            if (span == null) {
+                return "\"-\", 0, 0";
+            }
+            return luaString(op.origin().sourceId()) + ", "
+                + span.startLine() + ", " + span.startColumn();
+        }
+
+        /**
          * The literal origin triplet of a load's call site: the import
          * statement's own file, line, and column, so every E8011 the
          * loader raises names the import origin.
@@ -6514,7 +6794,7 @@ local function __hostProjectArg(desc, inner, v)
   end
   return v
 end
--- The canonical DEAL error table of one host-boundary failure: the
+--- The canonical DEAL error table of one host-boundary failure: the
 -- loaded runtime raises the DEALRuntimeError shape ({code, message,
 -- file, line, column, expected, actual}); the emitted chunk speaks the
 -- __d-tagged carrier every consumer projects, so the host arm converts
@@ -6529,6 +6809,23 @@ local function __hostError(e, origin)
     o = tostring(e.file)..":"..tostring(e.line)..":"..tostring(e.column)
   end
   return __failExpr(e.code, e.message, o, e.expected, e.actual)
+end
+-- The loaded <C>_defaults entry of one declared host class (ISSUE-0624;
+-- semantic-ir-construct-coverage-cutover K10): the declaring module's
+-- published surface is the module table the one production load returned
+-- (__rt.load_host, E8011 when the mandatory defaults entry is missing or
+-- non-table), and the class's defaults entry is that copy-through. An
+-- absent surface (the declaring module's MODULE_IMPORT(HOST) load has not
+-- run) is a fail-closed producer defect: the load precedes every
+-- construction in dependency order.
+local function __hostClassDefaults(module, class)
+  local surface = __exportSurfaces[module]
+  if type(surface) ~= "table" then
+    error("the host module '"..module.."' has no published surface before the"
+      .." construction of '"..class.."' (the MODULE_IMPORT(HOST) load precedes"
+      .." every construction in dependency order — a producer defect)", 0)
+  end
+  return surface[class.."_defaults"]
 end
 """;
     private static final String PRELUDE = """

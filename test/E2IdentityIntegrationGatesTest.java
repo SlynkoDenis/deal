@@ -114,6 +114,31 @@ public class E2IdentityIntegrationGatesTest {
     private static final String DESC_EXT_DESCRIBE =
         "(@$external/host.cfg/ServerConfig)->string";
 
+    /**
+     * The canonical deployed host implementation of gate 3
+     * ({@code host.cfg}): the declared class metas carrying the canonical
+     * projection, the mandatory {@code <C>_defaults} tables (the optional
+     * {@code endpoint} omitted as the runtime's missing sentinel), and the
+     * {@code describe} export. Shared by the harness artifact run and the
+     * release-owned production artifact run (the dotted-legacy re-pin below
+     * carries the same text with the retired tag).
+     */
+    private static final String HOST_CFG_LUA =
+        "local rt = require(\"deal.runtime\")\n"
+            + "return {\n"
+            + "  Endpoint = { __kind = \"class\", __classname = \""
+            + DESC_EXT_ENDPOINT + "\" },\n"
+            + "  Endpoint_defaults = { path = \"/\" },\n"
+            + "  ServerConfig = { __kind = \"class\", __classname"
+            + " = \"" + DESC_EXT_SERVER + "\" },\n"
+            + "  ServerConfig_defaults = { port = 8080, endpoint ="
+            + " rt.__MISSING },\n"
+            + "  describe = function(s)\n"
+            + "    return s.endpoint.path .. \":\" .."
+            + " tostring(s.port)\n"
+            + "  end,\n"
+            + "}\n";
+
     /** The emitted private module-artifact names: m + 16 lowercase hex. */
     private static final Pattern LUA_MODULE_ID =
         Pattern.compile("m[0-9a-f]{16}");
@@ -879,50 +904,51 @@ public class E2IdentityIntegrationGatesTest {
                 "no producer emits the dotted v1.1 emission shape"
                     + " @host.cfg/ServerConfig");
 
-            // ISSUE-0656: the release-owned production invocation no
-            // longer trips the narrowed HOST_MODULE_IMPORT guard (the
-            // HOST-declaration-kind import is realized by the host load of
-            // the module init walk), so the fixture keeps failing closed at
-            // the declaration-owned class-construction shape: the landed
-            // ClassConstructionValidator CONSTRUCTION_COHERENCE rejection
-            // over the HOST_DEFAULTS registration seed, with nothing staged.
-            // ISSUE-0624 retargets this again when the construction lands.
+            // ISSUE-0624: the declaration-owned host-class construction
+            // lands on the production path (semantic-ir-construct-coverage-
+            // cutover K10), so the release-owned production invocation of
+            // this fixture compiles, publishes the one project artifact, and
+            // executes the constructed instance through the deployed host
+            // implementation: the ISSUE-0656 CONSTRUCTION_COHERENCE pin over
+            // the HOST_DEFAULTS registration seed is retargeted here (never
+            // deleted) to the realized construction.
             Path prodOut = base.resolve("prod_probe");
             String[] prod = runProductionCliCapturingErr(new String[]{
                 "compile", entry.toString(), "--output", prodOut.toString()});
-            check(!"0".equals(prod[0]),
-                "the release-owned production invocation fails the"
-                    + " dotted-externals fixture closed: " + prod[1]);
-            check(prod[1].contains("E6005")
-                    && prod[1].contains("CONSTRUCTION_COHERENCE")
-                    && prod[1].contains("@$external/host.cfg/Endpoint"),
-                "the production failure names E6005 and the declaration-owned"
-                    + " construction rule: " + prod[1]);
-            check(!prod[1].contains("HOST_MODULE_IMPORT"),
-                "the narrowed guard no longer fires for a HOST-declaration"
-                    + " import: " + prod[1]);
-            check(!Files.exists(prodOut),
-                "the production failure stages nothing under " + prodOut);
+            check("0".equals(prod[0]),
+                "the release-owned production invocation realizes the"
+                    + " dotted-externals fixture with the host-declared class"
+                    + " construction over the loaded <C>_defaults: " + prod[1]);
+            check(Files.exists(prodOut.resolve("main.lua")),
+                "the production compile publishes the one project artifact"
+                    + " under " + prodOut);
+            check(!prod[1].contains("CONSTRUCTION_COHERENCE")
+                    && !prod[1].contains("HOST_MODULE_IMPORT"),
+                "the production invocation fails at neither the"
+                    + " declaration-owned construction shape nor the narrowed"
+                    + " import guard: " + prod[1]);
+            String productionLua = Files.readString(prodOut.resolve("main.lua"),
+                StandardCharsets.UTF_8);
+            check(productionLua.contains("__rt.load_host(\"host.cfg\", {")
+                    && productionLua.contains("\"" + DESC_EXT_SERVER + "\"")
+                    && productionLua.contains("\"" + DESC_EXT_ENDPOINT + "\""),
+                "the production project artifact carries the declared-map"
+                    + " host load and the canonical class projections");
+            write(prodOut, "host/cfg.lua", HOST_CFG_LUA);
+            ProcessOutcome productionRun = runProcess(prodOut, List.of("luajit",
+                "main.lua"));
+            check(productionRun.exitCode() == 0
+                    && productionRun.output().trim().equals("/api:9090"),
+                "the release-owned production artifact constructs the"
+                    + " host-declared class over the loaded defaults and"
+                    + " crosses it through the host implementation ("
+                    + DESC_EXT_DESCRIBE + "): " + productionRun.output());
 
             // The canonical host fixture (the T5-conformance shape, not a
             // re-migration — this copy lives in the scratch deployment):
             // require("host.cfg") resolves to ./host/cfg.lua via the
             // default package.path dot-to-slash conversion.
-            write(luaDir, "host/cfg.lua",
-                "local rt = require(\"deal.runtime\")\n"
-                    + "return {\n"
-                    + "  Endpoint = { __kind = \"class\", __classname = \""
-                    + DESC_EXT_ENDPOINT + "\" },\n"
-                    + "  Endpoint_defaults = { path = \"/\" },\n"
-                    + "  ServerConfig = { __kind = \"class\", __classname"
-                    + " = \"" + DESC_EXT_SERVER + "\" },\n"
-                    + "  ServerConfig_defaults = { port = 8080, endpoint ="
-                    + " rt.__MISSING },\n"
-                    + "  describe = function(s)\n"
-                    + "    return s.endpoint.path .. \":\" .."
-                    + " tostring(s.port)\n"
-                    + "  end,\n"
-                    + "}\n");
+            write(luaDir, "host/cfg.lua", HOST_CFG_LUA);
             ProcessOutcome luaRun = runProcess(luaDir, List.of("luajit",
                 "main.lua"));
             check(luaRun.exitCode() == 0

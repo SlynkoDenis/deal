@@ -185,9 +185,29 @@ public final class SemanticOracle {
     public static SemanticRuntimeModel.ConsumerRun execute(LoweredModuleUnit unit,
                                                            StructuredBodyTable table,
                                                            HostResponder responder) {
+        return execute(unit, table, responder, Map.of());
+    }
+
+    /**
+     * The declaration-class seam of {@link #execute(LoweredModuleUnit,
+     * StructuredBodyTable, HostResponder)} (ISSUE-0624;
+     * {@code semantic-ir-construct-coverage-cutover} K10): the project's
+     * registered declaration-class layouts by {@link ClassId}, so a host
+     * declaration class's construction and its field operations resolve
+     * through exactly the registered declaration layout.
+     *
+     * @param declarationLayouts the declaration classes' registered
+     *                           layouts by {@link ClassId}; non-null
+     */
+    public static SemanticRuntimeModel.ConsumerRun execute(LoweredModuleUnit unit,
+                                                           StructuredBodyTable table,
+                                                           HostResponder responder,
+            Map<ClassId, ClassLayout> declarationLayouts) {
         Objects.requireNonNull(unit, "unit must not be null");
         Objects.requireNonNull(table, "table must not be null");
-        Execution state = new Execution(unit, table, responder);
+        Objects.requireNonNull(declarationLayouts,
+            "declarationLayouts must not be null");
+        Execution state = new Execution(unit, table, responder, declarationLayouts);
         state.stateStack.push(state.units.get(unit.moduleId()));
         try {
             state.runModuleInit(unit);
@@ -245,7 +265,28 @@ public final class SemanticOracle {
     public static SemanticRuntimeModel.ConsumerRun execute(ExecutableLoweredProject project,
             Map<ModuleId, StructuredBodyTable> tables,
             Map<ModuleId, ClassFactoryRegistry> registries, HostResponder responder) {
-        return executeClosure(project, tables, registries, responder, false);
+        return execute(project, tables, registries, responder, Map.of());
+    }
+
+    /**
+     * The declaration-class seam of {@link #execute(ExecutableLoweredProject,
+     * Map, Map, HostResponder)} (ISSUE-0624;
+     * {@code semantic-ir-construct-coverage-cutover} K10): the project's
+     * registered declaration-class layouts by {@link ClassId} — the
+     * layout context a host declaration class's construction, its field
+     * operations, and the host construction's boundary children resolve
+     * through. The overload without the context keeps the fail-closed
+     * behavior for a declaration-class owner.
+     *
+     * @param declarationLayouts the declaration classes' registered
+     *                           layouts by {@link ClassId}; non-null
+     */
+    public static SemanticRuntimeModel.ConsumerRun execute(ExecutableLoweredProject project,
+            Map<ModuleId, StructuredBodyTable> tables,
+            Map<ModuleId, ClassFactoryRegistry> registries, HostResponder responder,
+            Map<ClassId, ClassLayout> declarationLayouts) {
+        return executeClosure(project, tables, registries, responder, false,
+            declarationLayouts);
     }
 
     /**
@@ -259,22 +300,25 @@ public final class SemanticOracle {
     public static SemanticRuntimeModel.ConsumerRun executeProjectInits(
             ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
             Map<ModuleId, ClassFactoryRegistry> registries, HostResponder responder) {
-        return executeClosure(project, tables, registries, responder, true);
+        return executeClosure(project, tables, registries, responder, true, Map.of());
     }
 
     /** The shared closure executor (all-init or entry-only walks). */
     private static SemanticRuntimeModel.ConsumerRun executeClosure(
             ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
             Map<ModuleId, ClassFactoryRegistry> registries, HostResponder responder,
-            boolean allInits) {
+            boolean allInits, Map<ClassId, ClassLayout> declarationLayouts) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
+        Objects.requireNonNull(declarationLayouts,
+            "declarationLayouts must not be null");
         LoweredModuleUnit unit = project.modules().get(project.entryModule());
         if (unit == null) {
             throw new IllegalArgumentException("the entry module is not in the closure");
         }
-        Execution state = new Execution(project, tables, registries, responder);
+        Execution state = new Execution(project, tables, registries, responder,
+            declarationLayouts);
         try {
             for (Map.Entry<ModuleId, LoweredModuleUnit> moduleEntry
                     : project.modules().entrySet()) {
@@ -487,6 +531,32 @@ public final class SemanticOracle {
          */
         default Value loadedExport(ModuleId module, String export,
                                    RuntimeDescriptor descriptor) {
+            return null;
+        }
+
+        /**
+         * One loaded host class's defaults projection (ISSUE-0624;
+         * {@code semantic-ir-construct-coverage-cutover} K10 and the K10
+         * contract): the oracle-side analog of the loaded module's
+         * mandatory {@code <C>_defaults} entry — one entry per field name
+         * the host's defaults table carries, with an absent optional field
+         * as the miss sentinel ({@link Value.MissingValue}) and an omitted
+         * required-present field's default as its value. The oracle runs
+         * no host code, so the seamed load supplies the construction data
+         * the same way it supplies the loaded export entries; a
+         * {@code null} return is the absent-projection case (the seamed
+         * load has not run), and a construction over it is a fail-closed
+         * producer defect, never an invented default. The returned map is
+         * the host's data: the construction consumes it per attempt and
+         * never mutates it.
+         *
+         * @param classId    the declared host class's canonical identity
+         *                   (the module-scoped pair the projection is
+         *                   keyed by); non-null
+         * @return the field-name &#8594; value projection, or {@code null}
+         *         when the seam supplies none
+         */
+        default Map<String, Value> loadedClassDefaults(ClassId classId) {
             return null;
         }
     }
@@ -841,11 +911,20 @@ public final class SemanticOracle {
         final java.util.Set<OpId> ownedChildren = new java.util.HashSet<>();
         /**
          * The class-layout resolution context (K-D11): the union of
-         * every module's {@code classLayouts} — a caller's
+         * every module's {@code classLayouts} plus the compile's registered
+         * declaration-class layouts — a caller's
          * {@code CLASS_NEW(SHARED_FACTORY)} payload layout resolves
-         * against the owner unit's record.
+         * against the owner unit's record, and a host declaration class's
+         * construction and field operations against the registered
+         * declaration layout (ISSUE-0624; K10).
          */
         final Map<ClassId, ClassLayout> classLayouts = new LinkedHashMap<>();
+        /**
+         * The compile's registered declaration-class layouts by
+         * {@link ClassId} (ISSUE-0624; K10), merged into
+         * {@link #classLayouts} at construction.
+         */
+        final Map<ClassId, ClassLayout> declarationLayouts;
         /**
          * The block-owning-unit stack (innermost first): the module-init
          * walk pushes its unit, a cross-unit factory default-block
@@ -887,10 +966,22 @@ public final class SemanticOracle {
             new LinkedHashMap<>();
 
         Execution(LoweredModuleUnit unit, StructuredBodyTable table, HostResponder responder) {
+            this(unit, table, responder, Map.of());
+        }
+
+        /**
+         * The declaration-class seam of the unit-form execution
+         * (ISSUE-0624; K10): the registered declaration-class layouts are
+         * the resolution context a host declaration class's construction
+         * and its field operations use.
+         */
+        Execution(LoweredModuleUnit unit, StructuredBodyTable table, HostResponder responder,
+                  Map<ClassId, ClassLayout> declarationLayouts) {
             this.unit = unit;
             this.table = table;
             this.responder = responder;
             this.registries = Map.of();
+            this.declarationLayouts = Map.copyOf(declarationLayouts);
             UnitState entryState = new UnitState(unit, table);
             units.put(unit.moduleId(), entryState);
             entry = entryState;
@@ -916,6 +1007,11 @@ public final class SemanticOracle {
                 ownedChildren.addAll(state.ownedChildren);
                 classLayouts.putAll(state.unit.classLayouts());
             }
+            // The declaration classes' registered layouts (ISSUE-0624;
+            // K10): a host declaration class is not a unit-declared class,
+            // so its registered layout is the one construction and
+            // field-operation entry.
+            classLayouts.putAll(this.declarationLayouts);
             // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
             // 1): the builtin class resolves in every execution's layout
             // context through the same entry the project lowering seeds, so
@@ -926,12 +1022,22 @@ public final class SemanticOracle {
 
         Execution(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                   HostResponder responder) {
-            this(project, tables, Map.of(), responder);
+            this(project, tables, Map.of(), responder, Map.of());
         }
 
         Execution(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                   Map<ModuleId, ClassFactoryRegistry> registries,
                   HostResponder responder) {
+            this(project, tables, registries, responder, Map.of());
+        }
+
+        /**
+         * The declaration-class seam of the project-form execution
+         * (ISSUE-0624; K10).
+         */
+        Execution(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
+                  Map<ModuleId, ClassFactoryRegistry> registries,
+                  HostResponder responder, Map<ClassId, ClassLayout> declarationLayouts) {
             LoweredModuleUnit entryUnit = project.modules().get(project.entryModule());
             if (entryUnit == null) {
                 throw new IllegalArgumentException("the entry module is not in the closure");
@@ -943,6 +1049,7 @@ public final class SemanticOracle {
             }
             this.responder = responder;
             this.registries = Map.copyOf(registries);
+            this.declarationLayouts = Map.copyOf(declarationLayouts);
             UnitState entryState = null;
             for (Map.Entry<ModuleId, LoweredModuleUnit> moduleEntry
                     : project.modules().entrySet()) {
@@ -971,6 +1078,9 @@ public final class SemanticOracle {
                 ownedChildren.addAll(state.ownedChildren);
                 classLayouts.putAll(state.unit.classLayouts());
             }
+            // The declaration classes' registered layouts (ISSUE-0624;
+            // K10): identical in every execution's layout context.
+            classLayouts.putAll(this.declarationLayouts);
             // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
             // 1): identical in every execution's layout context.
             classLayouts.put(ClassId.ERROR, ClassLayout.BUILTIN_ERROR);
@@ -2231,12 +2341,51 @@ public final class SemanticOracle {
                         classLayouts, checkRunner(op, payload, boundaryOps,
                             (ValueId) factoryOp.result()), replayRunner);
                 }
-                case HOST_DEFAULTS, FFI_PLAN ->
+                case HOST_DEFAULTS -> {
+                    // The host declaration class construction (ISSUE-0624;
+                    // K10 and the K10 contract): the loaded
+                    // {@code <C>_defaults} projection comes from the host
+                    // seam (the oracle runs no host code), the provided
+                    // values complete in payload order through the existing
+                    // check runner, the extra provided name raises E8007 at
+                    // the op origin, the omitted required-present fields
+                    // take the loaded defaults, and the omitted optional
+                    // fields stay absent — exactly the deployed
+                    // construction entry's phases. The owner is admissible
+                    // only for a class of the compile's registered
+                    // declaration classes: an unregistered class under
+                    // HOST_DEFAULTS is never executed.
+                    if (!declarationLayouts.containsKey(payload.classId())) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " carries defaultOwner HOST_DEFAULTS for class "
+                            + payload.classId() + ", which is not a registered"
+                            + " declaration class of the execution's layout context:"
+                            + " the host-defaults owner is admissible only for a"
+                            + " declared host class of the compilation's class"
+                            + " registration seeds — a fail-closed producer defect,"
+                            + " never executed");
+                    }
+                    Map<String, ClassOpsExecutor.Value> defaults = null;
+                    if (responder != null) {
+                        Map<String, Value> projected =
+                            responder.loadedClassDefaults(payload.classId());
+                        if (projected != null) {
+                            defaults = new LinkedHashMap<>();
+                            for (Map.Entry<String, Value> entry
+                                    : projected.entrySet()) {
+                                defaults.put(entry.getKey(),
+                                    executorValueOf(entry.getValue()));
+                            }
+                        }
+                    }
+                    outcome = ClassOpsExecutor.executeClassNewHostDefaults(op,
+                        priorValues, boundaryOps, classLayouts,
+                        checkRunner(op, payload, boundaryOps, null), defaults);
+                }
+                case FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class owners are the project lowering's"
-                        + " class registration seeds (ISSUE-0631) and their construction"
-                        + " is not executed in this slice — a fail-closed producer"
+                        + " carries defaultOwner FFI_PLAN: the extern-C C-struct"
+                        + " construction is the FFI child's — a fail-closed producer"
                         + " defect, never executed and never default-evaluated");
                 case BUILTIN_DEFAULTS -> {
                     if (!ClassId.ERROR.equals(payload.classId())) {

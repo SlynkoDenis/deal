@@ -89,10 +89,18 @@ import java.util.Set;
  *       shape is closed (LOCAL for same-module classes with the
  *       omitted-default child list; SHARED_FACTORY for imported classes
  *       with the interface's {@code constructionEntry} and empty child
- *       list; RETAINED_ABI is never produced — E10's; and the three
- *       class registration seeds HOST_DEFAULTS/FFI_PLAN/BUILTIN_DEFAULTS
- *       of ISSUE-0631 are rejected as fail-closed producer defects until
- *       their construction children realize them); every provided
+ *       list; RETAINED_ABI is never produced — E10's; the builtin
+ *       {@code Error} construction is the compiler-owned
+ *       BUILTIN_DEFAULTS shape of ISSUE-0619; and the host
+ *       declaration class construction is the HOST_DEFAULTS shape of
+ *       ISSUE-0624 — the class resolves in the compilation's class
+ *       registration seeds with the {@code HOST_DEFAULTS} owner member,
+ *       the payload layout is exactly the registered declaration
+ *       layout, the factory ref is null, the default-op list is empty,
+ *       and the boundary entries are exactly the provided fields'
+ *       {@code CLASS_LITERAL_FIELD} children; the extern-C
+ *       {@code FFI_PLAN} owner is the FFI child's and stays a
+ *       fail-closed producer defect here); every provided
  *       name is a declared field; {@code fieldBoundaries} = exactly one
  *       {@code CLASS_LITERAL_FIELD} per provided field plus one
  *       {@code CLASS_DEFAULT_FIELD} per omitted required-present
@@ -197,14 +205,47 @@ public final class ClassConstructionValidator {
             JsonDefaultChildTable jsonDefaults,
             ExternalModuleInterface ownInterface,
             Map<ClassId, SharedFactoryFacts> sharedFactories) {
+        return validate(unit, table, factories, jsonDefaults, ownInterface,
+            sharedFactories, Map.of());
+    }
+
+    /**
+     * The declaration-class seam of {@link #validate(LoweredModuleUnit,
+     * StructuredBodyTable, ClassFactoryRegistry, JsonDefaultChildTable,
+     * ExternalModuleInterface, Map)} (ISSUE-0624;
+     * {@code semantic-ir-construct-coverage-cutover} K10 and the K10
+     * contract): the project lowering's class registration seeds projected
+     * to their {@code ClassId&#8594;ClassLayout} entries, so a host
+     * declaration class's construction and field operations resolve
+     * through exactly the registered declaration layout — the same layout
+     * the {@code CLASS_NEW} payload carries and the emitters execute. The
+     * overload without the context keeps the fail-closed behavior for a
+     * declaration-class owner (the unit-local validation windows).
+     *
+     * @param declarationClasses the declaration classes' registered layouts
+     *                           and owner members by {@link ClassId} (empty
+     *                           when the unit's validation window carries
+     *                           none); non-null
+     * @return the first E6005 diagnostic, or {@code empty}
+     */
+    public static Optional<CompilerDiagnostic> validate(
+            LoweredModuleUnit unit,
+            StructuredBodyTable table,
+            ClassFactoryRegistry factories,
+            JsonDefaultChildTable jsonDefaults,
+            ExternalModuleInterface ownInterface,
+            Map<ClassId, SharedFactoryFacts> sharedFactories,
+            Map<ClassId, ClassRegistrationSeeds.ClassRegistration> declarationClasses) {
         Objects.requireNonNull(unit, "unit must not be null");
         Objects.requireNonNull(table, "table must not be null");
         Objects.requireNonNull(factories, "factories must not be null");
         Objects.requireNonNull(jsonDefaults, "jsonDefaults must not be null");
         Objects.requireNonNull(ownInterface, "ownInterface must not be null");
         Objects.requireNonNull(sharedFactories, "sharedFactories must not be null");
+        Objects.requireNonNull(declarationClasses,
+            "declarationClasses must not be null");
         Context context = new Context(unit, table, factories, jsonDefaults, ownInterface,
-            sharedFactories);
+            sharedFactories, declarationClasses);
         Optional<CompilerDiagnostic> failure = context.checkFactoryCoherence();
         if (failure.isPresent()) {
             return failure;
@@ -236,6 +277,14 @@ public final class ClassConstructionValidator {
         private final JsonDefaultChildTable jsonDefaults;
         private final ExternalModuleInterface ownInterface;
         private final Map<ClassId, SharedFactoryFacts> sharedFactories;
+        /**
+         * The declaration classes' registered layouts and owner members of
+         * the project's class registration seeds (K10): a host declaration
+         * class's payload layout and its field operations resolve through
+         * exactly these entries.
+         */
+        private final Map<ClassId, ClassRegistrationSeeds.ClassRegistration>
+            declarationClasses;
 
         /** The unit's produced ops by {@link OpId} (pinned lookup). */
         private final Map<OpId, SemanticOp> opsById = new LinkedHashMap<>();
@@ -256,17 +305,27 @@ public final class ClassConstructionValidator {
         Context(LoweredModuleUnit unit, StructuredBodyTable table,
                 ClassFactoryRegistry factories, JsonDefaultChildTable jsonDefaults,
                 ExternalModuleInterface ownInterface,
-                Map<ClassId, SharedFactoryFacts> sharedFactories) {
+                Map<ClassId, SharedFactoryFacts> sharedFactories,
+                Map<ClassId, ClassRegistrationSeeds.ClassRegistration> declarationClasses) {
             this.unit = unit;
             this.table = table;
             this.factories = factories;
             this.jsonDefaults = jsonDefaults;
             this.ownInterface = ownInterface;
             this.sharedFactories = Map.copyOf(sharedFactories);
+            this.declarationClasses = Map.copyOf(declarationClasses);
             for (SemanticOp op : unit.ops()) {
                 opsById.put(op.opId(), op);
             }
             layoutContext.putAll(unit.classLayouts());
+            // The declaration classes' registered layouts (K10; ISSUE-0624):
+            // a host declaration class is not a unit-declared class, so its
+            // registered layout is the one construction and field-operation
+            // entry (the same layout the CLASS_NEW payload carries).
+            for (Map.Entry<ClassId, ClassRegistrationSeeds.ClassRegistration> entry
+                    : this.declarationClasses.entrySet()) {
+                layoutContext.putIfAbsent(entry.getKey(), entry.getValue().layout());
+            }
             // The compiler-owned builtin Error layout (ISSUE-0619; K13 item
             // 1): the builtin class is a compiler-owned layout entry in
             // every unit's resolution context — the same entry the project
@@ -678,7 +737,8 @@ public final class ClassConstructionValidator {
                 return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
                     + " classId " + payload.classId() + " does not resolve in the "
                     + "layout context (the unit's classLayouts plus the imported "
-                    + "classes' layouts)");
+                    + "classes' layouts and the declaration classes' registered "
+                    + "layouts)");
             }
             if (!resolved.equals(payload.layout())) {
                 return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
@@ -794,20 +854,81 @@ public final class ClassConstructionValidator {
                         + "transfer is E10's (ISSUE-0239) and is never produced in "
                         + "this epic — the lowerer defers with RETAINED_ABI_DEFERRED");
                 }
-                case HOST_DEFAULTS, FFI_PLAN -> {
-                    // The declaration-class owners are the project
-                    // lowering's class registration seeds (ISSUE-0631): a
-                    // registration fact, never a construction shape. Their
-                    // construction execution is the construction children's;
-                    // until it lands every consumer rejects them as a
-                    // fail-closed producer defect — no default evaluation and
-                    // no emission.
+                case HOST_DEFAULTS -> {
+                    // The host declaration class construction (ISSUE-0624;
+                    // {@code semantic-ir-construct-coverage-cutover} K10 and
+                    // the K10 contract): the owner is admissible for exactly
+                    // a declared host class of the project's class
+                    // registration seeds, over exactly the registered
+                    // declaration layout, with the null factory ref, the
+                    // empty default-op list (the omitted fields' values are
+                    // the loaded {@code <C>_defaults} data, never in-project
+                    // default expressions), and exactly one
+                    // {@code CLASS_LITERAL_FIELD} boundary per provided
+                    // field.
+                    ClassRegistrationSeeds.ClassRegistration registration =
+                        declarationClasses.get(payload.classId());
+                    if (registration == null
+                            || registration.owner() != DefaultOwner.HOST_DEFAULTS) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries defaultOwner HOST_DEFAULTS for class "
+                            + payload.classId() + ": the host-defaults owner is"
+                            + " admissible only for a declared host class of the"
+                            + " compilation's class registration seeds — an"
+                            + " unregistered class under HOST_DEFAULTS is a"
+                            + " fail-closed producer defect");
+                    }
+                    if (own) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " of same-module class " + payload.classId()
+                            + " carries defaultOwner HOST_DEFAULTS: a same-module"
+                            + " class never carries a declaration-class owner");
+                    }
+                    if (!registration.layout().equals(payload.layout())) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries a layout that differs from the registered"
+                            + " declaration layout of " + payload.classId()
+                            + " (the declaration surface's fields in declaration"
+                            + " order): a foreign layout is a fail-closed producer"
+                            + " defect");
+                    }
+                    if (payload.classFactoryRef() != null) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries classFactoryRef " + payload.classFactoryRef()
+                            + " under HOST_DEFAULTS: the host construction carries a"
+                            + " null factory ref (the loaded defaults are data,"
+                            + " never a factory transfer)");
+                    }
+                    if (!payload.classDefaultOpIds().isEmpty()) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " (HOST_DEFAULTS) lists " + payload.classDefaultOpIds()
+                            + ": the host construction carries an empty child list"
+                            + " (the omitted fields' values come from the loaded"
+                            + " {@code <C>_defaults} entry — no in-project default"
+                            + " expression is evaluated)");
+                    }
+                    for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                        if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD) {
+                            return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW "
+                                + op.opId() + " field-boundary entry for '"
+                                + entry.field() + "' carries kind " + entry.kind()
+                                + ", not CLASS_LITERAL_FIELD: the host construction"
+                                + " carries exactly one CLASS_LITERAL_FIELD boundary"
+                                + " per provided field and no CLASS_DEFAULT_FIELD");
+                        }
+                    }
+                }
+                case FFI_PLAN -> {
+                    // The extern-C declaration class construction is the FFI
+                    // child's (F6); until it lands every consumer rejects it
+                    // as a fail-closed producer defect — no default
+                    // evaluation and no emission.
                     return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
-                        + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class owners are class registration"
-                        + " seeds (ISSUE-0631) and their construction is not"
-                        + " realized in this slice — a fail-closed producer defect,"
-                        + " never executed or default-evaluated");
+                        + " carries defaultOwner FFI_PLAN for class "
+                        + payload.classId() + ": the extern-C"
+                        + " C-struct construction is the FFI child's — a"
+                        + " fail-closed producer defect, never executed or"
+                        + " default-evaluated");
                 }
                 case BUILTIN_DEFAULTS -> {
                     // The builtin Error construction (ISSUE-0619; K13 items
@@ -1111,7 +1232,9 @@ public final class ClassConstructionValidator {
             // The CLASS_FIELD_ASSIGNMENT descriptor is the field's
             // declared descriptor from the unit's local layout (the
             // lowerer produces class-field writes of locally declared
-            // classes and of the compiler-owned builtin Error class).
+            // classes, of the compiler-owned builtin Error class, and of
+            // the project's declaration classes — the host declaration
+            // class's registered layout is the same entry K10 resolves).
             ClassLayout layout = unit.classLayouts().get(payload.classId());
             if (layout == null && ClassId.ERROR.equals(payload.classId())) {
                 // The builtin Error field surface (ISSUE-0619; K13 items 3
@@ -1120,15 +1243,27 @@ public final class ClassConstructionValidator {
                 // the same layout entry every unit's context carries.
                 layout = ClassLayout.BUILTIN_ERROR;
             }
+            if (layout == null) {
+                ClassRegistrationSeeds.ClassRegistration declaration =
+                    declarationClasses.get(payload.classId());
+                if (declaration != null) {
+                    // A declaration class's registered layout (ISSUE-0624;
+                    // K10): the field write on a host declaration class
+                    // instance resolves through exactly the registered
+                    // declaration layout.
+                    layout = declaration.layout();
+                }
+            }
             ClassLayout.FieldLayout fieldLayout = layout == null
                 ? null : fieldOf(layout, payload.field());
             if (fieldLayout == null) {
                 return fail(FIELD_OPERATION_SHAPE, "FIELD_WRITE " + op.opId()
                     + " of " + payload.classId() + "." + payload.field()
                     + " violates the pinned shape: the class must resolve in the unit's "
-                    + "own classLayouts and the field must be a declared field (the "
-                    + "CLASS_FIELD_ASSIGNMENT descriptor is the field's declared "
-                    + "descriptor from the unit's local layout)");
+                    + "own classLayouts, the builtin Error layout, or the declaration "
+                    + "classes' registered layouts and the field must be a declared "
+                    + "field (the CLASS_FIELD_ASSIGNMENT descriptor is the field's "
+                    + "declared descriptor from that layout)");
             }
             List<SemanticOp> children = boundaryChildren(op);
             if (children.size() != 2) {

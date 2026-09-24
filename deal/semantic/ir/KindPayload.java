@@ -929,11 +929,16 @@ public sealed interface KindPayload
      *
      * <p>The closed owner set's {@code HOST_DEFAULTS}, {@code FFI_PLAN},
      * and {@code BUILTIN_DEFAULTS} members are the project lowering's class
-     * registration seeds (ISSUE-0631), never a produced construction shape
-     * until their construction children land; {@code RETAINED_ABI} is
-     * never produced on the production path. A payload carrying one of
-     * those owners is rejected fail-closed by the validator and by every
-     * emitter/oracle owner arm.</p>
+     * registration seeds (ISSUE-0631). {@code BUILTIN_DEFAULTS} is the
+     * builtin {@code Error} construction (ISSUE-0619) and
+     * {@code HOST_DEFAULTS} the host declaration class construction over
+     * the loaded {@code <C>_defaults} entry (ISSUE-0624): provided fields
+     * in literal order, one {@code CLASS_LITERAL_FIELD} boundary per
+     * provided field in declaration order, the null factory ref, and the
+     * empty default-op list. {@code FFI_PLAN} is the FFI child's, and
+     * {@code RETAINED_ABI} is never produced on the production path; a
+     * payload carrying an unrealized owner is rejected fail-closed by the
+     * validator and by every emitter/oracle owner arm.</p>
      */
     record ClassNewPayload(ClassId classId, ClassLayout layout, List<ProvidedField> providedFields,
                            DefaultOwner defaultOwner, List<OpId> classDefaultOpIds,

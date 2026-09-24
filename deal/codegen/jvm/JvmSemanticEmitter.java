@@ -3795,6 +3795,14 @@ public final class JvmSemanticEmitter {
                 // generated class carriers and the JSON plans).
                 layout = ClassLayout.BUILTIN_ERROR;
             }
+            if (layout == null && payload.defaultOwner() == DefaultOwner.HOST_DEFAULTS) {
+                // The host declaration class's registered layout
+                // (ISSUE-0624; K10): the payload carries exactly the project
+                // lowering's registration-seed layout (the validator checks
+                // the equality against the seeds), and the declaration
+                // layouts are never merged into a unit's own classLayouts.
+                layout = payload.layout();
+            }
             if (layout == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId() + " classId "
                     + payload.classId() + " has no layout in the resolution context "
@@ -3808,13 +3816,20 @@ public final class JvmSemanticEmitter {
                 case LOCAL -> emitClassNewLocalDefaults(op, payload, provided, indent);
                 case SHARED_FACTORY -> emitClassNewFactoryTransfer(op, payload, provided,
                     indent);
-                case HOST_DEFAULTS, FFI_PLAN ->
+                case HOST_DEFAULTS -> {
+                    // The host declaration class construction (ISSUE-0624;
+                    // K10 and the K10 contract): dispatched after the static
+                    // extra-key scan below — the shape carries no default
+                    // children and no factory transfer, and its phases run
+                    // through the loaded <C>_defaults capture and the
+                    // synthesized host record.
+                }
+                case FFI_PLAN ->
                     throw new IllegalStateException("CLASS_NEW " + op.opId()
                         + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the declaration-class owners are the project lowering's"
-                        + " class registration seeds (ISSUE-0631) and their construction"
-                        + " is not emitted in this slice — a fail-closed producer"
-                        + " defect, never emitted");
+                        + ": the extern-C C-struct construction is the FFI"
+                        + " child's and is not emitted here — a fail-closed"
+                        + " producer defect, never emitted");
                 case BUILTIN_DEFAULTS -> {
                     // The builtin Error construction (K13 items 2-4): the
                     // builtin defaults are compiler constants, so no default
@@ -3857,6 +3872,10 @@ public final class JvmSemanticEmitter {
             }
             if (payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
                 emitClassNewBuiltinDefaults(op, payload, layout, indent);
+                return;
+            }
+            if (payload.defaultOwner() == DefaultOwner.HOST_DEFAULTS) {
+                emitClassNewHostDefaults(op, payload, indent);
                 return;
             }
             // K-D4 steps 4-5: instance building plus field validation in
@@ -4009,6 +4028,162 @@ public final class JvmSemanticEmitter {
                 .append(", ")
                 .append(message == null ? javaString("") : "(String) " + message)
                 .append(");\n");
+            out.append(indent(indent)).append(slot((ValueId) op.result()))
+                .append(" = ").append(instName).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The host declaration class construction (ISSUE-0624;
+         * {@code semantic-ir-construct-coverage-cutover} K10 and the K10
+         * contract): the provided values complete in literal order before
+         * the op (already-completed operands), the extra provided name the
+         * load-time-captured {@code <C>_defaults} map does not carry raises
+         * E8007 at the literal origin before any field validation, the
+         * pinned {@code CLASS_LITERAL_FIELD} boundary children run in
+         * declaration order, an omitted required-present field takes the
+         * loaded default (the fail-closed E8001 when the loaded map carries
+         * none), an omitted optional field stays absent, and the published
+         * value is the synthesized {@code $DealRt} host record tagged with
+         * the canonical class identity — the record the deployed host
+         * implementation reads directly. A failed construction publishes no
+         * instance.
+         */
+        private void emitClassNewHostDefaults(SemanticOp op,
+                KindPayload.ClassNewPayload payload, int indent) {
+            JvmHostAbiEmission.HostClassFacts facts = hostAbi == null ? null
+                : hostAbi.hostClassFacts(payload.classId());
+            if (facts == null) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner HOST_DEFAULTS for " + payload.classId()
+                    + ", which is not a declared host class of the compile's"
+                    + " declaration surface (the class defaults capture has exactly"
+                    + " one source — a producer defect)");
+            }
+            if (payload.classFactoryRef() != null
+                    || !payload.classDefaultOpIds().isEmpty()) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner HOST_DEFAULTS with a non-null factory"
+                    + " ref or a non-empty default child list: the host construction"
+                    + " carries neither (the loaded defaults are data — a producer"
+                    + " defect)");
+            }
+            // K-D4 step 3: the extra-key rejection first in provided-source
+            // order against the loaded defaults capture (the accepted-key
+            // authority), after the operand completion and before any field
+            // validation.
+            for (KindPayload.ProvidedField field : payload.providedFields()) {
+                out.append(indent(indent)).append("if (!").append(facts.defaultsField())
+                    .append(".containsKey(").append(javaString(field.name()))
+                    .append(")) {\n");
+                String errName = "__eh_" + op.opId().id() + "_"
+                    + Integer.toHexString(field.name().hashCode() & 0x7fffffff);
+                out.append(indent(indent)).append("  JvmRuntime.DealError ")
+                    .append(errName).append(" = new JvmRuntime.DealError(")
+                    .append(javaString("E8007")).append(", ")
+                    .append(javaString("extra field '" + field.name()
+                        + "' in class '" + payload.classId().text() + "'"))
+                    .append(", ").append(javaString(originOf(op)))
+                    .append(", null, null, JvmRuntime.framesText(), null);\n");
+                if (trace) {
+                    emitFailureEvent(op.opId(), op.kind().name(), op,
+                        "JvmRuntime.errtext(" + errName + ")", indent + 1);
+                }
+                out.append(indent(indent)).append("  throw ").append(errName)
+                    .append(";\n");
+                out.append(indent(indent)).append("}\n");
+            }
+            // K-D4 step 5: the pinned CLASS_LITERAL_FIELD boundary children
+            // in declaration order; the admitted value is the one the record
+            // carries.
+            java.util.Map<String, String> checked = new java.util.LinkedHashMap<>();
+            for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                SemanticOp boundary = opsById.get(entry.boundaryOpId());
+                if (boundary == null) {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " field boundary " + entry.boundaryOpId() + " does not "
+                        + "resolve (producer defect)");
+                }
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String inputExpr = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor(), indent);
+                String checkedName = "__hc_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(checkedName)
+                    .append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(checkedName)
+                    .append(" = JvmRuntime.bcheck(")
+                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(javaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", ").append(inputExpr).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                out.append(indent(indent))
+                    .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                        + "__be.code, __be.msg, ")
+                    .append(javaString(originOf(boundary)))
+                    .append(", __be.expected, __be.actual, __be.frames, null);\n");
+                if (trace) {
+                    emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                        "JvmRuntime.errtext(__bre)", indent + 1);
+                    emitFailureEvent(op.opId(), op.kind().name(), op,
+                        "JvmRuntime.errtext(__bre)", indent + 1);
+                }
+                out.append(indent(indent)).append("  throw __bre;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, checkedName, boundaryPayload.descriptor(),
+                    indent);
+                checked.put(entry.field(), checkedName);
+            }
+            // Phases 2-5: the record in field declaration order — provided
+            // fields with their boundary-published values projected onto the
+            // declared host carriers, omitted required-present fields from
+            // the loaded defaults capture (the retained missing-default
+            // guard when the map carries none), omitted optional fields
+            // absent; the constructor tags the instance with its canonical
+            // class identity.
+            java.util.Map<String, ValueId> providedSlots = new java.util.LinkedHashMap<>();
+            for (KindPayload.ProvidedField field : payload.providedFields()) {
+                providedSlots.put(field.name(), field.valueOpId());
+            }
+            java.util.List<String> args = new java.util.ArrayList<>();
+            for (JvmHostAbiEmission.HostFieldFacts field : facts.fields()) {
+                String providedChecked = checked.get(field.name());
+                if (providedSlots.containsKey(field.name())) {
+                    if (providedChecked == null) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " provides field '" + field.name() + "' without its"
+                            + " pinned CLASS_LITERAL_FIELD boundary child (producer"
+                            + " defect)");
+                    }
+                    args.add(JvmHostAbiEmission.hostFieldWriteProjection(
+                        field.descriptorText(), field.storageType(), providedChecked,
+                        "__hostProjectArg"));
+                    if (field.optional()) {
+                        args.add("true");
+                    }
+                    continue;
+                }
+                if (field.optional()) {
+                    args.add("null");
+                    args.add("false");
+                    continue;
+                }
+                String loaded = "__hostDefault(" + facts.defaultsField() + ", "
+                    + javaString(field.name()) + ", "
+                    + javaString(payload.classId().text()) + ", "
+                    + originArgs(op) + ")";
+                args.add(JvmHostAbiEmission.hostFieldWriteProjection(
+                    field.descriptorText(), field.storageType(), loaded,
+                    "__hostProjectArg"));
+            }
+            String instName = "__hi_" + op.opId().id();
+            out.append(indent(indent)).append("$DealRt.")
+                .append(facts.recordSimpleName()).append(' ').append(instName)
+                .append(" = new $DealRt.").append(facts.recordSimpleName())
+                .append('(').append(String.join(", ", args)).append(");\n");
             out.append(indent(indent)).append(slot((ValueId) op.result()))
                 .append(" = ").append(instName).append(";\n");
             emitResultSuccess(op, slot((ValueId) op.result()),

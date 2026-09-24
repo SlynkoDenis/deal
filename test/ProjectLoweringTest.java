@@ -1275,14 +1275,104 @@ public class ProjectLoweringTest {
     }
 
     // =========================================================================
-    // 5. The declaration-class fail-closed acceptance
+    // 5. The declaration-class construction acceptance
     // =========================================================================
 
-    private static void testDeclarationClassFailClosed() throws Exception {
+    /**
+     * The host declaration class construction (ISSUE-0624;
+     * {@code semantic-ir-construct-coverage-cutover} K10): the literal
+     * resolves to the seed and lowers the {@code HOST_DEFAULTS} shape through
+     * the one project entry with zero diagnostics — the retargeted pin of the
+     * pre-slice fail-closed acceptance.
+     */
+    private static void testDeclarationClassConstruction() throws Exception {
         System.out.println("-- a host declaration class literal resolves to the "
-            + "seed and fails closed at the class-construction validator --");
-        assertFailsClosed(HOST_CLASS_APP_SOURCE, Map.of(), Map.of(),
-            "the host declaration class literal", ENDPOINT.text());
+            + "seed and lowers CLASS_NEW(HOST_DEFAULTS) through the one project "
+            + "entry --");
+        RealProject project = compileProject(HOST_CLASS_APP_SOURCE, Map.of(),
+            Map.of());
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(project, invocation());
+            check(!result.hasErrors() && result.project() != null,
+                "the host declaration class literal lowers through the one project "
+                    + "entry with zero diagnostics: " + result.diagnostics());
+            boolean deferred = false;
+            for (CompilerDiagnostic diagnostic : result.diagnostics()) {
+                if (diagnostic.message().contains("RETAINED_ABI_DEFERRED")) {
+                    deferred = true;
+                }
+            }
+            check(!deferred,
+                "checker-valid host-class input reports zero RETAINED_ABI_DEFERRED");
+            if (result.project() == null) {
+                return;
+            }
+            check(result.seeds().registrationFor(ENDPOINT) != null
+                    && result.seeds().registrationFor(ENDPOINT).owner()
+                        == DefaultOwner.HOST_DEFAULTS,
+                "the declared host class resolves in the seeds under HOST_DEFAULTS");
+            LoweredModuleUnit app = result.project().modules().get(APP);
+            check(app != null, "the app unit is in the closure");
+            if (app == null) {
+                return;
+            }
+            SemanticOp classNew = null;
+            for (SemanticOp op : app.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_NEW) {
+                    classNew = op;
+                }
+            }
+            check(classNew != null, "the unit carries the host CLASS_NEW");
+            if (classNew == null) {
+                return;
+            }
+            KindPayload.ClassNewPayload payload =
+                (KindPayload.ClassNewPayload) classNew.payload();
+            checkEq(ENDPOINT, payload.classId(),
+                "the CLASS_NEW classId is the declared host class identity");
+            checkEq(DefaultOwner.HOST_DEFAULTS, payload.defaultOwner(),
+                "the CLASS_NEW defaultOwner is HOST_DEFAULTS");
+            check(payload.classFactoryRef() == null,
+                "the host construction carries the null factory ref");
+            check(payload.classDefaultOpIds().isEmpty(),
+                "the host construction carries empty classDefaultOpIds");
+            checkEq(result.seeds().registrationFor(ENDPOINT).layout(),
+                payload.layout(),
+                "the payload's layout is the registered declaration layout");
+            checkEq(List.of("path"),
+                payload.fieldBoundaries().stream()
+                    .map(KindPayload.FieldBoundary::field).toList(),
+                "the field boundaries are the provided fields in literal order");
+            check(payload.fieldBoundaries().stream().allMatch(entry ->
+                    entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD),
+                "every field boundary is a CLASS_LITERAL_FIELD (the loaded "
+                    + "defaults are data, never in-project default expressions)");
+            check(!payload.layout().fields().isEmpty()
+                    && payload.layout().fields().stream().allMatch(field ->
+                        field.defaultOwner() == DefaultOwner.HOST_DEFAULTS),
+                "the registered declaration layout carries the HOST_DEFAULTS "
+                    + "field owner");
+
+            // The composed per-unit chain re-run with the seeds: the unified
+            // unit passes every validator (the class arm included).
+            Optional<CompilerDiagnostic> failure =
+                SemanticLowerer.validateProjectUnit(app, result.tableOf(APP),
+                    new SemanticIrValidator.ComparisonFacts(
+                        project.index().interfaceIndexDigest(),
+                        SemanticProfile.DEAL_V1_2_INT32,
+                        invocation().capabilityRegistryHash()),
+                    deal.semantic.BindingsProductionValidator.PinnedWriteFacts
+                        .empty(),
+                    result.registryOf(APP),
+                    new JsonDefaultChildTable(Map.of()),
+                    project.index().modules().get(APP), Map.of(),
+                    result.seeds().registrations());
+            check(failure.isEmpty(),
+                "the composed chain accepts the host construction unit: "
+                    + failure.map(CompilerDiagnostic::message).orElse(""));
+        } finally {
+            deleteRecursively(project.root());
+        }
     }
 
     private static void testBuiltinErrorConstruction() throws Exception {
@@ -1708,7 +1798,7 @@ public class ProjectLoweringTest {
         testInProjectClassArm();
         testImportedInProjectClassResolution();
         testInconsistentFactSeed();
-        testDeclarationClassFailClosed();
+        testDeclarationClassConstruction();
         testBuiltinErrorConstruction();
         testExternCDeclarationClassFailClosed();
         testCorruptedUnitSeed();
