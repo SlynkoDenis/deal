@@ -763,4 +763,31 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # closure, an externalEntryRef resolving to a non-entry op) are rejected
   # by both emitters and the oracle with nothing emitted.
   'fg|=== Running Cross-Module Call Realization Tests (ISSUE-0654) ===|java -ea -cp build deal.test.CrossModuleCallRealizationTest'
+
+  # ISSUE-0655 registration: the cross-module async realization and the
+  # external async link (cross-module-call-realization X2 and the
+  # cross-module async call contract; luajit-jvm-single-lowering-production
+  # -cutover C2; semantic-ir-construct-coverage-cutover K4): both emitters
+  # emit one async entry per async EXTERNAL_ENTRY op of every closure unit
+  # (the LuaJIT chunk keyed __asyncEntries["<owner>#<export>"], the JVM
+  # class carrying the local ae<entryOpId> methods with no SharedM
+  # reference), each entry resolving its function and capture cells through
+  # its own unit and establishing its own module context around the callee
+  # body and its own events (LuaJIT __modStack; the JVM per-entry module
+  # literal with a finally restore); the caller's ASYNC_START(EXTERNAL)
+  # publishes the alias token over the callee entry's canonical token and
+  # the single AWAIT drains and runs the single ASYNC_COMPLETION boundary
+  # on the declared descriptor; the composed drive executes a sync
+  # cross-module call from the corpus fixture set jointly with the async
+  # probe on both real toolchains (luajit; javac --release 25 -proc:none +
+  # java) with the pinned completion value; the oracle and the per-unit
+  # conformance emitters agree event-for-event through the differential
+  # harness's async-entry matrix, and the project trace artifact carries
+  # the callee module on the callee entry and body events; and the
+  # fail-closed seeds (an async start without its ExternalAsyncLink, an
+  # entry reference resolving to no emitted entry) are rejected by both
+  # production emitters while the production arm keeps its landed E6005
+  # SHARED_EMITTER_COVERAGE outcome with nothing staged (the
+  # guard-replacement slice removes the guard shape).
+  'fg|=== Running Cross-Module Async Realization Tests (ISSUE-0655) ===|java -ea -cp build deal.test.CrossModuleAsyncRealizationTest'
 )

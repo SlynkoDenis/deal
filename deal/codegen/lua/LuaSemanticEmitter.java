@@ -944,17 +944,23 @@ public final class LuaSemanticEmitter {
             }
 
             // The host-driven async-entry dispatch entries (async
-            // EXTERNAL_ENTRY): one per-unit entry per recorded async
-            // export, keyed by module#export — the scenario host adapter's
-            // invocation surface (the E6 dispatch-entry pattern). The
-            // entry creates the callee's canonical task; the drive flag
-            // makes the top-level scenario invocation drain it and return
-            // the completion, while a cross-module caller passes the drive
-            // flag false (its AWAIT drains).
-            for (SemanticOp op : unit.ops()) {
-                if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
-                        && ((KindPayload.ExternalEntryPayload) op.payload()).async()) {
-                    emitAsyncEntry(op);
+            // EXTERNAL_ENTRY): one entry per recorded async export of
+            // every closure unit, keyed by module#export — the scenario
+            // host adapter's invocation surface (the E6 dispatch-entry
+            // pattern). The entry creates the callee's canonical task;
+            // the drive flag makes the top-level scenario invocation drain
+            // it and return the completion, while a cross-module caller
+            // passes the drive flag false (its AWAIT drains). The
+            // per-closure loop is the same shape the CALLBACK_INVOKE
+            // entries above use: a non-entry module's async export is
+            // reachable in the one artifact (ISSUE-0655,
+            // cross-module-call-realization X2).
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                            && ((KindPayload.ExternalEntryPayload) op.payload()).async()) {
+                        emitAsyncEntry(op, moduleUnit);
+                    }
                 }
             }
             if (!trace) {
@@ -4934,12 +4940,26 @@ public final class LuaSemanticEmitter {
             return slot(boundary.input());
         }
 
-        /** The ASYNC_START(EXTERNAL) terminal: the callee artifact's async-entry dispatch. */
+        /**
+         * The ASYNC_START(EXTERNAL) terminal: the callee unit's
+         * async-entry dispatch inside the one artifact, keyed by the
+         * callee module and export (ISSUE-0655,
+         * {@code cross-module-call-realization} X2). The caller passes the
+         * drive flag false (its AWAIT drains). A project session resolves
+         * the link's canonical token against the emitted async-entry set
+         * and fails closed when it names no entry — never a silently
+         * missing invocation; a single-unit session keys the chunk-global
+         * dispatch table the callee's own artifact populates (the
+         * multi-artifact drive of the differential harness).
+         */
         private void emitAsyncExternalStart(SemanticOp op, AsyncTokenId token,
                                             ExternalAsyncLink link) {
             if (link == null) {
                 throw new IllegalStateException("ASYNC_START(EXTERNAL) without "
                     + "its ExternalAsyncLink (producer defect)");
+            }
+            if (projectSession) {
+                resolveExternalAsyncEntry(op, link);
             }
             out.append("__asyncEntries[")
                 .append(luaString(link.calleeModuleId().path() + "#"
@@ -4947,6 +4967,41 @@ public final class LuaSemanticEmitter {
                 .append(luaString(opKey(op.opId()))).append(", false, unpack(S.__sa")
                 .append(op.opId().id()).append(", 1, #S.__sa")
                 .append(op.opId().id()).append("))\n");
+        }
+
+        /**
+         * The callee unit's recorded async {@code EXTERNAL_ENTRY} of one
+         * {@code ASYNC_START(EXTERNAL)}: resolved by the link's canonical
+         * token (the entry op's own id by construction) inside the callee
+         * module's unit. A missing module outside the session's closure, a
+         * token naming no op, a non-entry op, a sync entry, or a divergent
+         * export name is a fail-closed producer defect — the entry's
+         * dispatch key would otherwise resolve to no emitted entry at
+         * execution.
+         */
+        private SemanticOp resolveExternalAsyncEntry(SemanticOp op,
+                ExternalAsyncLink link) {
+            LoweredModuleUnit calleeUnit = units.get(link.calleeModuleId());
+            if (calleeUnit == null) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " resolves the external callee module " + link.calleeModuleId()
+                    + " outside the session's closure (producer defect)");
+            }
+            OpId entryRef = new OpId(link.calleeModuleId(),
+                link.calleeTokenId().tokenId());
+            SemanticOp entry = opsById.get(entryRef);
+            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY
+                    || !(entry.payload()
+                        instanceof KindPayload.ExternalEntryPayload entryPayload)
+                    || !entryPayload.async()
+                    || !entryPayload.exportName().equals(link.exportName())) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " names the async external '" + link.calleeModuleId() + "'."
+                    + link.exportName() + " whose ExternalAsyncLink token "
+                    + entryRef + " resolves to no emitted async EXTERNAL_ENTRY"
+                    + " in the callee module (producer defect)");
+            }
+            return entry;
         }
 
         /**
@@ -5067,18 +5122,26 @@ public final class LuaSemanticEmitter {
 
         /**
          * The async EXTERNAL_ENTRY dispatch entry (the E6 dispatch-entry
-         * pattern): the scenario host adapter invokes it top-level with
-         * scripted arguments (drive flag on — the entry drains and
-         * returns the completion), and a cross-module caller invokes it
-         * with the drive flag off (its AWAIT drains). The entry emits the
-         * callee record's START/SUCCESS under the passed parent key and
-         * creates exactly one canonical task wrapping the entry function's
-         * body-task closure.
+         * pattern; ISSUE-0655, {@code cross-module-call-realization} X2
+         * and the cross-module async call contract): the scenario host
+         * adapter invokes it top-level with scripted arguments (drive
+         * flag on — the entry drains and returns the completion), and a
+         * cross-module caller invokes it with the drive flag off (its
+         * AWAIT drains). One entry exists per async export of every
+         * closure unit, keyed by the owning module's path and the export
+         * name; the entry resolves its function and its capture cells
+         * through its own unit. It emits the callee record's
+         * START/SUCCESS under the passed parent key and creates exactly
+         * one canonical task wrapping the entry function's body-task
+         * closure, establishing the owning module's context around the
+         * body and its own events (a cross-module caller invokes the
+         * entry from the caller's context) and restoring it on every
+         * path.
          */
-        private void emitAsyncEntry(SemanticOp op) {
+        private void emitAsyncEntry(SemanticOp op, LoweredModuleUnit owner) {
             KindPayload.ExternalEntryPayload payload =
                 (KindPayload.ExternalEntryPayload) op.payload();
-            LoweredFunction function = unit.functions().get(payload.function());
+            LoweredFunction function = owner.functions().get(payload.function());
             List<BindingId> captures = function == null
                 ? List.of() : function.captures();
             StringBuilder caps = new StringBuilder();
@@ -5088,9 +5151,17 @@ public final class LuaSemanticEmitter {
                 }
                 caps.append(cell(captureId, 0));
             }
+            String ownerPath = owner.moduleId().path();
             out.append("__asyncEntries[")
-                .append(luaString(unit.moduleId().path() + "#" + payload.exportName()))
+                .append(luaString(ownerPath + "#" + payload.exportName()))
                 .append("] = function(__parentKey, __drive, ...)\n");
+            // The entry establishes its own module context: a
+            // cross-module caller invokes it from the caller's context,
+            // and every event the entry emits (and every event of the
+            // callee body it wraps) must carry the callee module. The
+            // landed nesting-safe push/pop pair is reused verbatim.
+            emitModulePush();
+            out.append("  __module = ").append(luaString(ownerPath)).append("\n");
             out.append("  local __eargs = {...}\n");
             if (trace) {
                 out.append("  __ev(").append(luaString(opKey(op.opId())))
@@ -5100,13 +5171,21 @@ public final class LuaSemanticEmitter {
             }
             out.append("  __asyncStartTask(").append(op.opId().id())
                 .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+            // The body task runs at the caller's AWAIT drain (or at the
+            // entry's own drive below), so it establishes the callee
+            // module itself and restores it on every path.
+            emitModulePush();
+            out.append("    __module = ").append(luaString(ownerPath)).append("\n");
             out.append("    table.insert(__frames, 1, ")
                 .append(luaString(String.valueOf(payload.function().id())))
                 .append(")\n");
+            String savedState = emitInvocationStateSave(payload.function(), op.opId());
             out.append("    local __okA, __resA = pcall(")
                 .append(fnFactory(payload.function())).append("(").append(caps)
                 .append("), unpack(__eargs, 1, #__eargs))\n");
             out.append("    table.remove(__frames, 1)\n");
+            emitInvocationStateRestore(payload.function(), savedState);
+            emitModulePop();
             out.append("    if not __okA then error(__resA, 0) end\n");
             out.append("    return __resA\n");
             out.append("  end), __eargs)\n");
@@ -5120,9 +5199,13 @@ public final class LuaSemanticEmitter {
             out.append("  if __drive then\n");
             out.append("    __asyncDrain()\n");
             out.append("    local __tE = __tasks[").append(op.opId().id()).append("]\n");
+            // The caller context is restored before the entry returns or
+            // raises: the drive's own failure is the caller's to observe.
+            emitModulePop();
             out.append("    if __tE.err ~= nil then error(__tE.err, 0) end\n");
             out.append("    return __tE.value\n");
             out.append("  end\n");
+            emitModulePop();
             out.append("end\n");
         }
 

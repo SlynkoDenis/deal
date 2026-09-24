@@ -814,17 +814,22 @@ public final class JvmSemanticEmitter {
                 }
             }
             // The host-driven async-entry dispatch entries (async
-            // EXTERNAL_ENTRY): one per-unit static entry per recorded
-            // async export — the scenario host adapter's invocation
+            // EXTERNAL_ENTRY): one entry per recorded async export of
+            // every closure unit — the scenario host adapter's invocation
             // surface (the E6 dispatch-entry pattern). The entry creates
             // the callee's canonical task; the drive flag makes the
             // top-level scenario invocation drain it and return the
             // completion, while a cross-module caller passes the drive
-            // flag false (its AWAIT drains).
-            for (SemanticOp op : unit.ops()) {
-                if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
-                        && ((KindPayload.ExternalEntryPayload) op.payload()).async()) {
-                    emitAsyncEntry(op, 1);
+            // flag false (its AWAIT drains). The per-closure loop is the
+            // same shape the CALLBACK_INVOKE entries above use: a
+            // non-entry module's async export is reachable in the one
+            // artifact (ISSUE-0655, cross-module-call-realization X2).
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                            && ((KindPayload.ExternalEntryPayload) op.payload()).async()) {
+                        emitAsyncEntry(op, 1, moduleUnit);
+                    }
                 }
             }
             out.append("}\n");
@@ -5578,17 +5583,80 @@ public final class JvmSemanticEmitter {
                 .append(", ").append(handle).append(");\n");
         }
 
-        /** The ASYNC_START(EXTERNAL) terminal: the callee artifact's async-entry dispatch. */
+        /**
+         * The ASYNC_START(EXTERNAL) terminal: the callee unit's
+         * async-entry dispatch inside the one artifact (ISSUE-0655,
+         * {@code cross-module-call-realization} X2). A project session
+         * emits the local method reference — one {@code ae<entry op id>}
+         * method per async entry op lives in the one production class, the
+         * callee token id is the entry op's id by construction, and no
+         * per-module {@code SharedM} class is referenced — and resolves
+         * the link against the emitted async-entry set, failing closed
+         * when it names no entry. A single-unit session keeps the landed
+         * cross-class reference: the callee unit's own artifact is a
+         * sibling class of the same multi-artifact drive and carries the
+         * entry method. The caller passes the drive flag false (its AWAIT
+         * drains).
+         */
         private void emitAsyncExternalStart(SemanticOp op, int indent, AsyncTokenId token,
                                             ExternalAsyncLink link, List<String> args) {
             if (link == null) {
                 throw new IllegalStateException("ASYNC_START(EXTERNAL) without "
                     + "its ExternalAsyncLink (producer defect)");
             }
-            out.append(indent(indent)).append(sharedClassName(link.calleeModuleId().path()))
-                .append(".ae").append(link.calleeTokenId().tokenId()).append("(")
-                .append(javaString(opKey(op.opId()))).append(", false, new Object[]{")
-                .append(String.join(", ", args)).append("});\n");
+            if (projectSession) {
+                // The one production class carries the entry method: the
+                // reference resolves locally (and fails closed when the
+                // link names no emitted entry).
+                resolveExternalAsyncEntry(op, link);
+                out.append(indent(indent)).append("ae")
+                    .append(link.calleeTokenId().tokenId()).append("(")
+                    .append(javaString(opKey(op.opId())))
+                    .append(", false, new Object[]{")
+                    .append(String.join(", ", args)).append("});\n");
+            } else {
+                out.append(indent(indent))
+                    .append(sharedClassName(link.calleeModuleId().path()))
+                    .append(".ae").append(link.calleeTokenId().tokenId()).append("(")
+                    .append(javaString(opKey(op.opId())))
+                    .append(", false, new Object[]{")
+                    .append(String.join(", ", args)).append("});\n");
+            }
+        }
+
+        /**
+         * The callee unit's recorded async {@code EXTERNAL_ENTRY} of one
+         * {@code ASYNC_START(EXTERNAL)}: resolved by the link's canonical
+         * token (the entry op's own id by construction) inside the callee
+         * module's unit. A missing module outside the session's closure, a
+         * token naming no op, a non-entry op, a sync entry, or a divergent
+         * export name is a fail-closed producer defect — the emitted
+         * local method reference would otherwise name no method of the
+         * artifact.
+         */
+        private SemanticOp resolveExternalAsyncEntry(SemanticOp op,
+                ExternalAsyncLink link) {
+            LoweredModuleUnit calleeUnit = units.get(link.calleeModuleId());
+            if (calleeUnit == null) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " resolves the external callee module " + link.calleeModuleId()
+                    + " outside the session's closure (producer defect)");
+            }
+            OpId entryRef = new OpId(link.calleeModuleId(),
+                link.calleeTokenId().tokenId());
+            SemanticOp entry = opsById.get(entryRef);
+            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY
+                    || !(entry.payload()
+                        instanceof KindPayload.ExternalEntryPayload entryPayload)
+                    || !entryPayload.async()
+                    || !entryPayload.exportName().equals(link.exportName())) {
+                throw new IllegalStateException("ASYNC_START " + op.opId()
+                    + " names the async external '" + link.calleeModuleId() + "'."
+                    + link.exportName() + " whose ExternalAsyncLink token "
+                    + entryRef + " resolves to no emitted async EXTERNAL_ENTRY"
+                    + " in the callee module (producer defect)");
+            }
+            return entry;
         }
 
         /**
@@ -5665,18 +5733,26 @@ public final class JvmSemanticEmitter {
 
         /**
          * The async EXTERNAL_ENTRY dispatch entry (the E6 dispatch-entry
-         * pattern): the scenario host adapter invokes it top-level with
-         * scripted arguments (drive flag on — the entry drains and
-         * returns the completion), and a cross-module caller invokes it
-         * with the drive flag off (its AWAIT drains). The entry emits the
-         * callee record's START/SUCCESS under the passed parent key and
-         * creates exactly one canonical task wrapping the entry function's
-         * body-task future.
+         * pattern; ISSUE-0655, {@code cross-module-call-realization} X2
+         * and the cross-module async call contract): the scenario host
+         * adapter invokes it top-level with scripted arguments (drive
+         * flag on — the entry drains and returns the completion), and a
+         * cross-module caller invokes it with the drive flag off (its
+         * AWAIT drains). One entry exists per async export of every
+         * closure unit, emitted as the local static method
+         * {@code ae<entry op id>} of the one production class; the entry
+         * resolves its function and its capture cells through its own
+         * unit. It emits the callee record's START/SUCCESS under the
+         * passed parent key and creates exactly one canonical task
+         * wrapping the entry function's body-task future under the
+         * owning module's context (the per-entry module literal), with
+         * the module restored on every path.
          */
-        private void emitAsyncEntry(SemanticOp op, int indent) {
+        private void emitAsyncEntry(SemanticOp op, int indent,
+                                    LoweredModuleUnit owner) {
             KindPayload.ExternalEntryPayload payload =
                 (KindPayload.ExternalEntryPayload) op.payload();
-            LoweredFunction function = unit.functions().get(payload.function());
+            LoweredFunction function = owner.functions().get(payload.function());
             List<BindingId> captures = function == null
                 ? List.of() : function.captures();
             StringBuilder caps = new StringBuilder();
@@ -5686,11 +5762,18 @@ public final class JvmSemanticEmitter {
                 }
                 caps.append(cell(captureId, 0));
             }
+            String ownerPath = owner.moduleId().path();
             out.append(indent(indent)).append("public static Object ae")
                 .append(op.opId().id())
                 .append("(String __parent, boolean __drive, Object[] __args) {\n");
             if (trace) {
-                out.append(indent(indent + 1)).append("JvmRuntime.ev(MODULE, ")
+                // The entry's own events pass the owning module literal:
+                // a cross-module caller invokes the entry from the
+                // caller's context and the shared mutable MODULE would
+                // otherwise tag the entry's events with the caller's
+                // module.
+                out.append(indent(indent + 1)).append("JvmRuntime.ev(")
+                    .append(javaString(ownerPath)).append(", ")
                     .append(javaString(opKey(op.opId()))).append(", \"START\", ")
                     .append(javaString(op.kind().name())).append(", ")
                     .append(javaString(op.contract().canonicalDigest()))
@@ -5700,6 +5783,9 @@ public final class JvmSemanticEmitter {
                 .append(op.opId().id()).append(", \"DEAL_BODY_TASK\", () -> {\n");
             out.append(indent(indent + 2)).append("String __prevM = "
                 + "JvmRuntime.currentModule();\n");
+            out.append(indent(indent + 2)).append("String __prevModule = MODULE;\n");
+            out.append(indent(indent + 2)).append("MODULE = ")
+                .append(javaString(ownerPath)).append(";\n");
             out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
             out.append(indent(indent + 2)).append("JvmRuntime.pushFrame(")
                 .append(javaString(String.valueOf(payload.function().id())))
@@ -5710,11 +5796,13 @@ public final class JvmSemanticEmitter {
                 .append(").fn.invoke(__args);\n");
             out.append(indent(indent + 2)).append("} finally {\n");
             out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 3)).append("MODULE = __prevModule;\n");
             out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
             out.append(indent(indent + 2)).append("}\n");
             out.append(indent(indent + 1)).append("});\n");
             if (trace) {
-                out.append(indent(indent + 1)).append("JvmRuntime.ev(MODULE, ")
+                out.append(indent(indent + 1)).append("JvmRuntime.ev(")
+                    .append(javaString(ownerPath)).append(", ")
                     .append(javaString(opKey(op.opId()))).append(", \"SUCCESS\", ")
                     .append(javaString(op.kind().name())).append(", ")
                     .append(javaString(op.contract().canonicalDigest()))
