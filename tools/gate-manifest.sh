@@ -620,6 +620,32 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # hand-built dynamic-cell/record negatives. The class lives in
   # package deal.semantic to reach the package-internal project walk.
   'fg|=== Running Dynamic Call Shape Production Tests (ISSUE-0657) ===|java -ea -cp build deal.semantic.DynamicCallLoweringTest'
+  # ISSUE-0658 registration: the dynamic dispatch emission and the
+  # function-id to owning-module resolution
+  # (dynamic-call-shape-production-and-emission Y2/Y3/Y5/Y6, the dynamic
+  # dispatch contract, the dynamic async start contract, and the boundary
+  # with the function-typed-value child;
+  # semantic-ir-construct-coverage-cutover K5/K12;
+  # luajit-jvm-single-lowering-production-cutover C2): the emitted class
+  # dispatch on both targets (the LuaJIT chunk-global __fnModules table
+  # built by the walk that declares the function factories and the JVM
+  # generated dealModuleOfFunction lookup over the closure's function
+  # ids, the DEAL_BODY frame push and module switch with the carrier's own
+  # invoker, the landed D15 adapter path with the leading-M projection,
+  # the HOST row and the pinned E8001 expected/actual residue), the
+  # closure-carrier, adapter-carrier, and dynamic-async drives whose
+  # oracle and trace-mode emitters agree event-for-event and whose
+  # production artifacts execute under luajit and javac --release 25
+  # -proc:none + java, the E8001 and E8010 fault drives, the factory
+  # triple (descriptor text, canonical spec text, function identity) and
+  # the adapter's pinned null fid, and the unchanged closed op-kind,
+  # boundary-kind, failure-policy, and payload sets. The drives register
+  # the callee carrier read with the runtime carrier's own binding (the
+  # pending DynamicFunctionValue materialization registration of
+  # ISSUE-0622) and change nothing else of the one lowering's output. The
+  # class lives in package deal.semantic to reach the package-internal
+  # project walk.
+  'fg|=== Running Dynamic Dispatch Emission Tests (ISSUE-0658) ===|java -ea -cp build deal.semantic.DynamicDispatchEmissionTest'
   # ISSUE-0647 registration: the spec-stdlib import-read realization in
   # the three consumers (module-export-reads-and-in-project-class-
   # construction M4, the cataloged stdlib callable contract, and M3's
