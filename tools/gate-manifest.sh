@@ -921,4 +921,25 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # value per class-typed crossing in the trace stream); and the closed
   # boundary-kind set with no null mapping inside the bridge.
   'fg|=== Running FFI Typed Crossing Tests (ISSUE-0663) ===|java -ea -cp build deal.test.FfiTypedCrossingTest'
+
+  # ISSUE-0664 registration: the ffi/051-ffi-invalid-string fixture and
+  # the six-code completion (luajit-ffi-load-emission-and-typed-crossings
+  # Verification 3; the FFI typed call and value-read contract; sequencing
+  # step 3): the new fixture obtains a U+0000-bearing string through
+  # json.parse("{\"s\":\"\\u0000\"}") and pins runtime-error
+  # FFI_INVALID_STRING at the call expression; its sidecar carries the
+  # LuaJIT runtime-error expectation (code, the embedded-NUL message, and
+  # the call-expression origin) plus the jvm/js compile-reject E6006
+  # entries and validates clean in the sanctioned divergent C6 form; the
+  # production-artifact drive under luajit asserts the emitted load_ffi
+  # prelude (T1) and the string parameter's DEAL_TO_HOST + HOST_PARAMETER
+  # crossing with the loaded wrapper's .f invocation (T2), and compares
+  # the captured code/message/sourceFile/line/column with the sidecar and
+  # the DEAL_ERROR_CODE line through the canonical G4.6 framing; the
+  # scenario's dependency on the load (a missing library fails it with
+  # FFI_LIBRARY_LOAD, never FFI_INVALID_STRING) and on the string crossing
+  # (a NUL-free payload executes the native echo clean) is proven; and the
+  # corpus's LuaJIT FFI sidecars cover exactly the closed six FFI_* codes
+  # with their pinned import-statement/call-expression origins.
+  'fg|=== Running FFI Invalid String / Six-Code Completion Tests (ISSUE-0664) ===|java -ea -cp build deal.test.FfiSixCodeCompletionTest'
 )

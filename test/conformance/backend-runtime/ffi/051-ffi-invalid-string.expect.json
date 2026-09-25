@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "backends": {
+    "luajit": {
+      "mode": "runtime-error",
+      "transcript": {
+        "stdout": "DEAL_ERROR_CODE: FFI_INVALID_STRING\nDEAL_ERROR_SNAPSHOT: {\"code\":\"FFI_INVALID_STRING\",\"message\":\"string argument contains an embedded NUL character\",\"sourceFile\":\"backend-runtime/ffi/051-ffi-invalid-string.deal\",\"line\":11,\"column\":24}\n",
+        "stderr": ""
+      },
+      "exitCode": 1,
+      "error": {
+        "code": "FFI_INVALID_STRING",
+        "message": "string argument contains an embedded NUL character",
+        "sourceFile": "backend-runtime/ffi/051-ffi-invalid-string.deal",
+        "line": 11,
+        "column": 24
+      }
+    },
+    "jvm": { "mode": "compile-reject", "diagnostic": { "code": "E6006" } },
+    "js": { "mode": "compile-reject", "diagnostic": { "code": "E6006" } }
+  }
+}

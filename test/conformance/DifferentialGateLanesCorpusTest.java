@@ -39,12 +39,12 @@ import java.util.Objects;
  *       first differing byte/field detail (never greenwashed);</li>
  *   <li>the per-backend pin of the luajit lane (ISSUE-0598, the LuaJIT
  *       lane convergence leaf): every runtime-classified case passes
- *       byte-exact on luajit ({@code 389/0}), zero luajit gate
+ *       byte-exact on luajit ({@code 390/0}), zero luajit gate
  *       failures, and no luajit row in the pinned differential-failure
  *       enumeration;</li>
  *   <li>the per-backend pin of the js lane (ISSUE-0599, the JS lane
  *       convergence leaf): every runtime-classified case passes
- *       byte-exact on js ({@code 389/0}), zero js gate failures, and no
+ *       byte-exact on js ({@code 390/0}), zero js gate failures, and no
  *       js row in the pinned differential-failure enumeration (the
  *       retired pre-flip E8003 first-byte divergence is gone with its
  *       row);</li>
@@ -466,22 +466,22 @@ public class DifferentialGateLanesCorpusTest {
         }
         // ISSUE-0598 (the LuaJIT lane convergence leaf): the luajit
         // lane passes every runtime-classified case byte-exact — the
-        // per-backend pin {389, 0}, and the pinned differential-failure
+        // per-backend pin {390, 0}, and the pinned differential-failure
         // enumeration above carries no luajit row anymore.
         int[] luajitCounts = run.perBackend().get("luajit");
-        check(run.runtimeCasesDispatched() == 389
-                && luajitCounts[0] == 389 && luajitCounts[1] == 0,
+        check(run.runtimeCasesDispatched() == 390
+                && luajitCounts[0] == 390 && luajitCounts[1] == 0,
             "the luajit lane passes every dispatched runtime case "
-                + "byte-exact (389/0), got " + luajitCounts[0] + " / "
+                + "byte-exact (390/0), got " + luajitCounts[0] + " / "
                 + luajitCounts[1] + " over "
                 + run.runtimeCasesDispatched() + " dispatched");
         // ISSUE-0599 (the JS lane convergence leaf): the js lane passes
         // every runtime-classified case byte-exact.
         int[] jsCounts = run.perBackend().get("js");
-        check(run.runtimeCasesDispatched() == 389
-                && jsCounts[0] == 389 && jsCounts[1] == 0,
+        check(run.runtimeCasesDispatched() == 390
+                && jsCounts[0] == 390 && jsCounts[1] == 0,
             "the js lane passes every dispatched runtime case "
-                + "byte-exact (389/0), got " + jsCounts[0] + " / "
+                + "byte-exact (390/0), got " + jsCounts[0] + " / "
                 + jsCounts[1] + " over "
                 + run.runtimeCasesDispatched() + " dispatched");
         check(run.failures().stream().noneMatch(f ->

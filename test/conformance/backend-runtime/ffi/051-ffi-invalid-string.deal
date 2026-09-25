@@ -1,0 +1,13 @@
+// @spec: Modules, declarations, standard library, and host ABI — C FFI externals entries
+// @description: A string argument carrying U+0000 (parsed from std/json's backslash-u0000 escape) raises FFI_INVALID_STRING at the call expression before the native call (the load_ffi conversion gate's outbound string row).
+// @expected: runtime-error FFI_INVALID_STRING
+// @features: c-ffi, abi, string, standard-library, runtime-errors
+
+import * as native from "candidate/native";
+import * as json from "std/json";
+export function main(): null {
+  let doc: table = json.parse("{\"s\":\"\\u0000\"}");
+  let value: string = doc.s;
+  let echoed: string = native.ffi_echo(value);
+  return null;
+}
