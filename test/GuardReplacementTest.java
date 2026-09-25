@@ -45,15 +45,17 @@ import java.util.stream.Stream;
  * {@code production-project-emission-and-atomic-cutover} P9/P10).
  *
  * <ol>
- *   <li><b>The narrowed guard.</b> A HOST-kind import whose
- *       declaration-surface kind is {@code EXTERN_C} keeps the landed
- *       E6005 {@code SHARED_EMITTER_COVERAGE} outcome with the stable
- *       {@code HOST_MODULE_IMPORT} token, the raw specifier, and the
- *       resolved module, and stages nothing (the FFI child replaces the
- *       remnant when it realizes the {@code load_ffi} table). The
- *       superseded {@code EXTERNAL_ASYNC_CALL} token has no producer in
- *       the production source set and appears in no production
- *       outcome.</li>
+ *   <li><b>The replaced guard shape.</b> A HOST-kind import whose
+ *       declaration-surface kind is {@code EXTERN_C} is admitted by
+ *       ISSUE-0662 and emits its {@code load_ffi} prelude at the owning
+ *       {@code MODULE_IMPORT} (the calls child's realized host load
+ *       covers the {@code HOST} declaration kind), so no HOST-kind
+ *       import trips the guard; the guard step, its stable
+ *       {@code HOST_MODULE_IMPORT} token, and its E6005
+ *       {@code SHARED_EMITTER_COVERAGE} producer stay landed (replaced,
+ *       never deleted). The superseded {@code EXTERNAL_ASYNC_CALL} token
+ *       has no producer in the production source set and appears in no
+ *       production outcome.</li>
  *   <li><b>The composed host closure.</b> One closure imports two host
  *       declaration modules and runs the host load, the sync host call,
  *       the async host call, the sync host value-position read (invoked),
@@ -161,7 +163,7 @@ public class GuardReplacementTest {
         }
         """;
 
-    /** The extern-C declaration of the narrowed-guard probe. */
+    /** The extern-C declaration of the admission probe. */
     private static final String EXTERN_C_DECLARATION = """
         // @extern-c
         export function nativeAdd(a: int, b: int): int;
@@ -347,7 +349,9 @@ public class GuardReplacementTest {
         return ProductionProjectEmission.run(productionInvocation(),
             fixture.checkedProject(), fixture.index(), fixture.manifests(),
             fixture.surface(), fixture.declarationIdentities(),
-            fixture.externCModules(), BuiltinErrorDeclaration.synthesized(
+            fixture.externCModules(),
+            fixture.root().resolve("src").toAbsolutePath().toString(),
+            BuiltinErrorDeclaration.synthesized(
                 fixture.checkedProject().modules().get(0).ast().span()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
             Set.of(), backend, false,
@@ -356,12 +360,13 @@ public class GuardReplacementTest {
     }
 
     // =========================================================================
-    // 1. The narrowed guard and the removed shape
+    // 1. The replaced guard shape and the removed shape
     // =========================================================================
 
     private static void testNarrowedGuardAndRemovedShape() throws Exception {
-        System.out.println("-- the narrowed guard: the extern-C declaration import "
-            + "keeps the HOST_MODULE_IMPORT outcome and stages nothing --");
+        System.out.println("-- the replaced guard shape: the extern-C declaration "
+            + "import is admitted and emits its load_ffi prelude at the "
+            + "import --");
 
         Project externC = project(
             Map.of("src/app.deal", EXTERN_C_APP_SOURCE, "src/native.d.deal",
@@ -379,37 +384,51 @@ public class GuardReplacementTest {
             ProductionProjectEmission.Result result;
             try {
                 result = emit(fixture, Backend.LUAJIT, stager);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the narrowed guard stages nothing");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the admitted guard shape stages the one project artifact");
+                if (result.emitted()) {
+                    stager.publish();
+                }
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the extern-C declaration import fails closed");
-            checkEq(1, result.diagnostics().size(),
-                "the guard returns exactly the first diagnostic");
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code()),
-                "the guard diagnostic is E6005: " + result.diagnostics());
-            String message = result.firstDiagnostic() == null
-                ? "" : result.firstDiagnostic().message();
-            check(message.contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the guard names SHARED_EMITTER_COVERAGE: " + message);
-            check(message.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
-                "the guard names the stable HOST_MODULE_IMPORT token: " + message);
-            check(message.contains("'" + EXTERN_C_SPECIFIER + "'"),
-                "the guard names the import's raw specifier: " + message);
-            check(message.contains("'native.math'"),
-                "the guard names the import's resolved module: " + message);
-            check(Files.exists(out.resolve("app.lua"))
-                    && Files.readString(out.resolve("app.lua"),
-                        StandardCharsets.UTF_8).equals("-- previous artifact\n"),
-                "the guarded compile leaves the previous artifact set untouched");
+            check(result.emitted(),
+                "the extern-C declaration import is admitted: "
+                    + result.diagnostics());
+            check(result.diagnostics().isEmpty(),
+                "the admitted extern-C closure carries no guard diagnostic: "
+                    + result.diagnostics());
+            checkEq("app.lua", result.artifactRelativePath(),
+                "the extern-C declaration import stages the entry module's "
+                    + "chunk");
+            String chunk = Files.readString(out.resolve("app.lua"),
+                StandardCharsets.UTF_8);
+            check(chunk.contains("__exportSurfaces[\"native.math\"] = "
+                    + "__exportSurfaces[\"native.math\"] or __rt.load_ffi("
+                    + "\"ffi:@$external/native/math\", "),
+                "the artifact publishes the loaded table through the load_ffi "
+                    + "call at the import's MODULE_IMPORT: " + chunk);
+            check(chunk.contains("nativeLibrary = { kind = nil, loaderText = "
+                    + "nil }"),
+                "the bundle literal carries the no-library reference (the "
+                    + "wiring declares none): " + chunk);
+            check(chunk.contains(", \"" + externC.entry().toAbsolutePath()
+                    + "\", 1, 1)"),
+                "the load carries the import statement's span triplet: " + chunk);
+            check(!chunk.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
+                "the admitted chunk carries no guard token");
+            check(!chunk.contains("ffi.C") && !chunk.contains("cdef("),
+                "the artifact carries no ffi.C/cdef text");
+            check(!chunk.contains("require(\"native"),
+                "no provider require line is emitted");
         } finally {
             deleteRecursively(externC.root());
         }
 
-        // The release-owned production CLI of the same extern-C closure:
-        // the narrowed guard's outcome with nothing published.
+        // The release-owned production compile of the same extern-C
+        // closure: this slice admits it, so one project artifact and the
+        // unchanged deployment copies publish with the load_ffi prelude
+        // at the import.
         Project cli = project(
             Map.of("src/app.deal", EXTERN_C_APP_SOURCE, "src/native.d.deal",
                 EXTERN_C_DECLARATION),
@@ -417,27 +436,36 @@ public class GuardReplacementTest {
         try {
             Path cliOut = cli.root().resolve("cli-out");
             ArmCompile compile = productionCompile(cli, Backend.LUAJIT, cliOut);
-            check(!compile.success(),
+            check(compile.success(),
                 "the release-owned production compile of the extern-C closure "
-                    + "fails closed");
-            check(compile.orchestrator().diagnostics().stream().anyMatch(d ->
+                    + "is admitted: " + compile.orchestrator().diagnostics());
+            check(compile.orchestrator().diagnostics().stream().noneMatch(d ->
                     "E6005".equals(d.code())
                         && d.message().contains(
-                            ProductionProjectEmission.SHARED_EMITTER_COVERAGE)
-                        && d.message().contains(
                             ProductionProjectEmission.HOST_MODULE_IMPORT)),
-                "the production compile names E6005 SHARED_EMITTER_COVERAGE "
-                    + "HOST_MODULE_IMPORT: "
-                    + compile.orchestrator().diagnostics());
-            check(!Files.exists(cliOut),
-                "the production compile publishes nothing under " + cliOut);
+                "the production compile reports no HOST_MODULE_IMPORT guard "
+                    + "outcome: " + compile.orchestrator().diagnostics());
+            Path cliArtifact = cliOut.resolve("app.lua");
+            check(Files.exists(cliArtifact),
+                "the production compile publishes its one project artifact "
+                    + "under " + cliOut);
+            if (Files.exists(cliArtifact)) {
+                String cliChunk = Files.readString(cliArtifact,
+                    StandardCharsets.UTF_8);
+                check(cliChunk.contains(
+                        "__rt.load_ffi(\"ffi:@$external/native/math\", "),
+                    "the published artifact carries the load_ffi prelude at "
+                        + "the import: " + cliChunk);
+            }
         } finally {
             deleteRecursively(cli.root());
         }
 
-        // The superseded shape has no producer: the constant is gone from
-        // the production unit, and the JVM extern-C path keeps its
-        // pre-artifact E6006 rejection.
+        // The superseded shapes have no producer: the
+        // EXTERNAL_ASYNC_CALL token and the cross-module async closure
+        // guard are gone from the production unit, while the guard step
+        // and its stable HOST_MODULE_IMPORT token stay landed (replaced,
+        // never deleted).
         String productionUnit = Files.readString(
             Path.of("deal", "module", "ProductionProjectEmission.java"),
             StandardCharsets.UTF_8);
@@ -445,6 +473,12 @@ public class GuardReplacementTest {
             "the production unit carries no EXTERNAL_ASYNC_CALL token");
         check(!productionUnit.contains("closureGuard"),
             "the production unit carries no cross-module async closure guard");
+        check(productionUnit.contains("hostImportGuard")
+                && productionUnit.contains(
+                    ProductionProjectEmission.HOST_MODULE_IMPORT)
+                && productionUnit.contains("hostModuleImportFailure"),
+            "the production unit keeps the guard step, its stable token, and "
+                + "its E6005 producer");
     }
 
     // =========================================================================

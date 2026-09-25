@@ -1,6 +1,7 @@
 package deal.test;
 
 import deal.checker.BuiltinErrorDeclaration;
+import deal.codegen.lua.FfiEmissionInput;
 import deal.codegen.lua.LuaSemanticEmitter;
 import deal.ffi.FfiGeneratedModule;
 import deal.identity.CanonicalModuleIdentity;
@@ -336,6 +337,62 @@ public class LuaProductionProjectEmissionTest {
             LuaSemanticEmitter.emitProductionProject(null, Map.of(), Map.of(),
                 new HostDeclarationSurface(Map.of()));
             fail("a null project is rejected");
+        } catch (NullPointerException expected) {
+            passed++;
+        } catch (Exception unexpected) {
+            fail("a null project fails with "
+                + unexpected.getClass().getSimpleName() + ", not NullPointerException");
+        }
+
+        // The FFI-capable entry (the extern-C admission slice): the four
+        // landed inputs plus exactly the compile's FFI emission input
+        // (the generated-module map and the manifest-directory text) —
+        // still no AST, checker, route, identity-index, or raw
+        // generated-module input.
+        Method ffiEntry = LuaSemanticEmitter.class.getDeclaredMethod(
+            "emitProductionProject", ExecutableLoweredProject.class, Map.class,
+            Map.class, HostDeclarationSurface.class, FfiEmissionInput.class);
+        check(java.lang.reflect.Modifier.isStatic(ffiEntry.getModifiers())
+                && java.lang.reflect.Modifier.isPublic(ffiEntry.getModifiers()),
+            "the FFI-capable emitProductionProject is a public static entry");
+        checkEq(String.class, ffiEntry.getReturnType(),
+            "the FFI-capable entry returns the one project artifact source text");
+        checkEq(List.of(ExecutableLoweredProject.class, Map.class, Map.class,
+                HostDeclarationSurface.class, FfiEmissionInput.class),
+            List.of(ffiEntry.getParameterTypes()),
+            "the FFI-capable entry takes the four landed inputs plus exactly "
+                + "the FFI emission input");
+        List<String> ffiGenericTypes = new ArrayList<>();
+        for (java.lang.reflect.Type type : ffiEntry.getGenericParameterTypes()) {
+            ffiGenericTypes.add(type.getTypeName());
+        }
+        checkEq(List.of(
+                "deal.semantic.ir.ExecutableLoweredProject",
+                "java.util.Map<deal.semantic.ir.ModuleId, "
+                    + "deal.semantic.ir.StructuredBodyTable>",
+                "java.util.Map<deal.semantic.ir.ModuleId, "
+                    + "deal.semantic.ir.ClassFactoryRegistry>",
+                "deal.semantic.HostDeclarationSurface",
+                "deal.codegen.lua.FfiEmissionInput"),
+            ffiGenericTypes,
+            "the FFI-capable entry's declared inputs are the four landed "
+                + "inputs plus the FFI emission input");
+        for (Parameter parameter : ffiEntry.getParameters()) {
+            String typeName = parameter.getType().getName();
+            for (String forbidden : List.of("deal.ast.", "deal.checker.",
+                    "deal.parser.", "Route", "MigrationPlanner", "CapabilityRegistry",
+                    "HostModuleDeclarations", "FfiGenerated",
+                    "CanonicalModuleIdentity", "CheckResult", "ProgramNode")) {
+                check(!typeName.contains(forbidden),
+                    "the FFI-capable entry takes no " + forbidden + " input: "
+                        + typeName);
+            }
+        }
+        try {
+            LuaSemanticEmitter.emitProductionProject(null, Map.of(), Map.of(),
+                new HostDeclarationSurface(Map.of()),
+                new FfiEmissionInput(Map.of(), ""));
+            fail("a null project is rejected by the FFI-capable entry");
         } catch (NullPointerException expected) {
             passed++;
         } catch (Exception unexpected) {

@@ -217,6 +217,16 @@ public final class DistributionHome {
     }
 
     /**
+     * The manifest-directory text this resolver was constructed with:
+     * the base of the manifest-relative deployment-copy resolution (and
+     * the same text a compile's FFI emission input carries for a
+     * manifest-relative native-library loader text).
+     */
+    public String manifestDirectoryText() {
+        return manifestDirectoryText;
+    }
+
+    /**
      * The stable composite cache identity of this resolver for cached
      * consumers ({@code StdlibModuleResolver}'s per-home cache): the
      * manifest directory, the resource-loader identity, and the

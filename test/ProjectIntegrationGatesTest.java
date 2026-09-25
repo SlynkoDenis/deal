@@ -148,11 +148,15 @@ public class ProjectIntegrationGatesTest {
      * token and stages no artifact.
      *
      * @param args          the CLI arguments of the fixture
-     * @param expectedToken the stable guard detail token
-     *                      ({@code HOST_MODULE_IMPORT} — the narrowed
-     *                      extern-C declaration-import remnant); null when
-     *                      the fixture fails through the emission arm (no
-     *                      stable token)
+     * @param expectedToken the stable guard detail token the failure must
+     *                      carry ({@code HOST_MODULE_IMPORT} — the
+     *                      retained host-import guard token; after
+     *                      ISSUE-0662 both landed call sites of this
+     *                      helper are retargeted: the extern-C import is
+     *                      admitted and the ffigen valid project fails on
+     *                      the bytes value), or null when the fixture
+     *                      fails through the emission arm (no stable
+     *                      token)
      * @param artifactDir   the fixture's output directory (must not exist
      *                      after the failed compile); may be null
      * @param context       the assertion context
@@ -607,16 +611,42 @@ public class ProjectIntegrationGatesTest {
             check(!mainLua.contains("FFI_UNSUPPORTED_BACKEND"),
                 "the LuaJIT arm raises no FFI_UNSUPPORTED_BACKEND");
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation fails the same extern-C fixture closed with
-            // E6005 SHARED_EMITTER_COVERAGE naming the HOST-kind import
-            // and stages no artifact (the FFI realization is the FFI
-            // child's; ISSUE-0625 retargets this to the production
-            // outcome).
-            checkProductionFailClosed(new String[]{
+            // The extern-C admission slice (ISSUE-0662): the release-owned
+            // production invocation of the same fixture admits the extern-C
+            // declaration import and publishes the one project artifact
+            // carrying the load_ffi prelude (the normalized manifest-relative
+            // loader text and the import span triplet included).
+            String[] prodRun = runProductionCliCapturingErr(new String[]{
                 "compile", entry.toString(), "--output",
-                base.resolve("prod_out").toString()}, "HOST_MODULE_IMPORT",
-                base.resolve("prod_out"), "extern-c import");
+                base.resolve("prod_out").toString()});
+            check("0".equals(prodRun[0]),
+                "extern-c import: the release-owned production invocation"
+                    + " admits the extern-C fixture (exit " + prodRun[0] + "): "
+                    + prodRun[1]);
+            Path prodArtifact = base.resolve("prod_out/main.lua");
+            check(Files.exists(prodArtifact),
+                "extern-c import: the admitted production compile publishes"
+                    + " its one project artifact under " + prodArtifact);
+            if (Files.exists(prodArtifact)) {
+                String prodLua = Files.readString(prodArtifact);
+                check(prodLua.contains(
+                        "__rt.load_ffi(\"ffi:@$external/ffi_math\", "),
+                    "extern-c import: the production artifact emits the"
+                        + " load_ffi call with the metadata-provided module"
+                        + " key");
+                check(prodLua.contains("nativeLibrary = { kind ="
+                        + " \"MANIFEST_RELATIVE_PATH\", loaderText = \""
+                        + expectedLoader + "\" }"),
+                    "extern-c import: the production artifact carries the"
+                        + " normalized loader text " + expectedLoader);
+                check(prodLua.contains(", \"" + entry.toAbsolutePath()
+                        + "\", 1, 1)"),
+                    "extern-c import: the production load carries the import"
+                        + " span triplet");
+                check(!prodLua.contains("ffi.C"),
+                    "extern-c import: the production artifact carries no"
+                        + " ffi.C access");
+            }
 
             // Metadata consumption, part 1: an isolated copy whose
             // externals KEY changes emits the changed module key while
@@ -806,16 +836,26 @@ public class ProjectIntegrationGatesTest {
                 "valid carries the pinned resolved-absolute loader text "
                     + fixtureLoader);
 
-            // ISSUE-0643 P10 item 2: the release-owned production
-            // invocation of the committed ffigen valid project fails
-            // closed with E6005 SHARED_EMITTER_COVERAGE naming the
-            // HOST-kind extern-C import and stages nothing.
-            checkProductionFailClosed(new String[]{
+            // The extern-C admission slice (ISSUE-0662): the release-owned
+            // production invocation of the committed ffigen valid project
+            // admits the extern-C declaration import (no HOST_MODULE_IMPORT
+            // guard outcome) and fails closed on the fixture's bytes value
+            // (CONSTRUCT_UNLOWERED — the bytes-value child's), staging
+            // nothing.
+            String[] prodValidRun = runProductionCliCapturingErr(new String[]{
                 "compile", Path.of("test/fixtures/ffigen/valid/src/main.deal")
                     .toAbsolutePath().toString(), "--backend", "lua",
-                "--output", base.resolve("prod_valid").toString()},
-                "HOST_MODULE_IMPORT", base.resolve("prod_valid"),
-                "ffigen valid project");
+                "--output", base.resolve("prod_valid").toString()});
+            check(!"0".equals(prodValidRun[0])
+                    && prodValidRun[1].contains("E6005")
+                    && prodValidRun[1].contains("CONSTRUCT_UNLOWERED")
+                    && !prodValidRun[1].contains("HOST_MODULE_IMPORT"),
+                "ffigen valid project: the production compile admits the"
+                    + " extern-C import and fails closed on the bytes value"
+                    + " (the bytes child's): " + prodValidRun[1]);
+            check(!Files.exists(base.resolve("prod_valid")),
+                "ffigen valid project: the production failure stages no"
+                    + " artifact under " + base.resolve("prod_valid"));
 
         } finally {
             deleteRecursively(base);

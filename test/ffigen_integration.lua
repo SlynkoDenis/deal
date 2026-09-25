@@ -134,9 +134,12 @@ end
 -- load_ffi emission) is produced by the test-scope harness compile entry
 -- (ISSUE-0643 P10 item 3, mechanism 1: the same CLI-equivalent
 -- arguments of deal.Main with the harness invocation). The release-owned
--- production invocation is asserted separately in step 2b: it fails the
--- same fixture closed with E6005 SHARED_EMITTER_COVERAGE
--- (HOST_MODULE_IMPORT) and stages nothing.
+-- production invocation is asserted separately in step 2b: the extern-C
+-- declaration import is admitted (the load_ffi prelude is emitted at the
+-- import's MODULE_IMPORT, and the executed artifact fails at the import
+-- with FFI_LIBRARY_LOAD for the never-built library), while the valid
+-- project stays fail-closed on its bytes value (CONSTRUCT_UNLOWERED -
+-- the bytes-value child's).
 for i = 1, #PROJECTS do
   local p = PROJECTS[i]
   local out = GEN_ROOT .. "/" .. p.name
@@ -161,37 +164,119 @@ for i = 1, #PROJECTS do
   f:close()
 end
 
--- ===== Bootstrap step 2b (ISSUE-0643): the release-owned production
--- invocation fails the same fixtures closed =====
--- The production arm's closure guard rejects a HOST-kind extern-C
--- declaration import with E6005 SHARED_EMITTER_COVERAGE
--- (HOST_MODULE_IMPORT); nothing is staged. The committed "valid" project
--- is the pinned probe (its extern-C declaration import is the guarded
--- shape; ISSUE-0625 retargets this when the FFI realization lands).
+-- ===== Bootstrap step 2b (ISSUE-0662): the release-owned production
+-- invocation of the extern-C fixtures =====
+-- The extern-C declaration import is admitted: the production compile of
+-- the missing-lib project stages the one project artifact carrying the
+-- load_ffi prelude (the metadata module key, the manifest-resolved loader
+-- text, the import span triplet), and executing it under luajit fails at
+-- the import with FFI_LIBRARY_LOAD at the import statement's origin. The
+-- valid project is admitted as well and still fails closed with E6005
+-- CONSTRUCT_UNLOWERED on its bytes value (the bytes-value child's),
+-- staging nothing.
 do
-  local p = nil
-  for i = 1, #PROJECTS do
-    if PROJECTS[i].name == "valid" then
-      p = PROJECTS[i]
-    end
-  end
-  if p == nil then
-    error("FFIGEN integration bootstrap failed: the committed 'valid' fixture project is missing")
-  end
   local prodOut = GEN_ROOT .. "/production-probe"
   local status = os.execute("rm -rf '" .. prodOut .. "'")
   if status ~= 0 and status ~= true then
     error("FFIGEN integration bootstrap failed: production probe staging setup failed")
   end
-  -- Capture both streams: the pinned diagnostic goes to stderr while the
-  -- compile summary goes to stdout. os.execute returns the process
-  -- status (io.popen's close does not propagate it portably here).
   local logPath = GEN_ROOT .. "/production-probe.log"
-  local cmd = "java -ea -cp build deal.Main compile '" .. p.entry
+  local entry = nil
+  for i = 1, #PROJECTS do
+    if PROJECTS[i].name == "missing-lib" then
+      entry = PROJECTS[i].entry
+    end
+  end
+  if entry == nil then
+    error("FFIGEN integration bootstrap failed: the committed 'missing-lib' fixture project is missing")
+  end
+  local cmd = "java -ea -cp build deal.Main compile '" .. entry
     .. "' --backend lua --output '" .. prodOut .. "' >'" .. logPath .. "' 2>&1"
-  print("FFIGEN integration bootstrap: production-invocation fail-closed probe (" .. p.name .. "):")
+  print("FFIGEN integration bootstrap: production-invocation probe (missing-lib):")
   print("  " .. cmd)
-  local status = os.execute(cmd)
+  status = os.execute(cmd)
+  local logHandle = io.open(logPath, "r")
+  local probeOutput = ""
+  if logHandle ~= nil then
+    probeOutput = logHandle:read("*a")
+    logHandle:close()
+  end
+  if status ~= 0 and status ~= true then
+    error("FFIGEN integration bootstrap failed: the release-owned production invocation"
+      .. " of missing-lib exited nonzero: " .. probeOutput)
+  end
+  local artifactHandle = io.open(prodOut .. "/main.lua", "r")
+  if artifactHandle == nil then
+    error("FFIGEN integration bootstrap failed: the production-invocation probe of"
+      .. " missing-lib staged no artifact")
+  end
+  local artifact = artifactHandle:read("*a")
+  artifactHandle:close()
+  if not string.find(artifact, "__rt.load_ffi(\"ffi:@$external/ffi/missing_lib\"", 1, true) then
+    error("FFIGEN integration bootstrap failed: the production artifact carries no"
+      .. " load_ffi call with the metadata module key")
+  end
+  if not string.find(artifact, "loaderText = \"" .. root
+      .. "/build/ffigen-no-such-lib.so\"", 1, true) then
+    error("FFIGEN integration bootstrap failed: the production artifact carries no"
+      .. " manifest-resolved loader text")
+  end
+  if not string.find(artifact, "main.deal\", 1, 1)", 1, true) then
+    error("FFIGEN integration bootstrap failed: the production load carries no"
+      .. " import span triplet")
+  end
+  if string.find(artifact, "ffi.C", 1, true) ~= nil then
+    error("FFIGEN integration bootstrap failed: the production artifact carries ffi.C access")
+  end
+  local probeWriter = io.open(prodOut .. "/probe.lua", "w")
+  if probeWriter == nil then
+    error("FFIGEN integration bootstrap failed: cannot write the execution probe")
+  end
+  probeWriter:write([[
+    package.path = "./?.lua;./std/?.lua;" .. package.path
+    local ok, err = pcall(dofile, "main.lua")
+    if ok then print("FFIGEN_PROD|init succeeded") os.exit(1) end
+    if type(err) ~= "table" or err.code == nil then
+      print("FFIGEN_PROD|not a runtime error: " .. tostring(err)) os.exit(1)
+    end
+    print("FFIGEN_PROD_ERROR|" .. tostring(err.code) .. "|" .. tostring(err.file)
+      .. "|" .. tostring(err.line) .. "|" .. tostring(err.column))
+  ]])
+  probeWriter:close()
+  local runPipe = io.popen("cd '" .. prodOut .. "' && luajit probe.lua 2>&1")
+  if runPipe == nil then
+    error("FFIGEN integration bootstrap failed: cannot run the production artifact")
+  end
+  local runOutput = runPipe:read("*a")
+  runPipe:close()
+  print("FFIGEN integration bootstrap: production artifact execution (missing-lib):")
+  print("  " .. runOutput:gsub("%s+$", ""))
+  if not string.find(runOutput, "FFIGEN_PROD_ERROR|FFI_LIBRARY_LOAD|", 1, true) then
+    error("FFIGEN integration bootstrap failed: the production artifact of"
+      .. " missing-lib did not raise FFI_LIBRARY_LOAD: " .. runOutput)
+  end
+  if not string.find(runOutput, "main.deal|1|1", 1, true) then
+    error("FFIGEN integration bootstrap failed: the FFI_LIBRARY_LOAD did not carry"
+      .. " the import statement's origin (1:1): " .. runOutput)
+  end
+end
+
+-- The valid project stays fail-closed on its bytes value (the bytes-value
+-- child's): the extern-C import is admitted (no HOST_MODULE_IMPORT outcome)
+-- and the compile fails with E6005 CONSTRUCT_UNLOWERED, staging nothing.
+do
+  local validEntry = root .. "/test/fixtures/ffigen/valid/src/main.deal"
+  local validOut = GEN_ROOT .. "/production-probe-valid"
+  local status = os.execute("rm -rf '" .. validOut .. "'")
+  if status ~= 0 and status ~= true then
+    error("FFIGEN integration bootstrap failed: valid production probe staging setup failed")
+  end
+  local logPath = GEN_ROOT .. "/production-probe-valid.log"
+  local cmd = "java -ea -cp build deal.Main compile '" .. validEntry
+    .. "' --backend lua --output '" .. validOut .. "' >'" .. logPath .. "' 2>&1"
+  print("FFIGEN integration bootstrap: production-invocation probe (valid):")
+  print("  " .. cmd)
+  status = os.execute(cmd)
   local logHandle = io.open(logPath, "r")
   local probeOutput = ""
   if logHandle ~= nil then
@@ -200,22 +285,21 @@ do
   end
   if status == 0 or status == true then
     error("FFIGEN integration bootstrap failed: the release-owned production invocation"
-      .. " of " .. p.name .. " exited 0; expected the E6005"
-      .. " SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) fail-closed outcome:\n"
+      .. " of valid exited 0; expected the bytes-value fail-closed outcome:\n"
       .. probeOutput)
   end
   if not string.find(probeOutput, "E6005", 1, true)
-    or not string.find(probeOutput, "SHARED_EMITTER_COVERAGE", 1, true)
-    or not string.find(probeOutput, "HOST_MODULE_IMPORT", 1, true) then
-    error("FFIGEN integration bootstrap failed: the production-invocation probe of "
-      .. p.name .. " did not report E6005 SHARED_EMITTER_COVERAGE"
-      .. " (HOST_MODULE_IMPORT):\n" .. probeOutput)
+    or not string.find(probeOutput, "CONSTRUCT_UNLOWERED", 1, true)
+    or string.find(probeOutput, "HOST_MODULE_IMPORT", 1, true) ~= nil then
+    error("FFIGEN integration bootstrap failed: the production-invocation probe of"
+      .. " valid did not report E6005 CONSTRUCT_UNLOWERED without the host-guard"
+      .. " token:\n" .. probeOutput)
   end
-  local f = io.open(prodOut .. "/main.lua", "r")
-  if f ~= nil then
-    f:close()
-    error("FFIGEN integration bootstrap failed: the production-invocation probe of "
-      .. p.name .. " staged an artifact")
+  local validArtifact = io.open(validOut .. "/main.lua", "r")
+  if validArtifact ~= nil then
+    validArtifact:close()
+    error("FFIGEN integration bootstrap failed: the production-invocation probe of"
+      .. " valid staged an artifact")
   end
 end
 

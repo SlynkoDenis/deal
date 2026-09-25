@@ -90,14 +90,39 @@ public final class LuaFfiBindingGenerator {
      * by the backend from the import node's span), plus the import
      * prelude: one {@code local <prefix><alias> = require("<module>")}
      * line per provider module the plan evaluators reference (graph
-     * order, first-reference order) — the backend emits them before the
-     * bindings local so every evaluator closure captures a bound
-     * provider.
+     * order, first-reference order) — the retained per-module backend
+     * emits them before the bindings local so every evaluator closure
+     * captures a bound provider. The production project session
+     * re-points the same bindings at the chunk's export-surface registry
+     * through {@link #providerBindings} (never a {@code require} line:
+     * the one-chunk layout has no per-provider module artifact).
      */
     public record LoadCallParts(String moduleKeyLiteral, String bundleLiteral,
                                 String plansLiteral,
                                 String bindingsLiteral,
                                 List<String> importLines) {
+    }
+
+    /**
+     * One provider binding of the emitted import prelude: the import
+     * alias the deployed plan evaluators call through
+     * ({@code <prefix><alias>.<export>.f(...)}) with the provider
+     * module's dotted path (the chunk export-surface registry key of
+     * the production session).
+     *
+     * @param importAlias         the declaration's import alias;
+     *                            non-null
+     * @param importedModulePath  the provider module's dotted module
+     *                            path; non-null
+     */
+    public record ProviderBinding(String importAlias,
+                                  String importedModulePath) {
+
+        public ProviderBinding {
+            Objects.requireNonNull(importAlias, "importAlias must not be null");
+            Objects.requireNonNull(importedModulePath,
+                "importedModulePath must not be null");
+        }
     }
 
     /** Either the failure or the complete call parts. */
@@ -183,14 +208,21 @@ public final class LuaFfiBindingGenerator {
     }
 
     /**
-     * The import prelude: one {@code local <prefix><alias> =
-     * require("<dotted module path>")} line per provider module the
-     * carried references name, in graph order (first reference per
-     * alias; the validator's import surface binds one alias to exactly
-     * one provider module, so the first reference is the binding).
+     * The provider bindings of one generated module, in graph order
+     * (first reference per alias; the validator's import surface binds
+     * one alias to exactly one provider module, so the first reference
+     * is the binding): the one alias &rarr; provider-module mapping
+     * authority both emission layouts consume — the retained per-module
+     * prelude through {@link #importPrelude} and the production project
+     * session through the chunk export-surface registry.
+     *
+     * @param bindings the generated module's frozen forward bindings;
+     *                 non-null
+     * @return the provider bindings in the generator's order; non-null
      */
-    private static List<String> importPrelude(FfiForwardBindings bindings,
-            String importPrefix) {
+    public static List<ProviderBinding> providerBindings(
+            FfiForwardBindings bindings) {
+        Objects.requireNonNull(bindings, "bindings must not be null");
         Map<String, String> aliasModules = new LinkedHashMap<>();
         for (FfiImportedFunctionReference ref
                 : bindings.importedFunctions()) {
@@ -202,11 +234,25 @@ public final class LuaFfiBindingGenerator {
             aliasModules.putIfAbsent(ref.importAlias(),
                 ref.importedModulePath());
         }
-        List<String> lines = new ArrayList<>();
+        List<ProviderBinding> result = new ArrayList<>();
         for (Map.Entry<String, String> entry : aliasModules.entrySet()) {
-            lines.add("local " + importPrefix + entry.getKey()
+            result.add(new ProviderBinding(entry.getKey(), entry.getValue()));
+        }
+        return List.copyOf(result);
+    }
+
+    /**
+     * The import prelude: one {@code local <prefix><alias> =
+     * require("<dotted module path>")} line per provider module the
+     * carried references name, in graph order.
+     */
+    private static List<String> importPrelude(FfiForwardBindings bindings,
+            String importPrefix) {
+        List<String> lines = new ArrayList<>();
+        for (ProviderBinding binding : providerBindings(bindings)) {
+            lines.add("local " + importPrefix + binding.importAlias()
                 + " = require("
-                + LuaAbi.stringLiteral(entry.getValue()) + ")");
+                + LuaAbi.stringLiteral(binding.importedModulePath()) + ")");
         }
         return lines;
     }

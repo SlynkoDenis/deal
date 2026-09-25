@@ -361,6 +361,7 @@ public class CrossModuleCallRealizationTest {
             fixture.checkedProject(), fixture.index(), fixture.manifests(),
             fixture.surface(), fixture.declarationIdentities(),
             fixture.externCModules(),
+            fixture.distributionHome().manifestDirectoryText(),
             BuiltinErrorDeclaration.synthesized(
                 fixture.checkedProject().modules().get(0).ast().span()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),

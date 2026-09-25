@@ -395,9 +395,11 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # realized families (HOST-declaration import with its declared-map load
   # and one staged artifact, cross-module sync, cross-module async —
   # ISSUE-0656 removed the EXTERNAL_ASYNC_CALL shape), the fail-closed
-  # families (bytes, function-typed materialization, extern-C on LuaJIT
-  # with the JVM E6006 preserved), the accepted same-module async closure,
-  # the C9 source-map disposition, and the harness-arm dispatch rows.
+  # families (bytes, function-typed materialization), the admitted
+  # extern-C import on LuaJIT (the emitted load_ffi prelude, the
+  # import-origin FFI_LIBRARY_LOAD, and the preserved JVM E6006), the
+  # accepted same-module async closure, the C9 source-map disposition,
+  # and the harness-arm dispatch rows.
   'fg|=== Running Production Dispatch and Cutover Acceptance Tests (ISSUE-0643) ===|java -ea -cp build deal.test.ProductionDispatchTest'
   # ISSUE-0618 registration: the canonical v1.2 failure-text parity test
   # (semantic-ir-construct-coverage-cutover K8 and Verification 9;
@@ -833,12 +835,11 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # remnant contract; cross-module-call-realization X3;
   # luajit-jvm-single-lowering-production-cutover C2/C4; read-only
   # production-project-emission-and-atomic-cutover P9/P10; sequencing
-  # step 7): the narrowed HOST_MODULE_IMPORT guard (a HOST-kind import
-  # whose declaration-surface kind is EXTERN_C keeps the landed E6005
-  # SHARED_EMITTER_COVERAGE outcome with the stable token, the raw
-  # specifier, and the resolved module, stages nothing, and the
-  # release-owned production compile of the same closure publishes
-  # nothing), the removed EXTERNAL_ASYNC_CALL shape (the token has no
+  # step 7): the replaced HOST_MODULE_IMPORT remnant (ISSUE-0656 narrowed
+  # it to the extern-C declaration import, which ISSUE-0662 replaces when
+  # it realizes the load_ffi table — no HOST-kind import trips the guard,
+  # while the stable token, the detail fields, and the E6005 producer
+  # stay landed), the removed EXTERNAL_ASYNC_CALL shape (the token has no
   # producer in the production source set and appears in no production
   # outcome), and the composed production-arm drives over
   # ProductionProjectEmission.run: the host closure (two host declaration
@@ -871,4 +872,25 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # implementations and through the oracle's host-seam defaults projection,
   # and the call-free negative load seeds' pinned E8011 at the import origin.
   'fg|=== Running Host-Class Construction Tests (ISSUE-0624) ===|java -ea -cp build deal.test.HostClassConstructionTest'
+
+  # ISSUE-0662 registration: the extern-C admission and the emitted FFI
+  # load prelude (luajit-ffi-load-emission-and-typed-crossings F1/F2 and
+  # the FFI import and load contract; ffi-admission-and-jvm-e6006-rejection
+  # A1; luajit-ffi-shared-emission-and-jvm-rejection F1/F2; sequencing
+  # step 1): the corpus fixtures ffi/025, ffi/026, and ffi/027 compile
+  # through the production arm with the corpus's production FFI metadata
+  # (CorpusFfi.module(...).generatedModule() and the bootstrapped loader
+  # text) and execute under luajit with the sidecar-pinned outcomes (the
+  # emitted load_ffi prelude carries the metadata module key, the
+  # generated bundle/plans/bindings literals, and the import statement's
+  # span triplet; FFI_SYMBOL_MISSING and FFI_LIBRARY_LOAD at the import
+  # origin; ffi/027 clean); the admitted declaration imports (the extern-C
+  # import's load_ffi and the HOST declaration import's load_host, with
+  # the retained HOST_MODULE_IMPORT producer); one load per module shared
+  # by two aliases; the fail-closed seeds (a missing generated-module
+  # entry, a provider module outside the declaration surface, and an
+  # unserializable generated module each failing E6005 with nothing
+  # staged); and the trace session's load-free emission with the runtime
+  # bound.
+  'fg|=== Running FFI Load Emission Tests (ISSUE-0662) ===|java -ea -cp build deal.test.FfiLoadEmissionTest'
 )

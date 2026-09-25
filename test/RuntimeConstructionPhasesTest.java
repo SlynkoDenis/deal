@@ -848,11 +848,13 @@ public class RuntimeConstructionPhasesTest {
                 return;
             }
 
-            // ISSUE-0643 P10 item 2: the same fixture through the
-            // release-owned production invocation fails closed with
-            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
-            // stages nothing (the FFI realization is the FFI child's;
-            // ISSUE-0625 retargets this to the production outcome).
+            // The extern-C admission slice (ISSUE-0662): the same fixture
+            // through the release-owned production invocation is admitted
+            // (the extern-C import no longer trips the host-kind guard) and
+            // still fails closed with E6005 SHARED_EMITTER_COVERAGE on the
+            // declaration-class construction (the CLASS_NEW over the
+            // extern-C class resolves no layout before the construction
+            // child lands), staging nothing.
             Path prodOut = root.resolve("build/prod-lua");
             RunResult prod = runProductionCli(new String[]{
                 "compile",
@@ -860,11 +862,11 @@ public class RuntimeConstructionPhasesTest {
                 "--backend", "lua", "--output", prodOut.toString()});
             check(prod.exitCode() != 0
                     && prod.output().contains("E6005")
-                    && prod.output().contains("SHARED_EMITTER_COVERAGE")
-                    && prod.output().contains("HOST_MODULE_IMPORT"),
+                    && prod.output().contains("CONSTRUCTION_COHERENCE"),
                 "the release-owned production invocation fails the extern-C"
-                    + " project closed with E6005 SHARED_EMITTER_COVERAGE"
-                    + " (HOST_MODULE_IMPORT): " + prod.output());
+                    + " project closed with E6005 CONSTRUCTION_COHERENCE (the"
+                    + " declaration-class construction is the construction"
+                    + " child's): " + prod.output());
             check(!Files.exists(prodOut),
                 "the production failure stages no artifact under " + prodOut);
 

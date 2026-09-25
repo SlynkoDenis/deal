@@ -935,6 +935,7 @@ public class CrossModuleAsyncRealizationTest {
                 production = ProductionProjectEmission.run(productionInvocation(),
                     fixture.checkedProject(), fixture.index(), fixture.manifests(),
                     fixture.surface(), new LinkedHashMap<>(), new LinkedHashMap<>(),
+                    fixture.distributionHome().manifestDirectoryText(),
                     BuiltinErrorDeclaration.synthesized(
                         fixture.checkedProject().modules().get(0).ast().span()),
                     List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
