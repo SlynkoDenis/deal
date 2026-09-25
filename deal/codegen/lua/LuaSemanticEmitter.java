@@ -3560,6 +3560,18 @@ public final class LuaSemanticEmitter {
             out.append("  error(__resT, 0)\n");
             out.append("end\n");
             if (returnBoundary != null) {
+                // The class-value carrier projection (F4): on a class-typed
+                // return the wrapper's loaded value is projected into the
+                // chunk's class representation *before* the crossing's
+                // events, so the boundary's START/SUCCESS atoms and the
+                // program observe the one projected heap value — never the
+                // wrapper's raw runtime value (the trace-identity rule).
+                if (((KindPayload.BoundaryPayload) returnBoundary.payload())
+                        .descriptor() instanceof RuntimeDescriptor.Class) {
+                    out.append("__resT = __hostDealProject(")
+                        .append(luaString(declaredReturn)).append(", __resT, ")
+                        .append(luaString(originOf(returnBoundary))).append(")\n");
+                }
                 // The boundary events' atoms are the DEAL-null-aware host
                 // atom (the deployed runtime's null sentinel is the
                 // language null, so a null return atomizes as "null"
@@ -7191,6 +7203,93 @@ local function __hostKindOf(v)
   if v.__jn then return "number" end
   return t
 end
+-- The carried class identity of one class value in either
+-- representation: the chunk's __c/__id carrier or the loaded runtime's
+-- __kind/__classname carrier; nil for every other value. The class-value
+-- carrier projection keys on this, so a class-typed crossing never
+-- consults the runtime matcher's class row (which requires the runtime
+-- representation the DEAL program never holds).
+local function __hostClassIdOf(v)
+  if type(v) ~= "table" then return nil end
+  if v.__kind == "class" then return v.__classname end
+  if v.__c then return v.__id end
+  return nil
+end
+-- The declared cell of one class-typed host-crossing position: a value
+-- carrying the declared identity passes unchanged in either
+-- representation; every other value fails through the pinned E8010
+-- projection with the declared identity as expected and the carried
+-- identity (or the canonical kind token) as actual — never the runtime
+-- matcher's E8001.
+local function __hostClassCell(desc, index, v, origin, isReturn)
+  local prefix = isReturn and "return value 1 type mismatch: "
+    or ("parameter "..index.." type mismatch: ")
+  local carried = __hostClassIdOf(v)
+  if carried == nil then
+    return error(__failExpr("E8010", prefix.."expected class instance",
+      origin, desc, __hostKindOf(v)), 0)
+  end
+  if carried ~= desc then
+    return error(__failExpr("E8010", prefix.."expected instance of "..desc
+      ..", got "..carried, origin, desc, carried), 0)
+  end
+  return v
+end
+-- The chunk-to-wrapper class-value carrier projection (F4): one fresh
+-- runtime-representation value built from the source representation's own
+-- complete field map — the identity text is the crossing position's
+-- declared descriptor, a nested pointer field is projected by the same
+-- rule, and a pointer token's own __ptr is carried. The source value is
+-- never mutated; a value already carrying the runtime representation
+-- passes through. No null mapping exists inside this bridge: C_STRUCT and
+-- C_POINTER positions are non-nullable by the declaration policy.
+local function __hostClassProject(desc, v)
+  if type(v) ~= "table" then return v end
+  if v.__kind == "class" then return v end
+  if not v.__c then return v end
+  local out = {__kind = "class", __classname = desc}
+  if v.__ptr ~= nil then out.__ptr = v.__ptr end
+  if type(v.__f) == "table" then
+    for k, val in pairs(v.__f) do
+      if type(val) == "table" and val.__c then
+        out[k] = __hostClassProject(val.__id, val)
+      else
+        out[k] = val
+      end
+    end
+  end
+  return out
+end
+-- The wrapper-to-chunk class-value carrier projection (F4): the declared
+-- identity text tags one fresh chunk-representation value whose declared
+-- field set is the runtime instance's own non-tag keys (its phase-1
+-- admission and phase-2 fill make them exactly the declared fields) and
+-- whose pointer token carries its pointer. The source value is never
+-- mutated; a value already carrying the chunk representation passes
+-- through. The projection runs before the crossing's events, so the trace
+-- observes exactly one heap value per class-typed crossing.
+local function __hostDealProject(desc, v, origin)
+  if type(v) ~= "table" then return v end
+  if v.__c then return v end
+  if v.__kind ~= "class" then return v end
+  if v.__classname ~= desc then
+    return error(__failExpr("E8010", "expected instance of "..desc..", got "
+      ..tostring(v.__classname), origin, desc, v.__classname), 0)
+  end
+  local out = {__c = true, __id = desc, __f = {}, __p = {}}
+  for k, val in pairs(v) do
+    if k ~= "__classname" and k ~= "__kind" and k ~= "__ptr" then
+      if type(val) == "table" and val.__kind == "class" then
+        out.__f[k] = __hostDealProject(val.__classname, val, origin)
+      else
+        out.__f[k] = val
+      end
+      out.__p[k] = true
+    end
+  end
+  if v.__ptr ~= nil then out.__ptr = v.__ptr end
+  return out
+end
 -- The declared parameter cell of a function-typed host position: the
 -- loaded matcher's own rule over the DEAL function carrier (byte-exact
 -- carried canonical descriptor) or a host-facing wrapper; the pinned
@@ -7224,6 +7323,9 @@ end
 -- sentinels are distinct values) and back on the return path.
 local function __hostParamCell(desc, index, v, origin)
   if v == __NULL then v = __rt.__NULL end
+  if string.sub(desc, 1, 1) == "@" then
+    return __hostClassCell(desc, index, v, origin, false)
+  end
   local ok, checked = pcall(__rt.check_type, desc, v)
   if ok then
     if checked == __rt.__NULL then return __NULL end
@@ -7266,6 +7368,9 @@ local function __hostReturnCell(desc, v, origin, nothing)
   if nothing and v == nil then
     return error(__failExpr("E8010", "return value 1 type mismatch: expected "..desc
       ..", got nothing", origin, desc, "nothing"), 0)
+  end
+  if string.sub(desc, 1, 1) == "@" then
+    return __hostClassCell(desc, 0, v, origin, true)
   end
   local ok, checked = pcall(__rt.check_type, desc, v)
   if not ok then
@@ -7310,6 +7415,9 @@ local function __hostProjectArg(desc, inner, v)
   if inner ~= nil and (string.sub(inner, 1, 1) == "("
       or string.sub(inner, 1, 9) == "async(") then
     return __hostFnArg(desc, inner, v)
+  end
+  if string.sub(desc, 1, 1) == "@" then
+    return __hostClassProject(desc, v)
   end
   return v
 end

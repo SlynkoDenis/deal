@@ -893,4 +893,32 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # staged); and the trace session's load-free emission with the runtime
   # bound.
   'fg|=== Running FFI Load Emission Tests (ISSUE-0662) ===|java -ea -cp build deal.test.FfiLoadEmissionTest'
+
+  # ISSUE-0663 registration: the typed FFI crossings and the class-value
+  # carrier projection (luajit-ffi-load-emission-and-typed-crossings F3/F4,
+  # luajit-ffi-shared-emission-and-jvm-rejection F3, the FFI typed call and
+  # value-read contract, and the carrier projection contract; sequencing
+  # step 2): the scalar fixtures ffi/012, ffi/013, ffi/014, ffi/048,
+  # ffi/049, ffi/050 and the pointer fixture ffi/020 compile through the
+  # production arm with the corpus's production FFI metadata
+  # (CorpusFfi.module(...).generatedModule() and the bootstrapped loader
+  # text) and execute under luajit with the sidecar-pinned runtime-ok
+  # transcripts (the drives resolve the real loaded surface and fail on a
+  # broken library wiring); the emitted crossing positions (the
+  # DEAL_TO_HOST + HOST_PARAMETER cells in one-based order, the loaded
+  # wrapper's .f invocation with the trailing literal span triplet, the
+  # single HOST_TO_DEAL + HOST_SYNC_RETURN cell at the call origin, no new
+  # boundary kind, and no conversion code in the artifact — the ABI
+  # conversions stay owned by deal/runtime.lua); the call-site failures
+  # ffi/022-ffi/024 pinned to FFI_NULL_STRING/FFI_INVALID_UTF8/
+  # FFI_NULL_POINTER at the call expression with the sidecar's message,
+  # span, and framed terminal code; the class-value carrier projection (the
+  # class parameter cell accepting the chunk shape and failing every other
+  # value with the pinned E8010 texts, never E8001; the post-cell
+  # chunk-to-wrapper projection allocating a fresh wrapper-facing value per
+  # crossing while the program's own value stays untouched; the
+  # wrapper-to-chunk projection before the crossing's events, one heap
+  # value per class-typed crossing in the trace stream); and the closed
+  # boundary-kind set with no null mapping inside the bridge.
+  'fg|=== Running FFI Typed Crossing Tests (ISSUE-0663) ===|java -ea -cp build deal.test.FfiTypedCrossingTest'
 )
