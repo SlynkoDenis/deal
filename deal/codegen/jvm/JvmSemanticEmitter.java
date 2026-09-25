@@ -6037,6 +6037,12 @@ public final class JvmSemanticEmitter {
                         + " (the intrinsic carrier's async execution is the "
                         + "function-value child's; the conversion intrinsics are "
                         + "synchronous values — producer defect)");
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw new IllegalStateException("ASYNC_START " + op.opId()
+                        + " resolves the dynamic function value produced by "
+                        + dynamic.materializingOpId() + " outside the dynamic arm (a "
+                        + "DynamicFunctionValue names no execution class and is never a "
+                        + "statically resolved callee — producer defect)");
             }
             emitTokenSuccess(op, javaString(tokenAtom(token)), indent);
         }

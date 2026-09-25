@@ -498,6 +498,11 @@ public final class ContractSnapshotCanonicalizer {
                 CanonicalJson.e("descriptor", descriptorText(b.descriptor())),
                 CanonicalJson.e("intrinsicKind", CanonicalJson.str(b.kind().name())),
                 CanonicalJson.e("type", CanonicalJson.str("intrinsicFunction")));
+            case FunctionExecutionBinding.DynamicFunctionValue b -> CanonicalJson.obj(
+                CanonicalJson.e("descriptor", descriptorText(b.descriptor())),
+                CanonicalJson.e("materializingBoundaryOpId",
+                    semanticIdJson(b.materializingOpId())),
+                CanonicalJson.e("type", CanonicalJson.str("dynamicFunctionValue")));
         };
     }
 
@@ -1172,6 +1177,14 @@ public final class ContractSnapshotCanonicalizer {
                 CanonicalJson.e("descriptor", CanonicalJson.str(binding.descriptor())),
                 CanonicalJson.e("intrinsicKind", CanonicalJson.str(binding.intrinsicKind())),
                 CanonicalJson.e("type", CanonicalJson.str("intrinsicFunction")));
+            case "dynamicFunctionValue" -> CanonicalJson.obj(
+                CanonicalJson.e("descriptor", binding.descriptor() == null
+                    ? CanonicalJson.nullValue()
+                    : CanonicalJson.str(binding.descriptor())),
+                CanonicalJson.e("materializingBoundaryOpId", binding.materializingBoundaryOpId() == null
+                    ? CanonicalJson.nullValue()
+                    : semanticIdJson(binding.materializingBoundaryOpId())),
+                CanonicalJson.e("type", CanonicalJson.str("dynamicFunctionValue")));
             default -> CanonicalJson.obj(
                 CanonicalJson.e("type", CanonicalJson.str(binding.shape())));
         };
@@ -1221,6 +1234,17 @@ public final class ContractSnapshotCanonicalizer {
             case "intrinsicFunction" -> {
                 descriptor = requireString(binding, "descriptor");
                 intrinsicKind = requireString(binding, "intrinsicKind");
+            }
+            case "dynamicFunctionValue" -> {
+                // The two required positions (the producing op and the
+                // materialized descriptor) are decoded as nullable raw
+                // positions: the transport never invents a value, and the
+                // shape's required positions are the validator's closed
+                // clause (R-ENUM), so a doctored text reaching the raw
+                // model reports the rule instead of a decode failure.
+                descriptor = optionalString(binding, "descriptor");
+                materializingBoundaryOpId = optionalOpId(binding,
+                    "materializingBoundaryOpId");
             }
             default -> {
                 // An unknown binding shape tag is an R-ENUM position —
@@ -1491,6 +1515,28 @@ public final class ContractSnapshotCanonicalizer {
                 "expected an op semantic-id object, got type \"" + type + "\"");
         }
         return new OpId(new ModuleId(requireString(obj, "modulePath")), requireInt(obj, "id"));
+    }
+
+    /**
+     * Parses an optional op semantic-id position: {@code null} for an
+     * absent key or a JSON null, an op-id object otherwise, and a decode
+     * failure for every other value type. The dynamic materialization
+     * shape's required producing-op position is decoded here (the
+     * transport carries the raw position byte-intact) so that a doctored
+     * text reaches the validator's closed R-ENUM position clause instead
+     * of a decode failure.
+     */
+    private static OpId optionalOpId(CanonicalJson.Obj obj, String key) {
+        CanonicalJson.Value value = payloadValue(obj, key);
+        if (value == null || value instanceof CanonicalJson.Null) {
+            return null;
+        }
+        if (value instanceof CanonicalJson.Obj opId) {
+            return parseOpId(opId);
+        }
+        throw new SemanticIrTextDecodeException(
+            "the \"" + key + "\" field must be null or an op-id object, got "
+                + jsonKindName(value));
     }
 
     /** Parses a value semantic-id object. */

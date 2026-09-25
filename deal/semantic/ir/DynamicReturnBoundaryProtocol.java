@@ -20,7 +20,11 @@ import java.util.Objects;
  * computes the conversion result and runs the recorded
  * {@code HOST_TO_DEAL}/{@code HOST_SYNC_RETURN} cell, so its resolution
  * class is {@code HOST} (the intrinsic carrier's realization and its
- * invocation belong to the function-typed-value child).</p>
+ * invocation belong to the function-typed-value child). A
+ * {@code DynamicFunctionValue} names no execution class at all — the
+ * class is the runtime value's own producing registration — so this
+ * method fails closed on it as well: the closed dynamic arm resolves the
+ * runtime value before it classifies.</p>
  *
  * <p>{@link #select(KindPayload.DynamicReturnBoundary, DynamicResolutionKind)}
  * selects the single recorded return-boundary cell the runtime executes
@@ -66,6 +70,12 @@ public final class DynamicReturnBoundaryProtocol {
                     : DynamicResolutionKind.EXTERNAL;
             case FunctionExecutionBinding.IntrinsicFunction ignored ->
                 DynamicResolutionKind.HOST;
+            case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                throw new IllegalArgumentException("a DynamicFunctionValue registration "
+                    + "names no execution class (the producing op "
+                    + dynamic.materializingOpId() + " materialized a value whose class is "
+                    + "resolved from the runtime value's producing registration); "
+                    + "kindOf(sourceBinding) applies after that resolution");
             case FunctionExecutionBinding.AdapterBinding ignored ->
                 throw new IllegalArgumentException("an AdapterBinding resolution derives its "
                     + "class from the D15-resolved source binding (kindOf(sourceBinding)); "

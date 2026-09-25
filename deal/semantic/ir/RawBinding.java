@@ -13,17 +13,18 @@ import java.util.Objects;
  * @param shape                    the closed binding shape tag ({@code loweredBody},
  *                                 {@code adapter}, {@code hostFunction},
  *                                 {@code hostFunctionValue}, {@code externalFunction},
- *                                 {@code intrinsicFunction})
+ *                                 {@code intrinsicFunction}, {@code dynamicFunctionValue})
  * @param modulePath               the owning module path (host/external); {@code null} otherwise
  * @param exportName               the export name (host/external); {@code null} otherwise
  * @param executionOwner           the raw execution owner (external); {@code null} otherwise
  * @param captureMode              the raw capture mode (adapter); {@code null} otherwise
  * @param descriptor               the raw declared descriptor text (host/external,
- *                                 intrinsic); {@code null} otherwise
+ *                                 intrinsic, dynamic); {@code null} otherwise
  * @param targetSignature          the raw adapter target signature text (adapter); {@code null} otherwise
- * @param materializingBoundaryOpId the materializing {@code HOST_TO_DEAL} boundary op id
- *                                 ({@code hostFunctionValue} — the producing host crossing);
- *                                 {@code null} otherwise
+ * @param materializingBoundaryOpId the materializing boundary/producing op id
+ *                                 ({@code hostFunctionValue} — the producing host crossing;
+ *                                 {@code dynamicFunctionValue} — the producing op of the
+ *                                 registered allocation identity); {@code null} otherwise
  * @param intrinsicKind            the raw intrinsic kind ({@code intrinsicFunction} —
  *                                 the closed {@code IntrinsicKind} member); {@code null}
  *                                 otherwise
