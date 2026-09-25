@@ -368,6 +368,16 @@ public final class LuaSemanticEmitter {
          */
         final Map<ClassId, ModuleId> hostClassModules = new LinkedHashMap<>();
         /**
+         * The declared extern-C classes of the compile's declaration
+         * surface by canonical class identity (ISSUE-0666; struct-plan
+         * F1): a C-struct class construction resolves its declaring module
+         * — the {@code __exportSurfaces} key whose loaded surface carries
+         * the class's {@code <C>_plan} entry — through this map, never from
+         * a dotted-path derivation. Empty outside the declaration-surface
+         * sessions.
+         */
+        final Map<ClassId, ModuleId> ffiClassModules = new LinkedHashMap<>();
+        /**
          * The compile's FFI emission input (the extern-C generated-module
          * metadata and the manifest-directory text): non-null exactly in
          * the FFI-capable production session, null in every other session
@@ -482,7 +492,7 @@ public final class LuaSemanticEmitter {
             }
             this.trace = trace;
             this.entryModule = true;
-            registerHostClasses();
+            registerDeclarationClasses();
             for (Map.Entry<ModuleId, LoweredModuleUnit> entry
                     : project.modules().entrySet()) {
                 registerUnit(entry.getValue(), tables.get(entry.getKey()),
@@ -508,25 +518,27 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * Registers the compile's declared host classes (ISSUE-0624; K10):
-         * one entry per host declaration module class export, keyed by the
-         * canonical class identity projected through the single
-         * {@link DescriptorService} producer — the same identity the
-         * {@code CLASS_NEW} payloads and the field-op payloads carry. An
-         * extern-C declaration class contributes no entry (its construction
-         * is the FFI child's).
+         * Registers the compile's declared declaration classes (ISSUE-0624
+         * K10 and ISSUE-0666; struct-plan F1): one entry per declaration
+         * module class export, keyed by the canonical class identity
+         * projected through the single {@link DescriptorService} producer —
+         * the same identity the {@code CLASS_NEW} payloads and the field-op
+         * payloads carry. A {@code HOST} declaration class resolves its
+         * declaring module through {@link #hostClassModules} (the loaded
+         * {@code <C>_defaults} entry's surface key), an {@code EXTERN_C}
+         * declaration class through {@link #ffiClassModules} (the loaded
+         * {@code <C>_plan} entry's surface key): one declaration kind per
+         * module, so every class identity lands in exactly one map.
          */
-        private void registerHostClasses() {
+        private void registerDeclarationClasses() {
             if (hostSurface == null) {
                 return;
             }
             for (ModuleId declarationModule : hostSurface.moduleIds()) {
                 HostDeclarationSurface.DeclarationFacts facts =
                     hostSurface.require(declarationModule);
-                if (facts.kind()
-                        != HostDeclarationSurface.DeclarationKind.HOST) {
-                    continue;
-                }
+                boolean externC = facts.kind()
+                    == HostDeclarationSurface.DeclarationKind.EXTERN_C;
                 for (Map.Entry<String, Type> export : facts.exports().entrySet()) {
                     if (!(export.getValue() instanceof Type.Class)) {
                         continue;
@@ -534,8 +546,13 @@ public final class LuaSemanticEmitter {
                     RuntimeDescriptor descriptor =
                         DescriptorService.describe(export.getValue());
                     if (descriptor instanceof RuntimeDescriptor.Class classDescriptor) {
-                        hostClassModules.put(classDescriptor.classId(),
-                            declarationModule);
+                        if (externC) {
+                            ffiClassModules.put(classDescriptor.classId(),
+                                declarationModule);
+                        } else {
+                            hostClassModules.put(classDescriptor.classId(),
+                                declarationModule);
+                        }
                     }
                 }
             }
@@ -544,6 +561,28 @@ public final class LuaSemanticEmitter {
         /** Whether one class identity is a declared host class of the compile. */
         private boolean isHostClass(ClassId classId) {
             return hostClassModules.containsKey(classId);
+        }
+
+        /**
+         * The emitted expression of one declared extern-C C-struct class's
+         * loaded {@code <C>_plan} entry (ISSUE-0666; struct-plan F1): the
+         * module's published surface entry — the module table
+         * {@code __rt.load_ffi} returned, keyed by the class's declaration
+         * name ({@code <C>_plan}, the runtime's own publication key) — read
+         * back by the construction site. An absent surface or entry is a
+         * fail-closed producer defect in the prelude helper, never a silent
+         * default.
+         */
+        private String ffiPlanExpr(ClassId classId) {
+            ModuleId declarationModule = ffiClassModules.get(classId);
+            if (declarationModule == null) {
+                throw new IllegalStateException("the class " + classId
+                    + " is not a declared extern-C class of the compile's"
+                    + " declaration surface (the class plan entry has exactly one"
+                    + " source — a producer defect)");
+            }
+            return "__ffiClassPlan(" + luaString(declarationModule.path())
+                + ", " + luaString(classId.name()) + ")";
         }
 
         /**
@@ -4053,6 +4092,15 @@ public final class LuaSemanticEmitter {
          * children; the instance is tagged with its canonical class
          * identity last. Zero return boundaries; a failure publishes no
          * partial instance.
+         *
+         * <p>The declaration-class owners replace the tail with their own
+         * construction entry: {@code BUILTIN_DEFAULTS} publishes the
+         * canonical Error carrier, {@code HOST_DEFAULTS} runs the
+         * deployed {@code __rt.class_} over the loaded
+         * {@code <C>_defaults} entry, and {@code FFI_PLAN} (ISSUE-0666)
+         * runs the runtime's four phases over the loaded
+         * {@code <C>_plan} entry — see
+         * {@link #emitClassNewFfiPlan}.</p>
          */
         private void emitClassNew(SemanticOp op) {
             KindPayload.ClassNewPayload payload =
@@ -4075,6 +4123,15 @@ public final class LuaSemanticEmitter {
                 // are never merged into a unit's own classLayouts.
                 layout = payload.layout();
             }
+            if (layout == null && payload.defaultOwner() == DefaultOwner.FFI_PLAN) {
+                // The extern-C declaration class's registered C-struct
+                // layout (ISSUE-0666; struct-plan F1/F2): the payload carries
+                // exactly the project lowering's registration-seed layout of
+                // the validated plan's ordered fields (the validator checks
+                // the equality against the seeds), and the declaration
+                // layouts are never merged into a unit's own classLayouts.
+                layout = payload.layout();
+            }
             if (layout == null) {
                 throw new IllegalStateException("CLASS_NEW " + op.opId() + " classId "
                     + payload.classId() + " has no layout in the resolution context "
@@ -4094,12 +4151,19 @@ public final class LuaSemanticEmitter {
                     // default children and no factory transfer, and its
                     // phases run through the loaded <C>_defaults entry.
                 }
-                case FFI_PLAN ->
-                    throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " carries defaultOwner " + payload.defaultOwner()
-                        + ": the extern-C C-struct construction is the FFI"
-                        + " child's and is not emitted here — a fail-closed"
-                        + " producer defect, never emitted");
+                case FFI_PLAN -> {
+                    // The extern-C C-struct construction (ISSUE-0666;
+                    // struct-plan F1 and the construction contract): the
+                    // provided fields' boundary children run first, then
+                    // the deterministic extra-key guard, then the runtime
+                    // entry over the loaded <C>_plan entry — the fixed
+                    // order of the decision, so the guard's E8007 is the
+                    // deterministic authority over the runtime's order-free
+                    // phase-1 pairs() iteration and no default runs before
+                    // it.
+                    emitClassNewFfiPlan(op, payload, layout);
+                    return;
+                }
                 case BUILTIN_DEFAULTS -> {
                     // The builtin Error construction (K13 items 2-4): the
                     // builtin defaults are compiler constants, so no default
@@ -4114,19 +4178,7 @@ public final class LuaSemanticEmitter {
             // K-D4 step 3: extra-key rejection first in provided-source
             // order — after default application, before any provided-field
             // application or field validation.
-            for (KindPayload.ProvidedField field : payload.providedFields()) {
-                if (fieldOf(layout, field.name()) == null) {
-                    out.append("__eT = __failExpr(")
-                        .append(luaString("E8007")).append(", ")
-                        .append(luaString("extra field '" + field.name()
-                            + "' in class '" + payload.classId().text() + "'"))
-                        .append(", ").append(luaString(originOf(op)))
-                        .append(", nil, nil)\n");
-                    emitFailureEvent(op.opId(), op.kind().name(), op,
-                        "__errtext(__eT)");
-                    out.append("error(__eT, 0)\n");
-                }
-            }
+            emitExtraKeyRejection(op, payload, layout);
             if (payload.defaultOwner() == DefaultOwner.BUILTIN_DEFAULTS) {
                 emitClassNewBuiltinDefaults(op, payload, layout);
                 return;
@@ -4191,6 +4243,32 @@ public final class LuaSemanticEmitter {
             out.append(slot((ValueId) op.result())).append(" = __instT\n");
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * K-D4 step 3: the extra-key rejection in provided-source order —
+         * a provided name absent from the layout raises E8007 {@code extra
+         * field '<field>' in class '<identity>'} at the op's own origin,
+         * before any provided-field application or field validation runs,
+         * and names the first offending name in provided-source order. The
+         * FFI construction runs the same guard after its provided-field
+         * boundary children (struct-plan F1's fixed order).
+         */
+        private void emitExtraKeyRejection(SemanticOp op,
+                KindPayload.ClassNewPayload payload, ClassLayout layout) {
+            for (KindPayload.ProvidedField field : payload.providedFields()) {
+                if (fieldOf(layout, field.name()) == null) {
+                    out.append("__eT = __failExpr(")
+                        .append(luaString("E8007")).append(", ")
+                        .append(luaString("extra field '" + field.name()
+                            + "' in class '" + payload.classId().text() + "'"))
+                        .append(", ").append(luaString(originOf(op)))
+                        .append(", nil, nil)\n");
+                    emitFailureEvent(op.opId(), op.kind().name(), op,
+                        "__errtext(__eT)");
+                    out.append("error(__eT, 0)\n");
+                }
+            }
         }
 
         /**
@@ -4364,6 +4442,140 @@ public final class LuaSemanticEmitter {
             String target = slot((ValueId) op.result());
             out.append(target).append(" = __instT\n");
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The extern-C C-struct class construction (ISSUE-0666;
+         * {@code luajit-ffi-struct-plan-construction-and-oracle-projection}
+         * F1 and the C-struct construction contract; the loaded plan is the
+         * single default authority): the fixed order
+         *
+         * <ol>
+         *   <li>the provided fields in declaration order — each
+         *       {@code CLASS_LITERAL_FIELD} boundary child runs its
+         *       descriptor-kind check and the checked value is written into
+         *       the provided table under the field name; a class-typed
+         *       field value is projected to the runtime representation first
+         *       (the load/crossing page F4's chunk-to-wrapper direction, the
+         *       same helper the call-site cells use);</li>
+         *   <li>the deterministic extra-key guard in provided-source order —
+         *       E8007 at the literal origin before any default runs, naming
+         *       the first extra name, because the runtime entry's phase-1
+         *       {@code pairs()} iteration is order-free and the artifact's
+         *       guard is the deterministic authority;</li>
+         *   <li>{@code __rt.class_plan_(<identity text>, <loaded plan entry>,
+         *       <provided table>, <literal span triplet>)} — the runtime's
+         *       four phases over the loaded {@code <C>_plan} entry: the
+         *       provided copy, the omitted fields' deferred evaluators
+         *       exactly once per attempt in class source order, the
+         *       per-field descriptor validation (E8001/E8004) at the literal
+         *       origin, and the identity tag and publication;</li>
+         *   <li>the wrapper-to-chunk projection of the constructed instance
+         *       into the op's slot (the same F4 helper pair), then the
+         *       op's SUCCESS terminal.</li>
+         * </ol>
+         *
+         * <p>No {@code CLASS_DEFAULT} child, no in-project factory, and no
+         * default expression are emitted: the plan's generated evaluators
+         * are the only default authority and they run inside the runtime
+         * entry. A failed construction publishes no instance — including
+         * the boundary children's own failures, which raise before the entry
+         * call and before the slot write.</p>
+         */
+        private void emitClassNewFfiPlan(SemanticOp op,
+                KindPayload.ClassNewPayload payload, ClassLayout layout) {
+            if (ffiClassModules.get(payload.classId()) == null) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner FFI_PLAN for " + payload.classId()
+                    + ", which is not a declared extern-C class of the compile's"
+                    + " declaration surface (the class plan entry has exactly one"
+                    + " source — a producer defect)");
+            }
+            if (payload.classFactoryRef() != null
+                    || !payload.classDefaultOpIds().isEmpty()) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " carries defaultOwner FFI_PLAN with a non-null factory"
+                    + " ref or a non-empty default child list: the C-struct"
+                    + " construction carries neither (the loaded plan's"
+                    + " evaluators are the single default authority — a"
+                    + " producer defect)");
+            }
+            // (1) The provided fields in declaration order: the boundary
+            // child's descriptor-kind check over the provided value's
+            // completed slot, then the admitted value into the provided
+            // table (a class-typed position projects to the runtime
+            // representation the loaded matcher validates).
+            out.append("__provT = {}\n");
+            for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                SemanticOp boundary = opsById.get(entry.boundaryOpId());
+                if (boundary == null) {
+                    throw new IllegalStateException("CLASS_NEW " + op.opId()
+                        + " field boundary " + entry.boundaryOpId() + " does not "
+                        + "resolve (producer defect)");
+                }
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                String inputExpr = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                String checked = "__fpcT" + boundary.opId().id();
+                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
+                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ")
+                    .append(luaString(staticKind(boundaryPayload.descriptor())))
+                    .append(", ").append(inputExpr).append(")\n");
+                out.append("if not __okB then\n");
+                out.append("  ").append(checked).append(".o = ")
+                    .append(luaString(originOf(boundary))).append("\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(" + checked + ")");
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "__errtext(" + checked + ")");
+                out.append("  error(").append(checked).append(", 0)\n");
+                out.append("end\n");
+                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                out.append("__provT[").append(luaString(entry.field()))
+                    .append("] = ")
+                    .append(ffiClassFieldProjection(boundaryPayload.descriptor(),
+                        checked))
+                    .append("\n");
+            }
+            // (2) The deterministic extra-key guard.
+            emitExtraKeyRejection(op, payload, layout);
+            // (3) The runtime's four phases over the loaded plan entry.
+            out.append("__okB, __instT = pcall(__rt.class_plan_, ")
+                .append(luaString(payload.classId().text())).append(", ")
+                .append(ffiPlanExpr(payload.classId())).append(", __provT, ")
+                .append(classLiteralOriginArgs(op)).append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  __eT = __hostError(__instT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__eT)");
+            out.append("  error(__eT, 0)\n");
+            out.append("end\n");
+            // (4) The wrapper-to-chunk projection of the constructed
+            // instance, then the publication.
+            String target = slot((ValueId) op.result());
+            out.append(target).append(" = __hostDealProject(")
+                .append(luaString(payload.classId().text())).append(", __instT, ")
+                .append(luaString(originOf(op))).append(")\n");
+            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The provided-table expression of one C-struct field: a
+         * class-typed position (the declared descriptor is a class
+         * identity) is projected from the chunk representation to the
+         * runtime representation the loaded plan's phase-3 matcher
+         * validates (the load/crossing page F4's {@code __hostClassProject})
+         * and every other position passes its checked value unchanged.
+         */
+        private String ffiClassFieldProjection(RuntimeDescriptor descriptor,
+                String checked) {
+            if (descriptor instanceof RuntimeDescriptor.Class) {
+                return "__hostClassProject(" + luaString(descriptorText(descriptor))
+                    + ", " + checked + ")";
+            }
+            return checked;
         }
 
         /**
@@ -7453,6 +7665,26 @@ local function __hostClassDefaults(module, class)
       .." every construction in dependency order — a producer defect)", 0)
   end
   return surface[class.."_defaults"]
+end
+-- The loaded <C>_plan entry of one declared extern-C C-struct class
+-- (ISSUE-0666; struct-plan F1): the declaring module's published surface
+-- is the loaded module table the one production load returned
+-- (__rt.load_ffi, which retains the validated plan per class under the
+-- runtime's own <C>_plan key), and the construction calls
+-- __rt.class_plan_ over that entry. An absent surface (the declaring
+-- module's MODULE_IMPORT load has not run) is a fail-closed producer
+-- defect: the load precedes every construction in dependency order. An
+-- absent entry stays the runtime entry's own E8001 plan-shape failure —
+-- the loaded plan is the only construction authority, never a silent
+-- default.
+local function __ffiClassPlan(module, class)
+  local surface = __exportSurfaces[module]
+  if type(surface) ~= "table" then
+    error("the extern-C module '"..module.."' has no published surface before"
+      .." the construction of '"..class.."' (the MODULE_IMPORT load precedes"
+      .." every construction in dependency order — a producer defect)", 0)
+  end
+  return surface[class.."_plan"]
 end
 """;
     private static final String PRELUDE = """

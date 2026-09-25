@@ -848,27 +848,45 @@ public class RuntimeConstructionPhasesTest {
                 return;
             }
 
-            // The extern-C admission slice (ISSUE-0662): the same fixture
-            // through the release-owned production invocation is admitted
-            // (the extern-C import no longer trips the host-kind guard) and
-            // still fails closed with E6005 SHARED_EMITTER_COVERAGE on the
-            // declaration-class construction (the CLASS_NEW over the
-            // extern-C class resolves no layout before the construction
-            // child lands), staging nothing.
+            // The struct-plan slice (ISSUE-0666): the same fixture through
+            // the release-owned production invocation is admitted and
+            // constructs through the loaded <C>_plan entry — the artifact
+            // stages, and its per-attempt native counts hold.
             Path prodOut = root.resolve("build/prod-lua");
             RunResult prod = runProductionCli(new String[]{
                 "compile",
                 root.resolve("src/main.deal").toAbsolutePath().toString(),
                 "--backend", "lua", "--output", prodOut.toString()});
-            check(prod.exitCode() != 0
-                    && prod.output().contains("E6005")
-                    && prod.output().contains("CONSTRUCTION_COHERENCE"),
-                "the release-owned production invocation fails the extern-C"
-                    + " project closed with E6005 CONSTRUCTION_COHERENCE (the"
-                    + " declaration-class construction is the construction"
-                    + " child's): " + prod.output());
-            check(!Files.exists(prodOut),
-                "the production failure stages no artifact under " + prodOut);
+            check(prod.exitCode() == 0,
+                "the release-owned production invocation compiles the"
+                    + " extern-C C-struct project: " + prod.output());
+            check(Files.exists(prodOut.resolve("main.lua")),
+                "the production artifact is staged under " + prodOut);
+            if (prod.exitCode() == 0 && Files.exists(prodOut.resolve("main.lua"))) {
+                String artifact = Files.readString(prodOut.resolve("main.lua"),
+                    StandardCharsets.UTF_8);
+                int constructionAt = artifact.indexOf("pcall(__rt.class_plan_, ");
+                int projectionAt = artifact.indexOf("__hostDealProject(",
+                    constructionAt);
+                int providedAt = constructionAt < 0 ? -1
+                    : artifact.lastIndexOf("__provT = {}", constructionAt);
+                check(constructionAt > 0 && projectionAt > constructionAt
+                        && artifact.contains("__ffiClassPlan(")
+                        && artifact.contains("evaluator = function() return "),
+                    "the production artifact constructs through the loaded"
+                        + " plan entry with its generated evaluators");
+                check(providedAt > 0
+                        && !artifact.substring(providedAt, projectionAt)
+                            .contains("CLASS_DEFAULT"),
+                    "the production artifact emits no CLASS_DEFAULT child for"
+                        + " the C-struct construction");
+                RunResult prodRun = runProcess(prodOut, "luajit", "main.lua");
+                check(prodRun.exitCode() == 0,
+                    "the production artifact's C-struct repeated-construction"
+                        + " drive exits 0 (zero native calls at load, one"
+                        + " evaluator per omitted attempt, provided-field"
+                        + " suppression): " + prodRun.output());
+            }
 
             RunResult run = runProcess(outDir, "luajit", "main.lua");
             check(run.exitCode() == 0,

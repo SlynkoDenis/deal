@@ -1460,10 +1460,18 @@ public class ProjectLoweringTest {
         }
     }
 
-    private static void testExternCDeclarationClassFailClosed() throws Exception {
+    /**
+     * The extern-C declaration class construction (ISSUE-0666;
+     * {@code luajit-ffi-struct-plan-construction-and-oracle-projection}
+     * F1/F2): the literal resolves to the seed and lowers
+     * {@code CLASS_NEW(FFI_PLAN)} through the one project entry with zero
+     * diagnostics — the retargeted pin of the pre-slice fail-closed
+     * acceptance.
+     */
+    private static void testExternCDeclarationClassConstruction() throws Exception {
         System.out.println("-- an extern-C declaration class literal resolves to "
-            + "the FFI_PLAN seed and fails closed at the class-construction "
-            + "validator --");
+            + "the FFI_PLAN seed and lowers CLASS_NEW(FFI_PLAN) through the one "
+            + "project entry --");
         RealProject project = compileProject(EXTERN_C_CLASS_APP_SOURCE,
             Map.of("src/native.d.deal", NATIVE_DECLARATION),
             Map.of(NATIVE_SPECIFIER, "src/native.d.deal"));
@@ -1476,8 +1484,90 @@ public class ProjectLoweringTest {
                         == HostDeclarationSurface.DeclarationKind.EXTERN_C,
                 "the declaration surface classifies the module extern-C: "
                     + project.surface().moduleIds());
-            checkFailsClosed(lower(project, invocation()),
-                "the extern-C declaration class literal", NATIVE_VEC2.text());
+            SemanticLowerer.ProjectLoweringResult result = lower(project, invocation());
+            check(!result.hasErrors() && result.project() != null,
+                "the extern-C declaration class literal lowers through the one "
+                    + "project entry with zero diagnostics: " + result.diagnostics());
+            boolean deferred = false;
+            for (CompilerDiagnostic diagnostic : result.diagnostics()) {
+                if (diagnostic.message().contains("RETAINED_ABI_DEFERRED")) {
+                    deferred = true;
+                }
+            }
+            check(!deferred,
+                "checker-valid extern-C C-struct input reports zero "
+                    + "RETAINED_ABI_DEFERRED");
+            if (result.project() == null) {
+                return;
+            }
+            check(result.seeds().registrationFor(NATIVE_VEC2) != null
+                    && result.seeds().registrationFor(NATIVE_VEC2).owner()
+                        == DefaultOwner.FFI_PLAN,
+                "the declared extern-C class resolves in the seeds under "
+                    + "FFI_PLAN");
+            LoweredModuleUnit app = result.project().modules().get(APP);
+            check(app != null, "the app unit is in the closure");
+            if (app == null) {
+                return;
+            }
+            SemanticOp classNew = null;
+            for (SemanticOp op : app.ops()) {
+                if (op.kind() == SemanticOpKind.CLASS_NEW) {
+                    classNew = op;
+                }
+            }
+            check(classNew != null, "the unit carries the C-struct CLASS_NEW");
+            if (classNew == null) {
+                return;
+            }
+            KindPayload.ClassNewPayload payload =
+                (KindPayload.ClassNewPayload) classNew.payload();
+            checkEq(NATIVE_VEC2, payload.classId(),
+                "the CLASS_NEW classId is the declared extern-C class identity");
+            checkEq(DefaultOwner.FFI_PLAN, payload.defaultOwner(),
+                "the CLASS_NEW defaultOwner is FFI_PLAN");
+            check(payload.classFactoryRef() == null,
+                "the C-struct construction carries the null factory ref");
+            check(payload.classDefaultOpIds().isEmpty(),
+                "the C-struct construction carries empty classDefaultOpIds");
+            checkEq(result.seeds().registrationFor(NATIVE_VEC2).layout(),
+                payload.layout(),
+                "the payload's layout is the registered C-struct layout");
+            check(payload.layout().fields().stream().allMatch(field ->
+                    field.required()
+                        && field.defaultOwner() == DefaultOwner.FFI_PLAN),
+                "every registered struct field is required-present under "
+                    + "FFI_PLAN");
+            checkEq(List.of("x", "y"),
+                payload.fieldBoundaries().stream()
+                    .map(KindPayload.FieldBoundary::field).toList(),
+                "the field boundaries are the provided fields in literal order");
+            check(payload.fieldBoundaries().stream().allMatch(entry ->
+                    entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD),
+                "every field boundary is a CLASS_LITERAL_FIELD (no "
+                    + "CLASS_DEFAULT_FIELD: the omitted fields are the loaded "
+                    + "plan's)");
+            check(!app.classLayouts().containsKey(NATIVE_VEC2),
+                "the seed layout is never merged into the unit's own "
+                    + "classLayouts");
+
+            // The composed per-unit chain re-run with the seeds: the unified
+            // unit passes every validator (the class arm included).
+            Optional<CompilerDiagnostic> failure =
+                SemanticLowerer.validateProjectUnit(app, result.tableOf(APP),
+                    new SemanticIrValidator.ComparisonFacts(
+                        project.index().interfaceIndexDigest(),
+                        SemanticProfile.DEAL_V1_2_INT32,
+                        invocation().capabilityRegistryHash()),
+                    deal.semantic.BindingsProductionValidator.PinnedWriteFacts
+                        .empty(),
+                    result.registryOf(APP),
+                    new JsonDefaultChildTable(Map.of()),
+                    project.index().modules().get(APP), Map.of(),
+                    result.seeds().registrations());
+            check(failure.isEmpty(),
+                "the composed chain accepts the C-struct construction unit: "
+                    + failure.map(CompilerDiagnostic::message).orElse(""));
         } finally {
             deleteRecursively(project.root());
         }
@@ -1800,7 +1890,7 @@ public class ProjectLoweringTest {
         testInconsistentFactSeed();
         testDeclarationClassConstruction();
         testBuiltinErrorConstruction();
-        testExternCDeclarationClassFailClosed();
+        testExternCDeclarationClassConstruction();
         testCorruptedUnitSeed();
         testMissingModuleSeed();
         testNonV12InvocationSeed();

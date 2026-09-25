@@ -98,9 +98,16 @@ import java.util.Set;
  *       the payload layout is exactly the registered declaration
  *       layout, the factory ref is null, the default-op list is empty,
  *       and the boundary entries are exactly the provided fields'
- *       {@code CLASS_LITERAL_FIELD} children; the extern-C
- *       {@code FFI_PLAN} owner is the FFI child's and stays a
- *       fail-closed producer defect here); every provided
+ *       {@code CLASS_LITERAL_FIELD} children; and the extern-C
+ *       declaration class construction is the {@code FFI_PLAN} shape of
+ *       ISSUE-0666 over the same seed-layout resolution — the class
+ *       resolves in the seeds with the {@code FFI_PLAN} owner member,
+ *       the payload layout is exactly the registered C-struct layout,
+ *       the factory ref is null, the default-op list is empty, and the
+ *       boundary entries are exactly the provided fields'
+ *       {@code CLASS_LITERAL_FIELD} children with no
+ *       {@code CLASS_DEFAULT_FIELD} — the omitted fields' evaluators are
+ *       the loaded plan entry's); every provided
  *       name is a declared field; {@code fieldBoundaries} = exactly one
  *       {@code CLASS_LITERAL_FIELD} per provided field plus one
  *       {@code CLASS_DEFAULT_FIELD} per omitted required-present
@@ -919,16 +926,73 @@ public final class ClassConstructionValidator {
                     }
                 }
                 case FFI_PLAN -> {
-                    // The extern-C declaration class construction is the FFI
-                    // child's (F6); until it lands every consumer rejects it
-                    // as a fail-closed producer defect — no default
-                    // evaluation and no emission.
-                    return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
-                        + " carries defaultOwner FFI_PLAN for class "
-                        + payload.classId() + ": the extern-C"
-                        + " C-struct construction is the FFI child's — a"
-                        + " fail-closed producer defect, never executed or"
-                        + " default-evaluated");
+                    // The extern-C declaration class construction (ISSUE-0666;
+                    // {@code luajit-ffi-struct-plan-construction-and-oracle-projection}
+                    // F2 and the C-struct construction contract): the owner is
+                    // admissible for exactly a declared extern-C C_STRUCT class
+                    // of the project's class registration seeds, over exactly
+                    // the registered seed layout, with the null factory ref,
+                    // the empty default-op list (the omitted fields' values are
+                    // the loaded {@code <C>_plan} entry's deferred evaluators,
+                    // never in-project default expressions), and exactly one
+                    // {@code CLASS_LITERAL_FIELD} boundary per provided field.
+                    // The omitted fields get no boundary and no default child
+                    // — the shared tail's {@code expectedDefaults} stays empty
+                    // for this owner — so the pinned boundary list is exactly
+                    // the provided fields in declaration order.
+                    ClassRegistrationSeeds.ClassRegistration registration =
+                        declarationClasses.get(payload.classId());
+                    if (registration == null
+                            || registration.owner() != DefaultOwner.FFI_PLAN) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries defaultOwner FFI_PLAN for class "
+                            + payload.classId() + ": the plan owner is"
+                            + " admissible only for a declared extern-C C-struct"
+                            + " class of the compilation's class registration"
+                            + " seeds — an unregistered class under FFI_PLAN is a"
+                            + " fail-closed producer defect");
+                    }
+                    if (own) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " of same-module class " + payload.classId()
+                            + " carries defaultOwner FFI_PLAN: a same-module"
+                            + " class never carries a declaration-class owner");
+                    }
+                    if (!registration.layout().equals(payload.layout())) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries a layout that differs from the registered"
+                            + " extern-C declaration layout of " + payload.classId()
+                            + " (the validated plan's ordered fields in class"
+                            + " source order): a foreign layout is a fail-closed"
+                            + " producer defect");
+                    }
+                    if (payload.classFactoryRef() != null) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " carries classFactoryRef " + payload.classFactoryRef()
+                            + " under FFI_PLAN: the C-struct construction carries"
+                            + " a null factory ref (the loaded plan is the single"
+                            + " default authority, never a factory transfer)");
+                    }
+                    if (!payload.classDefaultOpIds().isEmpty()) {
+                        return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW " + op.opId()
+                            + " (FFI_PLAN) lists " + payload.classDefaultOpIds()
+                            + ": the C-struct construction carries an empty child"
+                            + " list (the omitted fields' evaluators are the"
+                            + " loaded {@code <C>_plan} entry's — no in-project"
+                            + " default expression is evaluated)");
+                    }
+                    for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
+                        if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD) {
+                            return fail(CONSTRUCTION_COHERENCE, "CLASS_NEW "
+                                + op.opId() + " field-boundary entry for '"
+                                + entry.field() + "' carries kind " + entry.kind()
+                                + ", not CLASS_LITERAL_FIELD: the C-struct"
+                                + " construction carries exactly one"
+                                + " CLASS_LITERAL_FIELD boundary per provided"
+                                + " field and no CLASS_DEFAULT_FIELD (the omitted"
+                                + " fields are the loaded plan's defaults)");
+                        }
+                    }
                 }
                 case BUILTIN_DEFAULTS -> {
                     // The builtin Error construction (ISSUE-0619; K13 items

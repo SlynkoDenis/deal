@@ -935,10 +935,14 @@ public sealed interface KindPayload
      * the loaded {@code <C>_defaults} entry (ISSUE-0624): provided fields
      * in literal order, one {@code CLASS_LITERAL_FIELD} boundary per
      * provided field in declaration order, the null factory ref, and the
-     * empty default-op list. {@code FFI_PLAN} is the FFI child's, and
-     * {@code RETAINED_ABI} is never produced on the production path; a
-     * payload carrying an unrealized owner is rejected fail-closed by the
-     * validator and by every emitter/oracle owner arm.</p>
+     * empty default-op list. {@code FFI_PLAN} is the extern-C C-struct
+     * construction over the loaded {@code <C>_plan} entry (ISSUE-0666):
+     * the same provided-field boundaries, the null factory ref, the empty
+     * default-op list, and no {@code CLASS_DEFAULT_FIELD} boundary — the
+     * omitted fields' evaluators are the loaded plan's. {@code RETAINED_ABI}
+     * is never produced on the production path; a payload carrying an
+     * unrealized owner is rejected fail-closed by the validator and by
+     * every emitter/oracle owner arm.</p>
      */
     record ClassNewPayload(ClassId classId, ClassLayout layout, List<ProvidedField> providedFields,
                            DefaultOwner defaultOwner, List<OpId> classDefaultOpIds,

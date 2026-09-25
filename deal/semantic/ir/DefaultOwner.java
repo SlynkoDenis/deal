@@ -31,8 +31,9 @@ package deal.semantic.ir;
  * declaration class construction (ISSUE-0624),
  * {@code BUILTIN_DEFAULTS} by the builtin {@code Error} construction
  * (ISSUE-0619), and {@code FFI_PLAN} by the extern-C C-struct
- * construction (the FFI child) — until it lands that owner stays a
- * fail-closed consumer rejection. {@code RETAINED_ABI} keeps its own
+ * construction (ISSUE-0666: the provided fields' boundaries, the
+ * deterministic extra-key guard, and the runtime's four phases over the
+ * loaded {@code <C>_plan} entry). {@code RETAINED_ABI} keeps its own
  * never-produced rejection (the retained route does not exist on the
  * production path).</p>
  */
@@ -59,8 +60,14 @@ public enum DefaultOwner {
 
     /**
      * An extern-C declaration class's defaults are the loaded module's
-     * validated {@code <C>_plan} entry (registration fact; the
-     * C-struct-construction execution is the FFI child's, not realized yet).
+     * validated {@code <C>_plan} entry (ISSUE-0666; realized by the
+     * C-struct construction: the provided fields cross their
+     * {@code CLASS_LITERAL_FIELD} boundaries in declaration order, the
+     * deterministic extra-key guard raises the E8007 projection at the
+     * literal origin, and {@code __rt.class_plan_} runs the plan's phase-1
+     * copy, its omitted fields' deferred evaluators exactly once per
+     * attempt in class source order, its per-field descriptor validation,
+     * and its identity tag and publication).
      */
     FFI_PLAN,
 

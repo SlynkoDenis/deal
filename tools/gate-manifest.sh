@@ -964,4 +964,37 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # position and in the direct-call companion; and an async extern-C
   # declaration stays a compile-time E7002 rejection.
   'fg|=== Running FFI Value-Position Read Invocation Tests (ISSUE-0665) ===|java -ea -cp build deal.test.FfiValueReadInvocationTest'
+  # ISSUE-0666 registration: the C-struct construction site and the
+  # seed-layout validator admission (luajit-ffi-struct-plan-construction-
+  # and-oracle-projection F1/F2/F3; luajit-ffi-shared-emission-and-jvm-
+  # rejection F6; semantic-ir-construct-coverage-cutover K9 item 3;
+  # sequencing step 5): ffi/019-ffi-struct-copy-isolation constructs
+  # native.Pair through the loaded Pair_plan entry, compiles through the
+  # production arm with the corpus's production FFI metadata, and executes
+  # under luajit with the sidecar-pinned transcript (the artifact carries
+  # the __rt.class_plan_ call over the export-surface registry's plan entry
+  # with the literal's span triplet, the CLASS_LITERAL_FIELD boundary
+  # children in declaration order, the wrapper-to-chunk projection, and no
+  # CLASS_DEFAULT child, no in-project factory, and no ABI conversion
+  # text); the lowered and emitted FFI_PLAN shape over the seed layout
+  # (null factory ref, empty default-op list, the provided-field
+  # boundaries, and zero RETAINED_ABI_DEFERRED); the evaluator-once drive
+  # (a focused declaration whose struct fields carry native-counting
+  # defaults: zero evaluator invocations at load, exactly one evaluator per
+  # omitted field per attempt in class source order, and provided-field
+  # suppression) through the production artifact; the extra-key E8007 drive
+  # (a doctored CLASS_NEW(FFI_PLAN) payload with two extra provided names
+  # fails with exactly one E8007 naming the first provided-source extra at
+  # the literal origin, before any default, with the guard preceding the
+  # runtime entry call and the native counter proving that no evaluator ran
+  # for the failed attempts); the validator deviation battery (the
+  # seed-layout input admits exactly the realized shape and rejects the
+  # unresolvable-layout pre-change outcome, a non-seed layout, a non-null
+  # factory ref, a non-empty default-op list, a CLASS_DEFAULT_FIELD
+  # boundary, a missing provided-field boundary, a wrong boundary order,
+  # and the HOST_DEFAULTS owner over an extern-C class with
+  # CONSTRUCTION_COHERENCE); and the JVM arm's fail-closed FFI_PLAN
+  # disposition (the production project entry rejects the extern-C closure
+  # and the direct unit assertion keeps the owner defect).
+  'fg|=== Running FFI Struct Construction Tests (ISSUE-0666) ===|java -ea -cp build deal.test.FfiStructConstructionTest'
 )
