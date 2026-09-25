@@ -942,4 +942,26 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # corpus's LuaJIT FFI sidecars cover exactly the closed six FFI_* codes
   # with their pinned import-statement/call-expression origins.
   'fg|=== Running FFI Invalid String / Six-Code Completion Tests (ISSUE-0664) ===|java -ea -cp build deal.test.FfiSixCodeCompletionTest'
+
+  # ISSUE-0665 registration: the extern-C value-position read drive
+  # (luajit-ffi-load-emission-and-typed-crossings F5 and the FFI typed
+  # call and value-read contract; luajit-ffi-shared-emission-and-jvm-
+  # rejection F1/F3/F5; semantic-ir-construct-coverage-cutover K2;
+  # sequencing step 4): the lowered read carries exactly one EXPORT_READ
+  # per source occurrence with exactly one
+  # HostFunction(candidate.native, export, descriptor) registration keyed
+  # by the read result's allocation identity, no CallCallee.Dynamic and no
+  # HostFunctionValue, and the static CALL(INDIRECT) consumes exactly that
+  # registration with the direct CALL(HOST)'s cells; the corpus scalar
+  # exports (ffi_add/ffi_half/ffi_not/ffi_echo/ffi_identity_int/ffi_noop)
+  # execute through the production artifact under luajit with the pinned
+  # runtime-ok transcript and through the oracle with the same calls and
+  # outcomes, the read publishing the loaded surface entry the emitted
+  # load_ffi prelude (T1) installs and the invocation resolving that same
+  # entry (a spy observes exactly the one call; a torn load fails loudly);
+  # a failing export (ffi_null_string, ffi_invalid_utf8) keeps the corpus
+  # 022/023 pinned code and message at its call-expression origin in value
+  # position and in the direct-call companion; and an async extern-C
+  # declaration stays a compile-time E7002 rejection.
+  'fg|=== Running FFI Value-Position Read Invocation Tests (ISSUE-0665) ===|java -ea -cp build deal.test.FfiValueReadInvocationTest'
 )
