@@ -1,5 +1,6 @@
 package deal.codegen.lua;
 
+import deal.ffi.FfiGeneratedModule;
 import deal.semantic.DescriptorService;
 import deal.semantic.HostDeclarationSurface;
 import deal.semantic.StdlibFunctionCatalog;
@@ -206,13 +207,63 @@ public final class LuaSemanticEmitter {
                                                Map<ModuleId, StructuredBodyTable> tables,
                                                Map<ModuleId, ClassFactoryRegistry> registries,
                                                HostDeclarationSurface declarationSurface) {
+        return emitProductionProject(project, tables, registries,
+            declarationSurface, null);
+    }
+
+    /**
+     * Emits the FFI-capable production LuaJIT project artifact for the
+     * validated executable closure (the extern-C admission slice): the
+     * landed production project session plus the compile's FFI emission
+     * input (the validated extern-C generated-module metadata and the
+     * manifest-directory text). A session carrying the FFI emission
+     * input emits, at the owning {@code MODULE_IMPORT} of an extern-C
+     * declaration import, the landed generator's literals — the
+     * provider bindings re-pointed at the chunk's export-surface
+     * registry (never a {@code require} line), the bindings literal,
+     * and the {@code __exportSurfaces[<module>] = ... __rt.load_ffi(...)}
+     * registry entry with the import statement's span triplet — so the
+     * loaded module table becomes the import's namespace value. A
+     * {@code MANIFEST_RELATIVE_PATH} loader text resolves against the
+     * input's manifest directory through the pinned prefix-resolved
+     * conversion. An extern-C import without generated metadata, an
+     * unserializable generated module, and a provider module outside
+     * the compile's declaration surface each fail closed (an
+     * {@link IllegalStateException} the production arm maps to E6005
+     * {@code SHARED_EMITTER_COVERAGE} and stages nothing). A session
+     * without the FFI emission input keeps the landed arm: an extern-C
+     * declaration import emits its {@code MODULE_IMPORT} op with no
+     * load, its loaded surface being the trace session's scenario seam.
+     *
+     * <p>No evaluator runs and no library opens during emission: the
+     * generated-module contract carries compile-time metadata only, and
+     * the emitted literals are byte-deterministic.</p>
+     *
+     * @param project            the validated executable closure; non-null
+     * @param tables             each module's block-membership table;
+     *                           non-null
+     * @param registries         each module's class-factory registry;
+     *                           non-null
+     * @param declarationSurface the declaration surface covering every
+     *                           declaration import of the compile;
+     *                           non-null
+     * @param ffiEmissionInput   the compile's FFI emission input, or
+     *                           {@code null} for a session without an
+     *                           FFI emission input
+     * @return the production project artifact source text
+     */
+    public static String emitProductionProject(ExecutableLoweredProject project,
+                                               Map<ModuleId, StructuredBodyTable> tables,
+                                               Map<ModuleId, ClassFactoryRegistry> registries,
+                                               HostDeclarationSurface declarationSurface,
+                                               FfiEmissionInput ffiEmissionInput) {
         Objects.requireNonNull(project, "project must not be null");
         Objects.requireNonNull(tables, "tables must not be null");
         Objects.requireNonNull(registries, "registries must not be null");
         Objects.requireNonNull(declarationSurface,
             "declarationSurface must not be null");
         return new Session(project, tables, registries, false,
-            declarationSurface).emit();
+            declarationSurface, ffiEmissionInput).emit();
     }
 
     /**
@@ -316,6 +367,16 @@ public final class LuaSemanticEmitter {
          * sessions.
          */
         final Map<ClassId, ModuleId> hostClassModules = new LinkedHashMap<>();
+        /**
+         * The compile's FFI emission input (the extern-C generated-module
+         * metadata and the manifest-directory text): non-null exactly in
+         * the FFI-capable production session, null in every other session
+         * (the trace/unit entries and the landed production entry, whose
+         * extern-C import keeps the landed no-op arm).
+         */
+        final FfiEmissionInput ffiInput;
+        /** The per-session ordinal of the emitted FFI import locals. */
+        int ffiImportCounter;
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
         final boolean entryModule;
         /** Ops the block walk skips (the entry delegation of a non-entry module). */
@@ -343,6 +404,7 @@ public final class LuaSemanticEmitter {
             this.trace = trace;
             this.projectSession = false;
             this.hostSurface = null;
+            this.ffiInput = null;
             this.entryModule = entryModule;
             registerUnit(unit, table, new ClassFactoryRegistry(Map.of()));
             if (!entryModule) {
@@ -385,7 +447,32 @@ public final class LuaSemanticEmitter {
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
                 HostDeclarationSurface hostSurface) {
+            this(project, tables, registries, trace, hostSurface, null);
+        }
+
+        /**
+         * The FFI-capable production project session: the combined closure
+         * plus the compile's host declaration surface (the declared-map
+         * source of the {@code MODULE_IMPORT(HOST)} load and the extern-C
+         * declaration-kind source) and the compile's FFI emission input
+         * (the extern-C generated-module metadata of the emitted
+         * {@code load_ffi} prelude and the manifest-directory text
+         * resolving a manifest-relative loader text). A null FFI input is
+         * a session without an FFI emission input; a non-null input
+         * requires the declaration surface.
+         */
+        Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
+                Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
+                HostDeclarationSurface hostSurface, FfiEmissionInput ffiInput) {
+            if (ffiInput != null && hostSurface == null) {
+                throw new IllegalArgumentException(
+                    "an FFI emission input requires the compile's host"
+                        + " declaration surface (the extern-C declaration"
+                        + " kind and the provider coverage both resolve through"
+                        + " it — a producer defect)");
+            }
             this.hostSurface = hostSurface;
+            this.ffiInput = ffiInput;
             this.projectSession = true;
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
@@ -5860,8 +5947,22 @@ public final class LuaSemanticEmitter {
          * mismatch, missing or non-table {@code <C>_defaults}, a
          * non-table module result) fail the importing module's init at
          * the emitted import-statement origin with the host-module-abi
-         * texts. {@code COMPILED}/{@code STDLIB} imports keep the landed
-         * no-op realization.
+         * texts.
+         *
+         * <p>An extern-C declaration import ({@code @extern-c}) emits the
+         * generator's FFI load at the same position — the provider
+         * bindings re-pointed at the chunk's export-surface registry, the
+         * bindings literal, and the
+         * {@code __exportSurfaces[<module>] = ... __rt.load_ffi(...)}
+         * registry entry with the import statement's span triplet (the
+         * extern-C admission slice) — when the session carries the
+         * compile's FFI emission input; the loaded module table becomes
+         * the import's namespace value exactly like the host load's. A
+         * session without the FFI emission input emits no FFI load: the
+         * extern-C import's op keeps the landed no-op load (the trace
+         * session's loaded surface is the scenario seam's).
+         * {@code COMPILED}/{@code STDLIB} imports keep the landed no-op
+         * realization.</p>
          */
         private void emitModuleImport(SemanticOp op) {
             KindPayload.ModuleImportPayload payload =
@@ -5871,8 +5972,19 @@ public final class LuaSemanticEmitter {
                 // The host load is a production project realization; a
                 // unit/trace session (no declaration surface) keeps the
                 // landed no-op arm — its host path is the landed scenario
-                // seam, which the production path never reaches.
-                emitHostLoad(op, payload);
+                // seam, which the production path never reaches. The
+                // extern-C declaration import selects its own arm by the
+                // declaration kind: the FFI load when the session carries
+                // the FFI emission input, the landed no-op otherwise.
+                HostDeclarationSurface.DeclarationFacts facts =
+                    hostSurface.require(payload.resolvedModule());
+                if (facts.kind() == HostDeclarationSurface.DeclarationKind.EXTERN_C) {
+                    if (ffiInput != null) {
+                        emitFfiLoad(op, payload);
+                    }
+                } else {
+                    emitHostLoad(op, payload, facts);
+                }
             }
             emitPlainSuccess(op);
         }
@@ -5886,24 +5998,8 @@ public final class LuaSemanticEmitter {
          * failures carry the import origin.
          */
         private void emitHostLoad(SemanticOp op,
-                                  KindPayload.ModuleImportPayload payload) {
-            if (hostSurface == null) {
-                throw new IllegalStateException("MODULE_IMPORT " + op.opId()
-                    + " imports the host module '" + payload.rawSpecifier()
-                    + "' but the session carries no host declaration surface"
-                    + " (the declared map has no second producer — a producer"
-                    + " defect)");
-            }
-            HostDeclarationSurface.DeclarationFacts facts =
-                hostSurface.require(payload.resolvedModule());
-            if (facts.kind() != HostDeclarationSurface.DeclarationKind.HOST) {
-                throw new IllegalStateException("MODULE_IMPORT " + op.opId()
-                    + " imports the declaration module '"
-                    + payload.resolvedModule().path()
-                    + "' of kind " + facts.kind()
-                    + ": the extern-C declaration load is the FFI child's"
-                    + " (fail-closed remnant)");
-            }
+                                  KindPayload.ModuleImportPayload payload,
+                                  HostDeclarationSurface.DeclarationFacts facts) {
             // A second alias of one host module emits the same guarded load
             // at its own import position: the first call is the only load of
             // this module per program, and every later import op re-writes
@@ -5914,6 +6010,89 @@ public final class LuaSemanticEmitter {
                 .append("__exportSurfaces[").append(key).append("] or ")
                 .append("__rt.load_host(").append(luaString(payload.rawSpecifier()))
                 .append(", ").append(hostDeclaredMap(facts)).append(", ")
+                .append(loadOriginArgs(op)).append(")\n");
+        }
+
+        /**
+         * The inline FFI load of one {@code MODULE_IMPORT} of an extern-C
+         * declaration module (the extern-C admission slice;
+         * {@code luajit-ffi-load-emission-and-typed-crossings} F1/F2 and
+         * the FFI import and load contract): the four argument literals
+         * come from the landed {@link LuaFfiBindingGenerator} over the
+         * FFI emission input's generated module — the descriptor's
+         * {@code ffi:}-keyed module key, the cdef bundle, the per-class
+         * plans with their deferred evaluators, and the forward bindings —
+         * with the loader text resolved against the input's manifest
+         * directory, and the import statement's own span triplet is the
+         * origin, so the pinned {@code FFI_LIBRARY_LOAD}/
+         * {@code FFI_SYMBOL_MISSING} failures name the import statement.
+         * The provider bindings are the same alias mapping the generator
+         * renders, re-pointed at the chunk-global {@code __exportSurfaces}
+         * registry instead of a per-module {@code require} (the one-chunk
+         * production layout has no per-provider module artifact): the
+         * evaluator text calls {@code <prefix><alias>.<export>.f(...)}, so
+         * the provider module must be a declaration module of the
+         * compile's surface — a provider outside it fails the compile
+         * closed. The registry entry is written with the landed idempotent
+         * {@code or} guard, so two aliases of one module share the one
+         * loaded table and no second open runs. Nothing here evaluates a
+         * plan default, opens a library, or resolves a symbol.
+         */
+        private void emitFfiLoad(SemanticOp op,
+                                 KindPayload.ModuleImportPayload payload) {
+            ModuleId moduleId = payload.resolvedModule();
+            FfiGeneratedModule module = ffiInput.require(moduleId);
+            int ordinal = ++ffiImportCounter;
+            String bindingsLocal = "__ffi_bindings_" + ordinal;
+            String importPrefix = "__ffi_import_" + ordinal + "_";
+            LuaFfiBindingGenerator.Generation generation =
+                LuaFfiBindingGenerator.generate(module,
+                    ffiInput.manifestDirectory(), bindingsLocal,
+                    importPrefix);
+            if (generation.failure() != null) {
+                throw new IllegalStateException("the extern-C generated"
+                    + " module of '" + moduleId.path() + "' cannot be"
+                    + " serialized into the load_ffi literals: "
+                    + generation.failure().message());
+            }
+            LuaFfiBindingGenerator.LoadCallParts parts = generation.parts();
+            for (LuaFfiBindingGenerator.ProviderBinding provider
+                    : LuaFfiBindingGenerator.providerBindings(
+                        module.bindings())) {
+                ModuleId providerId = new ModuleId(provider.importedModulePath());
+                HostDeclarationSurface.DeclarationFacts providerFacts =
+                    hostSurface.modules().get(providerId);
+                if (providerFacts == null
+                        || (providerFacts.kind()
+                                == HostDeclarationSurface.DeclarationKind.EXTERN_C
+                            && !ffiInput.generatedModules()
+                                .containsKey(providerId))) {
+                    throw new IllegalStateException("the extern-C module '"
+                        + moduleId.path() + "' binds the provider alias '"
+                        + provider.importAlias() + "' to the module '"
+                        + provider.importedModulePath() + "', which is not a"
+                        + " declaration module carrying a loaded wrapper"
+                        + " surface: the emitted evaluator calls the loaded"
+                        + " wrapper convention through the chunk's"
+                        + " export-surface registry (a provider gap — a"
+                        + " producer defect)");
+                }
+                out.append("local ").append(importPrefix)
+                    .append(provider.importAlias())
+                    .append(" = __exportSurfaces[")
+                    .append(luaString(provider.importedModulePath()))
+                    .append("] or {}\n");
+            }
+            out.append("local ").append(bindingsLocal).append(" = ")
+                .append(parts.bindingsLiteral()).append("\n");
+            String key = luaString(moduleId.path());
+            out.append("__exportSurfaces[").append(key).append("] = ")
+                .append("__exportSurfaces[").append(key)
+                .append("] or __rt.load_ffi(")
+                .append(parts.moduleKeyLiteral()).append(", ")
+                .append(parts.bundleLiteral()).append(", ")
+                .append(parts.plansLiteral()).append(", ")
+                .append(bindingsLocal).append(", ")
                 .append(loadOriginArgs(op)).append(")\n");
         }
 

@@ -56,12 +56,16 @@ import java.util.Set;
  *       sidecar, and byte-identical repeated staging;</li>
  *   <li>the C9 warning fires once for an explicit {@code --source-map}
  *       request and never for a {@code --dump-ir}-derived flag;</li>
- *   <li>the narrowed pre-emission closure guard fails closed for an
- *       extern-C declaration import ({@code HOST_MODULE_IMPORT}) while a
- *       HOST-declaration-kind import emits its declared-map host load
- *       and stages its one project artifact, and the cross-module sync
- *       and async calls emit and execute (ISSUE-0654/ISSUE-0655) with
- *       the {@code EXTERNAL_ASYNC_CALL} shape removed (ISSUE-0656);</li>
+ *   <li>the pre-emission closure guard carries no HOST-kind shape after
+ *       the calls child's realization (ISSUE-0656) and this slice's
+ *       extern-C admission (ISSUE-0662): a HOST-declaration-kind import
+ *       emits its declared-map host load and an extern-C declaration
+ *       import emits its {@code load_ffi} prelude, each staging its one
+ *       project artifact, while the guard's stable
+ *       {@code HOST_MODULE_IMPORT} token and its E6005 producer stay
+ *       landed; the cross-module sync and async calls emit and execute
+ *       (ISSUE-0654/ISSUE-0655) with the {@code EXTERNAL_ASYNC_CALL}
+ *       shape removed (ISSUE-0656);</li>
  *   <li>a failing lowering (bytes) stages nothing and leaves the previous
  *       artifact set byte-identical, while a cross-module sync call emits
  *       through the realized {@code CALL(EXTERNAL)} {@code SHARED_BODY}
@@ -108,7 +112,7 @@ public class ProductionProjectEmissionTest {
     private static final ModuleId HOST_CFG = new ModuleId("host.cfg");
     private static final String HOST_CFG_SPECIFIER = "host/cfg";
 
-    /** The extern-C declaration module of the narrowed-guard probe. */
+    /** The extern-C declaration module of the admission probe. */
     private static final ModuleId NATIVE_MATH = new ModuleId("native.math");
     private static final String EXTERN_C_SPECIFIER = "native/math";
 
@@ -386,7 +390,9 @@ public class ProductionProjectEmissionTest {
         return ProductionProjectEmission.run(productionInvocation(),
             fixture.checkedProject(), fixture.index(), fixture.manifests(),
             fixture.surface(), fixture.declarationIdentities(),
-            fixture.externCModules(), BuiltinErrorDeclaration.synthesized(
+            fixture.externCModules(),
+            fixture.distributionHome().manifestDirectoryText(),
+            BuiltinErrorDeclaration.synthesized(
                 fixture.checkedProject().modules().get(0).ast().span()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
             Set.of(), backend, sourceMapExplicit, fixture.distributionHome(), stager);
@@ -433,7 +439,7 @@ public class ProductionProjectEmissionTest {
 
         Method entry = unit.getMethod("run", CompilerInvocation.class,
             CheckedProjectInput.class, ProjectInterfaceIndex.class, List.class,
-            HostDeclarationSurface.class, Map.class, Map.class,
+            HostDeclarationSurface.class, Map.class, Map.class, String.class,
             BuiltinErrorDeclaration.class, List.class, Set.class, Backend.class,
             boolean.class, DistributionHome.class, PublicationStager.class);
         checkEq(ProductionProjectEmission.Result.class, entry.getReturnType(),
@@ -444,12 +450,14 @@ public class ProductionProjectEmissionTest {
         }
         checkEq(List.of("CompilerInvocation", "CheckedProjectInput",
                 "ProjectInterfaceIndex", "List", "HostDeclarationSurface", "Map",
-                "Map", "BuiltinErrorDeclaration", "List", "Set", "Backend",
+                "Map", "String", "BuiltinErrorDeclaration", "List", "Set", "Backend",
                 "boolean", "DistributionHome", "PublicationStager"),
             parameterTypes,
-            "the entry consumes the compile's declared inputs, the backend, the "
-                + "explicit source-map flag, the deployment-copy resolver, and the "
-                + "staging surface");
+            "the entry consumes the compile's declared inputs (the extern-C"
+                + " generated modules and the manifest-directory text feeding"
+                + " the Lua session's FFI emission input), the backend, the"
+                + " explicit source-map flag, the deployment-copy resolver, and the"
+                + " staging surface");
         for (Class<?> parameter : entry.getParameterTypes()) {
             String name = parameter.getName();
             for (String forbidden : List.of("deal.ast.", "deal.parser.",
@@ -752,8 +760,8 @@ public class ProductionProjectEmissionTest {
 
     private static void testHostImportGuard() throws Exception {
         System.out.println("-- the HOST-declaration import emits its declared-map "
-            + "load and stages; the extern-C declaration import keeps the "
-            + "narrowed HOST_MODULE_IMPORT guard --");
+            + "load and stages; the extern-C declaration import emits its "
+            + "load_ffi prelude --");
 
         // The HOST-declaration-kind import: realized by the host load of
         // the module init walk (H1), so the production run stages its one
@@ -803,48 +811,57 @@ public class ProductionProjectEmissionTest {
             deleteRecursively(fixture.root());
         }
 
-        // The narrowed guard: a HOST-kind import whose declaration-surface
-        // kind is EXTERN_C (the @extern-c declaration module) keeps the
-        // landed E6005 SHARED_EMITTER_COVERAGE outcome with the stable
-        // HOST_MODULE_IMPORT token, the raw specifier, and the resolved
-        // module, and stages nothing.
+        // The extern-C admission (ISSUE-0662): a HOST-kind import whose
+        // declaration-surface kind is EXTERN_C (the @extern-c declaration
+        // module) is realized by the emitted load_ffi prelude selected from
+        // the compile's FFI emission input, so the arm stages its one
+        // project artifact and no guard outcome fires. The guard step and
+        // its stable HOST_MODULE_IMPORT token stay landed (a superseded
+        // shape is replaced, never deleted); the fail-closed seeds of the
+        // FFI emission family are the focused suite's.
         Fixture externC = externCFixture();
         Path externCOut = externC.root().resolve("out-arm");
         try {
             checkEq(HostDeclarationSurface.DeclarationKind.EXTERN_C,
                 externC.surface().require(NATIVE_MATH).kind(),
                 "the probe's declaration module is EXTERN_C-kind");
-            writeFileIn(externCOut, "app.lua", "-- previous artifact\n");
-            Map<String, String> before = snapshotTree(externCOut);
             PublicationStager stager = PublicationStager.forRoot(externCOut);
             ProductionProjectEmission.Result result;
+            String chunk;
             try {
                 result = emit(externC, Backend.LUAJIT, stager, false);
-                check(stager.stagedSet().relativePaths().isEmpty(),
-                    "the narrowed guard stages nothing");
+                check(result.emitted(),
+                    "the extern-C declaration import emits: "
+                        + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the extern-C declaration import carries no guard "
+                        + "diagnostic: " + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the extern-C declaration import stages the entry "
+                        + "module's chunk");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the extern-C declaration import stages its one project "
+                        + "artifact");
+                chunk = new String(stager.stagedSet().artifact("app.lua")
+                    .orElseThrow().content(), StandardCharsets.UTF_8);
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(),
-                "the extern-C declaration import fails closed");
-            checkEq(1, result.diagnostics().size(),
-                "the guard returns exactly the first diagnostic");
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code()),
-                "the guard diagnostic is E6005: " + result.diagnostics());
-            String message = result.firstDiagnostic() == null
-                ? "" : result.firstDiagnostic().message();
-            check(message.contains(ProductionProjectEmission.SHARED_EMITTER_COVERAGE),
-                "the guard names SHARED_EMITTER_COVERAGE: " + message);
-            check(message.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
-                "the guard names the stable HOST_MODULE_IMPORT token: " + message);
-            check(message.contains("'" + EXTERN_C_SPECIFIER + "'"),
-                "the guard names the import's raw specifier: " + message);
-            check(message.contains("'" + NATIVE_MATH.path() + "'"),
-                "the guard names the import's resolved module: " + message);
-            checkEq(before, snapshotTree(externCOut),
-                "the guarded compile leaves the previous artifact set "
-                    + "byte-identical");
+            check(chunk.contains("__exportSurfaces[\"" + NATIVE_MATH.path()
+                    + "\"] = __exportSurfaces[\"" + NATIVE_MATH.path()
+                    + "\"] or __rt.load_ffi(\"ffi:@$external/"
+                    + EXTERN_C_SPECIFIER + "\", "),
+                "the emitted artifact carries the load_ffi prelude with the "
+                    + "metadata-provided module key: " + chunk);
+            check(chunk.contains(", \""
+                    + externC.root().resolve("src/app.deal").toAbsolutePath()
+                    + "\", 1, 1)"),
+                "the load carries the import statement's span triplet: "
+                    + chunk);
+            check(!chunk.contains(ProductionProjectEmission.HOST_MODULE_IMPORT),
+                "the emitted chunk carries no guard token");
+            check(!chunk.contains("ffi.C") && !chunk.contains("cdef("),
+                "the emitted chunk carries no ffi.C/cdef text");
         } finally {
             deleteRecursively(externC.root());
         }

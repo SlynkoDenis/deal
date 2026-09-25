@@ -761,10 +761,11 @@ public class DirectiveTest {
                 "the manifest-backed extern-C import emits no E2010: "
                     + backed.diagnostics());
 
-            // ISSUE-0643 P10 item 2: the same fixture through the
-            // release-owned production invocation fails closed with
-            // E6005 SHARED_EMITTER_COVERAGE (HOST_MODULE_IMPORT) and
-            // stages nothing (the FFI realization is the FFI child's).
+            // The extern-C admission slice (ISSUE-0662): the same fixture
+            // through the release-owned production invocation now emits the
+            // load_ffi prelude at the import's MODULE_IMPORT and stages the
+            // one project artifact (the host-kind guard no longer rejects
+            // the extern-C declaration import).
             ByteArrayOutputStream prodErr = new ByteArrayOutputStream();
             PrintStream originalErr = System.err;
             int prodExit;
@@ -780,15 +781,24 @@ public class DirectiveTest {
             }
             String prodText = prodErr.toString(
                 java.nio.charset.StandardCharsets.UTF_8);
-            check(prodExit != 0 && prodText.contains("E6005")
-                    && prodText.contains("SHARED_EMITTER_COVERAGE")
-                    && prodText.contains("HOST_MODULE_IMPORT"),
-                "the release-owned production invocation fails the extern-C "
-                    + "fixture closed with E6005 SHARED_EMITTER_COVERAGE "
-                    + "(HOST_MODULE_IMPORT): " + prodText);
-            check(!Files.exists(tmp.resolve("prod_out")),
-                "the production failure stages no artifact under the "
-                    + "probe output");
+            check(prodExit == 0,
+                "the release-owned production invocation admits the extern-C "
+                    + "fixture: " + prodText);
+            Path prodArtifact = tmp.resolve("prod_out/main.lua");
+            check(Files.exists(prodArtifact),
+                "the admitted production compile stages the project artifact");
+            if (Files.exists(prodArtifact)) {
+                String prodLua = Files.readString(prodArtifact);
+                check(prodLua.contains(
+                        "__rt.load_ffi(\"ffi:@$external/ffi\", "),
+                    "the production artifact emits the load_ffi prelude with "
+                        + "the metadata-provided module key: " + prodLua);
+                check(prodLua.contains("nativeLibrary = { kind = \"BARE_NAME\", "
+                        + "loaderText = \"math\" }"),
+                    "the bundle carries the bare-name loader text: " + prodLua);
+                check(!prodLua.contains("ffi.C") && !prodLua.contains("cdef("),
+                    "the production artifact carries no ffi.C/cdef text");
+            }
 
             // Case 3: an externals entry that declares the file without
             // nativeLibrary is the invalid-manifest-policy rejection —

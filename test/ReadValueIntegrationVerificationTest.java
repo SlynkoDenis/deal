@@ -444,7 +444,9 @@ public class ReadValueIntegrationVerificationTest {
         return ProductionProjectEmission.run(productionInvocation(),
             fixture.checkedProject(), fixture.index(), fixture.manifests(),
             fixture.surface(), fixture.declarationIdentities(),
-            fixture.externCModules(), BuiltinErrorDeclaration.synthesized(
+            fixture.externCModules(),
+            fixture.distributionHome().manifestDirectoryText(),
+            BuiltinErrorDeclaration.synthesized(
                 fixture.checkedProject().modules().get(0).ast().span()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
             Set.of(), backend, sourceMapExplicit, fixture.distributionHome(), stager);
@@ -2108,11 +2110,14 @@ public class ReadValueIntegrationVerificationTest {
         String productionEmission = Files.readString(
             root.resolve("test/ProductionProjectEmissionTest.java"),
             StandardCharsets.UTF_8);
-        check(productionEmission.contains("the narrowed guard stages nothing")
+        check(productionEmission.contains(
+                "the failing lowering leaves the previous artifact set byte-identical")
                 && productionEmission.contains("SHARED_EMITTER_COVERAGE"),
             "the fail-closed SHARED_EMITTER_COVERAGE family with nothing staged "
-                + "stays asserted where emission is driven (ISSUE-0656 narrowed "
-                + "the guard to the extern-C declaration import)");
+                + "stays asserted where emission is driven (ISSUE-0662 realized the "
+                + "extern-C declaration import, so the guard carries no HOST-kind "
+                + "shape and the family's producer is the surviving fail-closed "
+                + "paths)");
         String callsChild = Files.readString(
             root.resolve("test/CrossModuleCallRealizationTest.java"),
             StandardCharsets.UTF_8);

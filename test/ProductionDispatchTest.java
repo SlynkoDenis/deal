@@ -55,12 +55,17 @@ import java.util.stream.Stream;
  *       cross-module sync call emits through the realized
  *       {@code CALL(EXTERNAL)} {@code SHARED_BODY} arm (ISSUE-0654) and
  *       publishes its one project artifact;</li>
- *   <li>the fail-closed families: an extern-C declaration import
- *       ({@code HOST_MODULE_IMPORT}), bytes, and function-typed
- *       materializations each fail with their named E6005
- *       and publish nothing, while a {@code STDLIB}/{@code COMPILED}-only
- *       closure, a HOST-declaration-kind import (the emitted host load),
- *       a cross-module sync and async call, the builtin Error construction
+ *   <li>the admitted extern-C declaration import (ISSUE-0662): the
+ *       LuaJIT production compile emits the {@code load_ffi} prelude at
+ *       the import's {@code MODULE_IMPORT} and the artifact's init fails
+ *       at the import with {@code FFI_LIBRARY_LOAD}, while the JVM
+ *       target keeps the phase-3.9 E6006 rejection;</li>
+ *   <li>the fail-closed families: bytes and function-typed
+ *       materializations each fail with their named E6005 and publish
+ *       nothing, while a {@code STDLIB}/{@code COMPILED}-only closure, a
+ *       HOST-declaration-kind import (the emitted host load), the
+ *       extern-C declaration import (the emitted FFI load), a
+ *       cross-module sync and async call, the builtin Error construction
  *       (ISSUE-0619), the {@code time.nowMillis} coverage (ISSUE-0623: the
  *       emitted artifacts publish the pinned E8004 terminal), and a
  *       same-module async call emit and execute;</li>
@@ -971,8 +976,11 @@ public class ProductionDispatchTest {
             "CONSTRUCT_UNLOWERED");
         checkBuiltinErrorConstruction();
 
-        // (e) The extern-C declaration import on LuaJIT fails with
-        // HOST_MODULE_IMPORT (the FFI child owns the realization).
+        // (e) The extern-C declaration import is admitted on LuaJIT: the
+        // production compile emits the load_ffi prelude at the import's
+        // MODULE_IMPORT, and the artifact's init fails at the import with
+        // FFI_LIBRARY_LOAD (the wiring names an unbuilt library); the JVM
+        // target keeps its phase-3.9 E6006 rejection.
         Path externC = Files.createTempDirectory("production-dispatch-ffi-");
         try {
             write(externC, "deal.json", """
@@ -1002,17 +1010,50 @@ public class ProductionDispatchTest {
                 """);
             ProjectOutcome compile = productionCompile(externC,
                 "src/main.deal", "out");
-            check(compile.exitCode() != 0,
-                "the extern-C declaration import fails closed on LuaJIT");
-            check(compile.stderr().contains("E6005")
-                    && compile.stderr().contains("SHARED_EMITTER_COVERAGE")
-                    && compile.stderr().contains("HOST_MODULE_IMPORT")
-                    && compile.stderr().contains("'native/math'")
-                    && compile.stderr().contains("'native.math'"),
-                "the extern-C guard names the raw specifier and the resolved "
-                    + "module: " + compile.stderr());
-            check(!Files.exists(externC.resolve("out")),
-                "the extern-C guarded compile stages no artifact");
+            check(compile.exitCode() == 0,
+                "the extern-C declaration import is admitted on LuaJIT: "
+                    + compile.stderr());
+            if (compile.exitCode() == 0) {
+                String artifact = Files.readString(externC.resolve("out/main.lua"),
+                    StandardCharsets.UTF_8);
+                check(artifact.contains("__exportSurfaces[\"native.math\"] = "
+                        + "__exportSurfaces[\"native.math\"] or __rt.load_ffi("
+                        + "\"ffi:@$external/native/math\", "),
+                    "the artifact publishes the loaded table through the "
+                        + "load_ffi call at the import's MODULE_IMPORT: " + artifact);
+                check(artifact.contains("nativeLibrary = { kind = "
+                        + "\"MANIFEST_RELATIVE_PATH\", loaderText = \""),
+                    "the bundle carries the manifest-relative loader text");
+                check(artifact.contains(", \"" + externC.resolve("src/main.deal")
+                        .toAbsolutePath() + "\", 1, 1)"),
+                    "the load carries the import statement's span triplet");
+                check(!artifact.contains("ffi.C") && !artifact.contains("cdef("),
+                    "the artifact carries no ffi.C/cdef text");
+
+                write(externC, "out/probe.lua", """
+                    package.path = "./?.lua;./std/?.lua;" .. package.path
+                    local ok, err = pcall(dofile, "main.lua")
+                    if ok then
+                      print("PROBE-FAIL|the init succeeded")
+                      os.exit(1)
+                    end
+                    if type(err) ~= "table" or err.code == nil then
+                      print("PROBE-FAIL|not a runtime error: " .. tostring(err))
+                      os.exit(1)
+                    end
+                    print("ERR|" .. tostring(err.code) .. "|" .. tostring(err.message)
+                      .. "|" .. tostring(err.file) .. "|" .. tostring(err.line)
+                      .. "|" .. tostring(err.column))
+                    """);
+                ProcessOutcome run = runProcess(externC.resolve("out"),
+                    "luajit", "probe.lua");
+                check(run.exitCode() == 0
+                        && run.output().startsWith("ERR|FFI_LIBRARY_LOAD|")
+                        && run.output().contains("src/main.deal|1|1"),
+                    "the emitted artifact fails at the import with "
+                        + "FFI_LIBRARY_LOAD at the import origin: exit="
+                        + run.exitCode() + " output=" + run.output());
+            }
 
             // The JVM target keeps the phase-3.9 E6006 rejection.
             ProjectOutcome jvmCompile = runProductionCli("compile",

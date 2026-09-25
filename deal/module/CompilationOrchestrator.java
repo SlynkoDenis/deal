@@ -2728,6 +2728,7 @@ public final class CompilationOrchestrator {
             invocation, checked.input(), checked.index(),
             requirementManifests.manifests(), hostDeclarationSurface,
             declarationModuleIdentities(), externCGeneratedModules(),
+            context.manifestDirectory(),
             builtinErrorDeclaration(checked.input()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
             Set.of(), backend, sourceMapExplicit, distributionHome, stager);

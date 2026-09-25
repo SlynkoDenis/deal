@@ -1201,7 +1201,9 @@ public class CompiledExportReadRealizationTest {
         return ProductionProjectEmission.run(productionInvocation(),
             fixture.checkedProject(), fixture.index(), fixture.manifests(),
             fixture.surface(), fixture.declarationIdentities(),
-            fixture.externCModules(), BuiltinErrorDeclaration.synthesized(
+            fixture.externCModules(),
+            fixture.distributionHome().manifestDirectoryText(),
+            BuiltinErrorDeclaration.synthesized(
                 fixture.checkedProject().modules().get(0).ast().span()),
             List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
             Set.of(), backend, sourceMapExplicit, fixture.distributionHome(), stager);

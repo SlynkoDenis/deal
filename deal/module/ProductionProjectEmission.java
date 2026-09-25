@@ -4,6 +4,7 @@ import deal.checker.BuiltinErrorDeclaration;
 import deal.codegen.Backend;
 import deal.codegen.jvm.JvmBackend;
 import deal.codegen.jvm.JvmSemanticEmitter;
+import deal.codegen.lua.FfiEmissionInput;
 import deal.codegen.lua.LuaSemanticEmitter;
 import deal.diagnostics.CompilerDiagnostic;
 import deal.diagnostics.DiagnosticCode;
@@ -50,16 +51,19 @@ import java.util.Set;
  *   <li>the C9 source-map warning (the pinned per-target text on stderr,
  *       once, before emission, only for an explicit {@code --source-map}
  *       request) — no sidecar is ever staged by this unit;</li>
- *   <li>the closure guard's shape over the closure's resolved import
- *       facts, before the lowering: a HOST-kind module import whose
- *       declaration-surface kind is {@code EXTERN_C} (the {@code
- *       @extern-c} declaration module whose load is the FFI child's
- *       {@code __rt.load_ffi} table) fails closed with E6005 {@code
- *       SHARED_EMITTER_COVERAGE} naming the import (its raw specifier
- *       and its resolved module) — the shape is a whole-closure
- *       property, so a later-slice construct whose lowering fails first
- *       can never mask it; a HOST-declaration-kind import (and
- *       {@code STDLIB}/{@code COMPILED}) passes;</li>
+ *   <li>the closure guard's whole-closure step over the closure's
+ *       resolved import facts, before the lowering: every HOST-kind
+ *       declaration import is realized — the {@code HOST} declaration
+ *       kind by the emitted host load of the module init walk
+ *       (ISSUE-0656) and the {@code EXTERN_C} declaration kind by the
+ *       emitted {@code __rt.load_ffi} prelude selected from this
+ *       slice's FFI emission input — so the step carries no HOST-kind
+ *       shape and the same code path admits both declaration kinds. Its
+ *       stable {@code HOST_MODULE_IMPORT} E6005 {@code
+ *       SHARED_EMITTER_COVERAGE} producer, its whole-closure property,
+ *       and its pre-lowering position stay landed (a superseded shape
+ *       is replaced, never deleted); {@code STDLIB}/{@code COMPILED}
+ *       imports pass;</li>
  *   <li>exactly one project lowering over the compile's declared inputs
  *       (the invocation, the checked project and interface index, the
  *       requirement manifests, the declaration surface, the declaration
@@ -70,11 +74,19 @@ import java.util.Set;
  *   <li>exactly one emission per target: the LuaJIT production project
  *       chunk (one chunk named for the entry module, staged at the entry
  *       module path with {@code '.'} replaced by {@code '/'} plus
- *       {@code .lua}) or the JVM production project class (one {@code
- *       public final class}, staged at
- *       {@code JvmBackend.classNameFor(entryModule.path()) + ".java"}); an
- *       emitter gap (an op outside the landed production set) maps to
- *       E6005 {@code SHARED_EMITTER_COVERAGE} and stages nothing;</li>
+ *       {@code .lua}) — carrying the compile's FFI emission input (the
+ *       extern-C generated-module metadata and the manifest-directory
+ *       text) so an extern-C declaration import emits its
+ *       {@code __rt.load_ffi} prelude at the owning
+ *       {@code MODULE_IMPORT} — or the JVM production project class (one
+ *       {@code public final class}, staged at
+ *       {@code JvmBackend.classNameFor(entryModule.path()) + ".java"});
+ *       the JVM production entry takes no FFI emission input (a JVM
+ *       compile never publishes FFI metadata); an emitter gap (an op
+ *       outside the landed production set, an extern-C import without
+ *       generated metadata, an unserializable generated module, or a
+ *       provider gap) maps to E6005 {@code SHARED_EMITTER_COVERAGE} and
+ *       stages nothing;</li>
  *   <li>the unchanged LuaJIT runtime/stdlib deployment copies, staged
  *       from the resolved distribution surface after the one project
  *       artifact (a missing runtime is the pinned E6000); the JVM target
@@ -179,9 +191,10 @@ public final class ProductionProjectEmission {
 
     /**
      * Runs the production arm for one release-owned production compile:
-     * the C9 warning, the closure guard's narrowed extern-C
-     * declaration-import shape over the closure's resolved import facts,
-     * the one project lowering, the one emission, the one staged project
+     * the C9 warning, the closure guard's whole-closure step (both
+     * HOST-kind declaration kinds admitted and realized) over the
+     * closure's resolved import facts, the one project lowering, the one
+     * emission, the one staged project
      * artifact, and the unchanged LuaJIT deployment copies. The caller
      * (the phase-4 dispatch) owns the arm selection, the emission record,
      * and the publication transaction; this unit stages artifacts only.
@@ -205,6 +218,12 @@ public final class ProductionProjectEmission {
      *                                    identity; non-null
      * @param externCModules              the validated extern-C generated
      *                                    modules; non-null
+     * @param manifestDirectory           the compile's manifest-directory
+     *                                    text (the base of
+     *                                    manifest-relative native-library
+     *                                    loader-text resolution and the
+     *                                    second FFI emission input)
+     *                                    non-null
      * @param builtinError                the compiler-owned builtin
      *                                    {@code Error} declaration;
      *                                    non-null
@@ -243,6 +262,7 @@ public final class ProductionProjectEmission {
             HostDeclarationSurface declarationSurface,
             Map<ModuleId, CanonicalModuleIdentity> declarationModuleIdentities,
             Map<ModuleId, FfiGeneratedModule> externCModules,
+            String manifestDirectory,
             BuiltinErrorDeclaration builtinError,
             List<IntrinsicKind> conversionIntrinsics,
             Set<String> callbackExports,
@@ -260,6 +280,8 @@ public final class ProductionProjectEmission {
         Objects.requireNonNull(declarationModuleIdentities,
             "declarationModuleIdentities must not be null");
         Objects.requireNonNull(externCModules, "externCModules must not be null");
+        Objects.requireNonNull(manifestDirectory,
+            "manifestDirectory must not be null");
         Objects.requireNonNull(builtinError, "builtinError must not be null");
         Objects.requireNonNull(conversionIntrinsics,
             "conversionIntrinsics must not be null");
@@ -280,17 +302,21 @@ public final class ProductionProjectEmission {
             System.err.println(backend == Backend.JVM ? WARNING_JVM : WARNING_LUAJIT);
         }
 
-        // (2) The closure guard, shape 1 (narrowed): a HOST-kind module
-        // import whose declaration-surface kind is EXTERN_C (the
-        // @extern-c declaration module) has no production emission arm —
-        // its load is the FFI child's __rt.load_ffi table — so the whole
-        // closure fails closed before the lowering runs. The fact is read
-        // from the closure's resolved import facts plus the declaration
-        // surface, so an extern-C import can never be masked by a
-        // construct whose lowering fails first (the shape is a
-        // whole-closure property of the compile's checked closure). A
-        // HOST-declaration-kind import is realized by the host load of
-        // the module init walk and no longer trips the guard.
+        // (2) The closure guard's whole-closure step: every HOST-kind
+        // declaration import of a checked closure is realized — the HOST
+        // declaration kind by the emitted host load of the module init
+        // walk (ISSUE-0656/H6), the EXTERN_C declaration kind by the
+        // emitted __rt.load_ffi prelude selected from this slice's FFI
+        // emission input (F1/F2) — so the step carries no HOST-kind shape
+        // and the same code path admits both. The step keeps its
+        // pre-lowering position and its whole-closure property: it reads
+        // the closure's resolved import facts plus the declaration
+        // surface, so a residual shape could never be masked by a
+        // construct whose lowering fails first. An import the surface
+        // does not cover is the lowering's DECLARATION_SURFACE_INCOMPLETE
+        // agreement; this guard never defaults a missing fact. The stable
+        // HOST_MODULE_IMPORT E6005 SHARED_EMITTER_COVERAGE producer stays
+        // landed (a superseded shape is replaced, never deleted).
         Optional<CompilerDiagnostic> hostImport =
             hostImportGuard(checkedProject, declarationSurface, invocation);
         if (hostImport.isPresent()) {
@@ -333,7 +359,8 @@ public final class ProductionProjectEmission {
             try {
                 source = LuaSemanticEmitter.emitProductionProject(project,
                     lowering.tables(), lowering.registries(),
-                    declarationSurface);
+                    declarationSurface,
+                    new FfiEmissionInput(externCModules, manifestDirectory));
             } catch (IllegalStateException emitterGap) {
                 return new Result(Outcome.FAILED,
                     List.of(sharedEmitterCoverage(project.entryModule().path(),
@@ -368,21 +395,27 @@ public final class ProductionProjectEmission {
     }
 
     /**
-     * The closure guard over the closure's resolved import facts: the
-     * first HOST-kind module import whose declaration-surface kind is
-     * {@code EXTERN_C} (the {@code @extern-c} declaration module, whose
-     * load is the FFI child's {@code __rt.load_ffi} table) fails the
-     * whole closure, naming the emitting module, the import's raw
-     * specifier, and the resolved module. Every other import — a
-     * {@code HOST}-declaration-kind import (realized by the host load of
-     * the module init walk), {@code STDLIB}, and {@code COMPILED} —
-     * passes; their {@code MODULE_IMPORT} no-op is the landed realization
-     * (the closure's own module walks realize a compiled dependency, and
-     * the runtime supplies the stdlib surface). An import whose resolved
-     * module carries no declaration-surface entry is not classified here:
-     * the lowering's {@code DECLARATION_SURFACE_INCOMPLETE} agreement
-     * step fails such a closure closed (producer defect), so the guard
-     * never defaults a missing fact.
+     * The closure guard's whole-closure step over the closure's resolved
+     * import facts: after the calls child realized the {@code HOST}
+     * declaration kind (ISSUE-0656/H6) and this slice admits the
+     * {@code EXTERN_C} declaration kind, the guard carries no HOST-kind
+     * shape — every HOST-kind module import of a checked closure is
+     * realized by an emitted load, {@code __rt.load_host} for the
+     * {@code HOST} declaration kind and {@code __rt.load_ffi} for the
+     * {@code EXTERN_C} one (the latter selected from this slice's FFI
+     * emission input) — so the same code path admits both and no import
+     * fails the closure here. The step, its whole-closure property, its
+     * pre-lowering position, the stable {@link #HOST_MODULE_IMPORT}
+     * token, and the E6005 {@code SHARED_EMITTER_COVERAGE} producer stay
+     * landed (a superseded shape is replaced, never deleted). An import
+     * whose resolved module carries no declaration-surface entry is not
+     * classified here: the lowering's
+     * {@code DECLARATION_SURFACE_INCOMPLETE} agreement step fails such a
+     * closure closed (producer defect), so the guard never defaults a
+     * missing fact. A {@code STDLIB}/{@code COMPILED} import passes;
+     * their {@code MODULE_IMPORT} no-op is the landed realization (the
+     * closure's own module walks realize a compiled dependency, and the
+     * runtime supplies the stdlib surface).
      */
     private static Optional<CompilerDiagnostic> hostImportGuard(
             CheckedProjectInput checkedProject,
@@ -393,25 +426,31 @@ public final class ProductionProjectEmission {
                 if (importFact.kind() != ExternalModuleKind.HOST) {
                     continue;
                 }
-                HostDeclarationSurface.DeclarationFacts facts =
-                    declarationSurface.modules()
-                        .get(importFact.resolvedModuleId());
-                if (facts != null && facts.kind()
-                        == HostDeclarationSurface.DeclarationKind.EXTERN_C) {
-                    return Optional.of(hostModuleImportFailure(module.moduleId(),
-                        importFact.modulePath(),
-                        importFact.resolvedModuleId().path(), invocation));
+                if (!declarationSurface.modules()
+                        .containsKey(importFact.resolvedModuleId())) {
+                    // An uncovered declaration import: the lowering's
+                    // declaration-fact agreement reports it; this guard
+                    // never defaults a missing fact.
+                    continue;
                 }
+                // A covered HOST-kind import is realized by an emitted
+                // load — the HOST declaration kind by ISSUE-0656's host
+                // load, the EXTERN_C declaration kind by this slice's FFI
+                // load — so no HOST-kind shape remains and no import
+                // fails the closure here.
             }
         }
         return Optional.empty();
     }
 
     /**
-     * The narrowed guard: a HOST-kind module import of an extern-C
-     * declaration module has no production emission arm — its load is the
-     * FFI child's {@code __rt.load_ffi} table — so the whole closure fails
-     * closed.
+     * The retained E6005 {@code SHARED_EMITTER_COVERAGE} text of the
+     * closure guard's stable {@link #HOST_MODULE_IMPORT} outcome (the
+     * emitting module, the import's raw specifier, and the resolved
+     * module). After the calls child's realization (ISSUE-0656/H6) and
+     * this slice's extern-C admission the guard carries no HOST-kind
+     * shape; the producer stays landed (a superseded shape is replaced,
+     * never deleted).
      */
     private static CompilerDiagnostic hostModuleImportFailure(ModuleId emitting,
             String rawSpecifier, String resolvedModulePath,
