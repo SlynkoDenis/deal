@@ -3534,12 +3534,18 @@ public final class LuaSemanticEmitter {
          * the dynamic async start contract): the recorded parameter
          * cells ran above; a DEAL-body carrier starts the callee body
          * task under the callee's module context with the recorded
-         * task cell (the body's own {@code RETURN} runs it), while every
-         * other carrier class — the host operation handle, the external
-         * alias link, the adapter-over-async nested start — belongs to
-         * the function-typed-value child and fails closed here with the
-         * pinned E8001 at the start origin. The caller records no return
-         * boundary beyond the recorded task cell, and its single
+         * task cell (the body's own {@code RETURN} runs it); the adapter
+         * class runs the landed D15 sequence and starts the source
+         * class's task under the source's module context with the
+         * leading-M recorded arguments (the source body task), with
+         * zero caller-side return boundaries beyond the recorded task
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
+         * A carrier of any other class — the host operation handle, the
+         * external alias link — belongs to the function-typed-value
+         * child and fails closed here with the pinned E8001 at the start
+         * origin, as does an adapter whose D15 source value identifies
+         * no class the closed protocol resolves. The caller records no
+         * return boundary beyond the recorded task cell, and its single
          * {@code AWAIT} drains the token.
          */
         private void emitDynamicAsyncStart(SemanticOp op,
@@ -3547,30 +3553,72 @@ public final class LuaSemanticEmitter {
                                            KindPayload.CallCallee.Dynamic callee,
                                            AsyncTokenId token) {
             String origin = luaString(originOf(op));
+            String carrierArgs = "S.__sa" + op.opId().id();
             out.append("__dynC = ").append(slot(callee.callee())).append("\n");
             out.append("__dynK = __dynClass(__dynC)\n");
-            out.append("if __dynK ~= \"DEAL_BODY\" then\n");
+            // DEAL_BODY: the carrier's function id resolves its owning
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append("if __dynK == \"DEAL_BODY\" then\n");
+            out.append("  __dynM = __fnModules[__dynC.__fid]\n");
+            out.append("  if __dynM == nil then\n");
             emitDynamicCarrierFailure(op, origin);
-            out.append("end\n");
-            out.append("__dynM = __fnModules[__dynC.__fid]\n");
-            out.append("if __dynM == nil then\n");
-            emitDynamicCarrierFailure(op, origin);
-            out.append("end\n");
-            String carrierArgs = "S.__sa" + op.opId().id();
-            out.append("__asyncStartTask(").append(token.tokenId())
+            out.append("  end\n");
+            out.append("  __asyncStartTask(").append(token.tokenId())
                 .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
-            out.append("  __modStack[#__modStack + 1] = __module\n");
-            out.append("  __module = __dynM\n");
-            out.append("  table.insert(__frames, 1, tostring(__dynC.__fid))\n");
-            out.append("  local __okA, __resA = pcall(__unfn(__dynC), unpack(")
+            out.append("    __modStack[#__modStack + 1] = __module\n");
+            out.append("    __module = __dynM\n");
+            out.append("    table.insert(__frames, 1, tostring(__dynC.__fid))\n");
+            out.append("    local __okA, __resA = pcall(__unfn(__dynC), unpack(")
                 .append(carrierArgs).append(", 1, #").append(carrierArgs)
                 .append("))\n");
-            out.append("  table.remove(__frames, 1)\n");
-            out.append("  __module = __modStack[#__modStack]\n");
-            out.append("  __modStack[#__modStack] = nil\n");
-            out.append("  if not __okA then error(__resA, 0) end\n");
-            out.append("  return __resA\n");
-            out.append("end), ").append(carrierArgs).append(")\n");
+            out.append("    table.remove(__frames, 1)\n");
+            out.append("    __module = __modStack[#__modStack]\n");
+            out.append("    __modStack[#__modStack] = nil\n");
+            out.append("    if not __okA then error(__resA, 0) end\n");
+            out.append("    return __resA\n");
+            out.append("  end), ").append(carrierArgs).append(")\n");
+            // ADAPTER: the landed D15 sequence resolves the source value
+            // and checks its carried source spec; the source class then
+            // starts its own task with the leading-M recorded arguments
+            // (a DEAL-body source runs that body's own RETURN cell under
+            // its module context, with zero caller-side return
+            // boundaries).
+            out.append("elseif __dynK == \"ADAPTER\" then\n");
+            out.append("  __dynS = __adaptSource(__dynC)\n");
+            out.append("  __okB, __chkB = pcall(__fncheck, __dynS, __dynC.__csrc, ")
+                .append(origin).append(")\n");
+            out.append("  if not __okB then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("    error(__chkB, 0)\n");
+            out.append("  end\n");
+            out.append("  __dynS = __chkB\n");
+            out.append("  if __dynClass(__dynS) ~= \"DEAL_BODY\" then\n");
+            out.append("    __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __dynM = __fnModules[__dynS.__fid]\n");
+            out.append("  if __dynM == nil then\n");
+            out.append("    __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __asyncStartTask(").append(token.tokenId())
+                .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+            out.append("    __modStack[#__modStack + 1] = __module\n");
+            out.append("    __module = __dynM\n");
+            out.append("    table.insert(__frames, 1, tostring(__dynS.__fid))\n");
+            out.append("    local __okA, __resA = pcall(__unfn(__dynS), unpack(")
+                .append(carrierArgs).append(", 1, __dynC.__m))\n");
+            out.append("    table.remove(__frames, 1)\n");
+            out.append("    __module = __modStack[#__modStack]\n");
+            out.append("    __modStack[#__modStack] = nil\n");
+            out.append("    if not __okA then error(__resA, 0) end\n");
+            out.append("    return __resA\n");
+            out.append("  end), ").append(carrierArgs).append(")\n");
+            // The fail-closed residue: no class is resolvable.
+            out.append("else\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("end\n");
         }
 
         /** Whether one declared host position is a function type. */
@@ -4528,9 +4576,30 @@ public final class LuaSemanticEmitter {
             String value = payload.value() == null ? "nil" : slot(payload.value());
             out.append("__rvT = ").append(value).append("\n");
             emitBoundaryStart(boundary, "__rvT", boundaryPayload.descriptor());
-            out.append("__rvcT = ")
-                .append(bcheckExpr(boundaryPayload.descriptor(), "__rvT"))
+            // The body-local return cell's own failure projection: the cell
+            // projection carries the cell's origin (the callee's RETURN), the
+            // boundary and the RETURN op emit their FAILURE terminals, and the
+            // identical error propagates (the semantic oracle's
+            // runBoundaryChild + the owning-op FAILURE).
+            out.append("__okB, __chkB = pcall(__bcheck, ")
+                .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(luaString(staticKind(boundaryPayload.descriptor())))
+                .append(", __rvT");
+            if (containsFunction(boundaryPayload.descriptor())) {
+                out.append(", ")
+                    .append(luaString(boundaryPayload.descriptor().canonicalSpecText()));
+            }
+            out.append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
                 .append("\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "__errtext(__chkB)");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            out.append("__rvcT = __chkB\n");
             emitBoundarySuccess(boundary, "__rvcT", boundaryPayload.descriptor());
             emitPlainSuccess(op);
             if (tryDepth > 0) {

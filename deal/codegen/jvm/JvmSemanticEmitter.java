@@ -3718,12 +3718,18 @@ public final class JvmSemanticEmitter {
          * the dynamic async start contract): the recorded parameter
          * cells ran above; a DEAL-body carrier starts the callee body
          * task under the callee's module context with the recorded task
-         * cell (the body's own {@code RETURN} runs it), while every
-         * other carrier class — the host operation handle, the external
-         * alias link, the adapter-over-async nested start — belongs to
-         * the function-typed-value child and fails closed here with the
-         * pinned E8001 at the start origin. The caller records no return
-         * boundary beyond the recorded task cell, and its single
+         * cell (the body's own {@code RETURN} runs it); the adapter
+         * class runs the landed D15 sequence and starts the source
+         * class's task under the source's module context with the
+         * leading-M recorded arguments (the source body task), with
+         * zero caller-side return boundaries beyond the recorded task
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
+         * A carrier of any other class — the host operation handle, the
+         * external alias link — belongs to the function-typed-value
+         * child and fails closed here with the pinned E8001 at the start
+         * origin, as does an adapter whose D15 source value identifies
+         * no class the closed protocol resolves. The caller records no
+         * return boundary beyond the recorded task cell, and its single
          * {@code AWAIT} drains the token.
          */
         private void emitDynamicAsyncStart(SemanticOp op,
@@ -3733,46 +3739,100 @@ public final class JvmSemanticEmitter {
                                            int indent) {
             String id = String.valueOf(op.opId().id());
             String carrier = "__dc" + id;
-            String functionValue = "__fnv" + id;
             out.append(indent(indent)).append("Object ").append(carrier)
                 .append(" = ").append(slot(callee.callee())).append(";\n");
-            out.append(indent(indent)).append("if (!(").append(carrier)
-                .append(" instanceof JvmRuntime.FunctionValue) || "
-                    + "((JvmRuntime.FunctionValue) ").append(carrier)
-                .append(").fid == null) {\n");
-            emitDynamicCarrierFailure(op, carrier, indent + 1);
-            out.append(indent(indent)).append("}\n");
-            out.append(indent(indent)).append("JvmRuntime.FunctionValue ")
-                .append(functionValue).append(" = (JvmRuntime.FunctionValue) ")
+            // ADAPTER: the landed D15 sequence resolves the source value
+            // and checks its carried source spec; the source class then
+            // starts its own task with the leading-M recorded arguments
+            // (a DEAL-body source runs that body's own RETURN cell under
+            // its module context, with zero caller-side return
+            // boundaries).
+            out.append(indent(indent)).append("if (").append(carrier)
+                .append(" instanceof JvmRuntime.AdapterValue) {\n");
+            String adapter = "__da" + id;
+            String source = "__ds" + id;
+            String sourceModule = "__dm" + id;
+            out.append(indent(indent + 1)).append("JvmRuntime.AdapterValue ")
+                .append(adapter).append(" = (JvmRuntime.AdapterValue) ")
                 .append(carrier).append(";\n");
-            out.append(indent(indent)).append("String __fm").append(id)
+            out.append(indent(indent + 1)).append("Object ").append(source)
+                .append(" = JvmRuntime.fnCheck(JvmRuntime.adapterSource(")
+                .append(adapter).append("), ").append(adapter)
+                .append(".sourceSpec, ").append(javaString(originOf(op)))
+                .append(");\n");
+            out.append(indent(indent + 1)).append("if (!(").append(source)
+                .append(" instanceof JvmRuntime.FunctionValue) || "
+                    + "((JvmRuntime.FunctionValue) ").append(source)
+                .append(").fid == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("String ").append(sourceModule)
+                .append(" = dealModuleOfFunction(((JvmRuntime.FunctionValue) ")
+                .append(source).append(").fid);\n");
+            out.append(indent(indent + 1)).append("if (").append(sourceModule)
+                .append(" == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.startBodyTask(")
+                .append(token.tokenId()).append(", \"DEAL_BODY_TASK\", () -> {\n");
+            out.append(indent(indent + 2)).append("String __prevM = "
+                + "JvmRuntime.currentModule();\n");
+            out.append(indent(indent + 2)).append("MODULE = ").append(sourceModule)
+                .append(";\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.pushFrame("
+                + "((JvmRuntime.FunctionValue) ").append(source).append(").fid);\n");
+            out.append(indent(indent + 2)).append("try {\n");
+            out.append(indent(indent + 3)).append("return "
+                + "((JvmRuntime.FunctionValue) ").append(source)
+                .append(").fn.invoke(java.util.Arrays.copyOfRange(new Object[]{ ")
+                .append(String.join(", ", args)).append(" }, 0, ")
+                .append(adapter).append(".arity));\n");
+            out.append(indent(indent + 2)).append("} finally {\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 3)).append("MODULE = __prevM;\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
+            out.append(indent(indent + 2)).append("}\n");
+            out.append(indent(indent + 1)).append("});\n");
+            // DEAL_BODY: the carrier's own invoker under the callee's
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append(indent(indent)).append("} else if (").append(carrier)
+                .append(" instanceof JvmRuntime.FunctionValue ")
+                .append("__fv").append(id).append(" && __fv").append(id)
+                .append(".fid != null) {\n");
+            String functionValue = "__fv" + id;
+            out.append(indent(indent + 1)).append("String __fm").append(id)
                 .append(" = dealModuleOfFunction(").append(functionValue)
                 .append(".fid);\n");
-            out.append(indent(indent)).append("if (__fm").append(id)
+            out.append(indent(indent + 1)).append("if (__fm").append(id)
                 .append(" == null) {\n");
-            emitDynamicCarrierFailure(op, carrier, indent + 1);
-            out.append(indent(indent)).append("}\n");
-            out.append(indent(indent)).append("JvmRuntime.startBodyTask(")
+            emitDynamicCarrierFailure(op, carrier, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.startBodyTask(")
                 .append(token.tokenId()).append(", \"DEAL_BODY_TASK\", () -> {\n");
-            out.append(indent(indent + 1)).append("String __prevM = "
+            out.append(indent(indent + 2)).append("String __prevM = "
                 + "JvmRuntime.currentModule();\n");
-            out.append(indent(indent + 1)).append("MODULE = __fm").append(id)
+            out.append(indent(indent + 2)).append("MODULE = __fm").append(id)
                 .append(";\n");
-            out.append(indent(indent + 1)).append("JvmRuntime.setModule(MODULE);\n");
-            out.append(indent(indent + 1)).append("JvmRuntime.pushFrame(")
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.pushFrame(")
                 .append(functionValue).append(".fid);\n");
-            out.append(indent(indent + 1)).append("try {\n");
-            out.append(indent(indent + 2)).append("return ")
+            out.append(indent(indent + 2)).append("try {\n");
+            out.append(indent(indent + 3)).append("return ")
                 .append(functionValue)
                 .append(".fn.invoke(new Object[]{ ").append(String.join(", ", args))
                 .append(" });\n");
-            out.append(indent(indent + 1)).append("} finally {\n");
-            out.append(indent(indent + 2)).append("JvmRuntime.popFrame();\n");
-            out.append(indent(indent + 2)).append("MODULE = __prevM;\n");
-            out.append(indent(indent + 2)).append("JvmRuntime.setModule(__prevM);\n");
-            out.append(indent(indent + 1)).append("}\n");
-            out.append(indent(indent)).append("}");
-            out.append(");\n");
+            out.append(indent(indent + 2)).append("} finally {\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 3)).append("MODULE = __prevM;\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
+            out.append(indent(indent + 2)).append("}\n");
+            out.append(indent(indent + 1)).append("});\n");
+            // The fail-closed residue: no class is resolvable.
+            out.append(indent(indent)).append("} else {\n");
+            emitDynamicCarrierFailure(op, carrier, indent + 1);
+            out.append(indent(indent)).append("}\n");
         }
         /**
          * The sync host call arm (ISSUE-0651;
@@ -5116,14 +5176,39 @@ public final class JvmSemanticEmitter {
                 .append(" = ").append(value).append(";\n");
             emitBoundaryStart(boundary, "__rv_" + op.opId().id(),
                 boundaryPayload.descriptor(), indent);
-            out.append(indent(indent)).append("Object __rvc_").append(op.opId().id())
+            // The body-local return cell's own failure projection: the cell
+            // projection carries the cell's origin (the callee's RETURN), the
+            // boundary and the RETURN op emit their FAILURE terminals, and the
+            // identical error propagates (the semantic oracle's
+            // runBoundaryChild + the owning-op FAILURE).
+            String rvc = "__rvc_" + op.opId().id();
+            String rejection = "__bre_" + op.opId().id();
+            String caught = "__be_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(rvc).append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(rvc)
                 .append(" = JvmRuntime.bcheck(")
                 .append(javaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(javaString(staticKind(boundaryPayload.descriptor())))
                 .append(", __rv_").append(op.opId().id()).append(");\n");
-            emitBoundarySuccess(boundary, "__rvc_" + op.opId().id(),
-                boundaryPayload.descriptor(), indent);
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError ")
+                .append(caught).append(") {\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.DealError ")
+                .append(rejection).append(" = new JvmRuntime.DealError(")
+                .append(caught).append(".code, ").append(caught)
+                .append(".msg, ")
+                .append(javaString(originOf(boundary)))
+                .append(", ").append(caught).append(".expected, ").append(caught)
+                .append(".actual, ").append(caught).append(".frames, null);\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "JvmRuntime.errtext(" + rejection + ")", indent + 1);
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(" + rejection + ")", indent + 1);
+            out.append(indent(indent + 1)).append("throw ").append(rejection)
+                .append(";\n");
+            out.append(indent(indent)).append("}\n");
+            emitBoundarySuccess(boundary, rvc, boundaryPayload.descriptor(), indent);
             emitPlainSuccess(op, indent);
             if (tryDepth > 0) {
                 emitTransferClosures(op, null, true, indent);

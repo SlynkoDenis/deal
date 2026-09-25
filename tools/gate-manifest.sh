@@ -633,10 +633,14 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # ids, the DEAL_BODY frame push and module switch with the carrier's own
   # invoker, the landed D15 adapter path with the leading-M projection,
   # the HOST row and the pinned E8001 expected/actual residue), the
-  # closure-carrier, adapter-carrier, and dynamic-async drives whose
-  # oracle and trace-mode emitters agree event-for-event and whose
-  # production artifacts execute under luajit and javac --release 25
-  # -proc:none + java, the E8001 and E8010 fault drives, the factory
+  # closure-carrier, adapter-carrier, dynamic-async, and dynamic-async-
+  # adapter drives whose oracle and trace-mode emitters agree
+  # event-for-event and whose production artifacts execute under luajit
+  # and javac --release 25 -proc:none + java, the residue and fault drives
+  # (the non-function carrier's E8001, the adapter source-signature E8010,
+  # the dynamically invoked DEAL body's own failing RETURN cell with the
+  # callee's origin, and the adapter whose D15 source value identifies no
+  # class the closed protocol resolves), the factory
   # triple (descriptor text, canonical spec text, function identity) and
   # the adapter's pinned null fid, and the unchanged closed op-kind,
   # boundary-kind, failure-policy, and payload sets. The drives register

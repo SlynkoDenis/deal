@@ -105,11 +105,30 @@ import java.util.Set;
  *       AWAIT} through the recorded task cell; the async-entry drive
  *       compares the oracle and both emitted dispatch entries
  *       event-for-event and executes under both real toolchains.</li>
+ *   <li><b>The dynamic async adapter drive.</b> The awaited callee's
+ *       runtime carrier is a {@code FUNCTION_ADAPT} value over an async
+ *       DEAL body: the ADAPTER class runs the landed D15 sequence (the
+ *       source value's own tag, the source-signature check, the
+ *       leading-M argument projection) and starts the source body task
+ *       under the source's module context with the recorded task cell
+ *       and zero caller-side return boundaries beyond it, matching the
+ *       oracle event-for-event and executing under both real
+ *       toolchains.</li>
+ *   <li><b>The composed drive.</b> The host module's sync and async
+ *       exports, the compiled module's sync and async exports, and the
+ *       dynamic dispatch compose in one production project on both
+ *       targets.</li>
  *   <li><b>Fault drives.</b> A carrier that is not a function value
  *       fails with the pinned E8001 {@code expected function} projection
  *       at the call origin on both targets and fails closed in the
  *       oracle; an adapter whose recorded source signature differs from
- *       its source's carried spec fails with E8010 under D15.</li>
+ *       its source's carried spec fails with E8010 under D15; a
+ *       dynamically invoked DEAL body whose own {@code RETURN} cell
+ *       check fails projects the cell's text with the callee's origin on
+ *       both targets and in the oracle; an adapter whose D15 source
+ *       value identifies no class the closed protocol resolves fails
+ *       closed with the pinned E8001 (and the oracle's fail-closed
+ *       guard).</li>
  *   <li><b>No extension, no regression.</b> The closed op-kind,
  *       boundary-kind, failure-policy, and payload-record sets are
  *       unchanged; the static call and async arms keep their landed
@@ -211,6 +230,33 @@ public class DynamicDispatchEmissionTest {
 
         export async function probe(): int {
           return await drive(value)
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The dynamic async adapter drive: an awaited function-typed parameter
+     * whose runtime carrier is a {@code FUNCTION_ADAPT} value over an async
+     * DEAL body (the reviewer's drive shape: the declared target takes two
+     * parameters, the source takes one, so the leading-M projection drops
+     * the second argument).
+     */
+    private static final String ASYNC_ADAPTER_SOURCE = """
+        async function inc(x: int): int {
+          return x + 1
+        }
+
+        async function drive(f: async (a: int, b: int) => int, x: int, y: int): int {
+          let v: int = await f(x, y)
+          return v
+        }
+
+        export async function probe(): int {
+          let adapted: async (a: int, b: int) => int = inc
+          return await drive(adapted, 41, 9)
         }
 
         export function main(): null {
@@ -432,20 +478,30 @@ public class DynamicDispatchEmissionTest {
      * The runtime carrier binding of the value flowing into one parameter
      * of the caller's call: the binding the argument's own materialization
      * registered, which is exactly the binding the runtime carrier carries
-     * into the callee's parameter cell.
+     * into the callee's parameter cell. Both the static {@code CALL} and
+     * {@code ASYNC_START} arms carry their declared parameter cells.
      */
     private static FunctionExecutionBinding carrierBinding(LoweredModuleUnit unit,
             int parameterIndex) {
         for (SemanticOp op : unit.ops()) {
-            if (!(op.payload() instanceof KindPayload.CallPayload call)
-                    || !(call.callee() instanceof KindPayload.CallCallee.Static)) {
+            KindPayload.CallCallee callee;
+            List<OpId> parameterBoundaries;
+            if (op.payload() instanceof KindPayload.CallPayload call) {
+                callee = call.callee();
+                parameterBoundaries = call.parameterBoundaryOpIds();
+            } else if (op.payload() instanceof KindPayload.AsyncStartPayload start) {
+                callee = start.callee();
+                parameterBoundaries = start.parameterBoundaryOpIds();
+            } else {
                 continue;
             }
-            if (parameterIndex >= call.parameterBoundaryOpIds().size()) {
+            if (!(callee instanceof KindPayload.CallCallee.Static)) {
                 continue;
             }
-            SemanticOp boundary = opOf(unit,
-                call.parameterBoundaryOpIds().get(parameterIndex));
+            if (parameterIndex >= parameterBoundaries.size()) {
+                continue;
+            }
+            SemanticOp boundary = opOf(unit, parameterBoundaries.get(parameterIndex));
             if (boundary == null
                     || !(boundary.payload() instanceof KindPayload.BoundaryPayload payload)
                     || payload.kind() != BoundaryKind.FUNCTION_PARAMETER) {
@@ -480,6 +536,17 @@ public class DynamicDispatchEmissionTest {
         if (carrier == null) {
             return null;
         }
+        return doctorAndValidate(unit, raw, callee, carrier, what);
+    }
+
+    /**
+     * Registers the callee carrier read with the runtime carrier's own
+     * binding (the pending {@code DynamicFunctionValue} materialization
+     * registration of the function-typed-value child, ISSUE-0622) and runs
+     * the closed gate over the resulting project.
+     */
+    private static Drive doctorAndValidate(LoweredModuleUnit unit, RawLowering raw,
+            ValueId callee, FunctionExecutionBinding carrier, String what) {
         LoweredModuleUnit doctored = withRegistration(unit, callee, carrier);
         ExecutableLoweredProject project = projectOf(doctored);
         java.util.Optional<deal.diagnostics.CompilerDiagnostic> gate =
@@ -494,6 +561,16 @@ public class DynamicDispatchEmissionTest {
         }
         return new Drive(doctored, raw.table(), project,
             new ClassFactoryRegistry(Map.of()));
+    }
+
+    /** The closed origin text of one op ({@code source:line:column}). */
+    private static String originText(SemanticOp op) {
+        deal.semantic.ir.SourceSpan span = op.origin().span();
+        if (span == null) {
+            return "-";
+        }
+        return op.origin().sourceId() + ":" + span.startLine() + ":"
+            + span.startColumn();
     }
 
     // =========================================================================
@@ -950,6 +1027,78 @@ public class DynamicDispatchEmissionTest {
     }
 
     // =========================================================================
+    // 3a. The dynamic async adapter drive
+    // =========================================================================
+
+    private static void testDynamicAsyncAdapterDrive() throws Exception {
+        System.out.println("-- the dynamic async adapter: the awaited "
+            + "FUNCTION_ADAPT value's D15 source class starts the source body task "
+            + "on the oracle and both real toolchains --");
+        Fixture fixture = fixture(ASYNC_ADAPTER_SOURCE, "dynamic async adapter");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "dynamic async adapter");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+        SemanticOp start = dynamicAsyncStart(unit);
+        check(start != null, "the awaited adapter callee lowers the dynamic "
+            + "ASYNC_START shape");
+        if (start == null) {
+            return;
+        }
+        ValueId callee = ((KindPayload.CallCallee.Dynamic)
+            ((KindPayload.AsyncStartPayload) start.payload()).callee()).callee();
+        FunctionExecutionBinding carrier = carrierBinding(unit, 0);
+        check(carrier instanceof FunctionExecutionBinding.AdapterBinding,
+            "the awaited argument's carrier binding is the adapter's own "
+                + "AdapterBinding: " + carrier);
+        if (!(carrier instanceof FunctionExecutionBinding.AdapterBinding adapter)) {
+            return;
+        }
+        checkEq(1, adapter.sourceSignature().paramTypes().size(),
+            "the adapter's source arity is the leading-M projection width "
+                + "(the dropped second argument proves the projection)");
+        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
+            "dynamic async adapter");
+        if (drive == null) {
+            return;
+        }
+        // The async-entry matrix: the oracle and both emitted dispatch entries
+        // agree event-for-event (the D15 source resolution, the source body
+        // task under the source's module context, the source body's own
+        // RETURN cell, and the single completion at the AWAIT).
+        Path workspace = Files.createTempDirectory("dynamic-async-adapter-diff");
+        try {
+            SemanticDifferentialHarness.Verdict verdict =
+                SemanticDifferentialHarness.runAsyncEntry(drive.project(),
+                    Map.of(MODULE, raw.table()), "probe", List.of(),
+                    SemanticDifferentialHarness.Expectation.success(
+                        "dynamic async adapter", List.of(), "int:42"), workspace, null);
+            checkEq(3, verdict.runs().size(), "the dynamic async adapter drive "
+                + "produced the three consumers: " + verdict.failures());
+            if (verdict.runs().size() == 3) {
+                List<String> oracleTrace = traceLines(verdict.runs().get(0));
+                check(!oracleTrace.isEmpty(), "the oracle produced events for the "
+                    + "dynamic async adapter drive");
+                for (SemanticRuntimeModel.ConsumerRun consumer : verdict.runs()) {
+                    checkEq(oracleTrace, traceLines(consumer),
+                        "the " + consumer.consumer() + " async-entry trace equals "
+                            + "the oracle's event-for-event");
+                }
+                check(verdict.pass(), "the dynamic async adapter differential "
+                    + "verdict passes: " + verdict.failures());
+            }
+        } finally {
+            deleteRecursively(workspace);
+        }
+        runLuaProduction("dynamic async adapter", drive, "app#probe");
+        runJvmProduction("dynamic async adapter", drive, "probe");
+    }
+
+    // =========================================================================
     // 3b. The composed drive (T2/T3/T5/T6/T8)
     // =========================================================================
 
@@ -1376,6 +1525,81 @@ public class DynamicDispatchEmissionTest {
             + "an adapter is not a DEAL body");
     }
 
+    /**
+     * The dynamic async start's emitted dispatch surface (ISSUE-0658 review
+     * cycle 1 finding 1): the DEAL_BODY class starts the callee body task and
+     * the ADAPTER class runs the D15 sequence and starts the source class's
+     * task with the leading-M projection; every other class residues.
+     */
+    private static void testEmittedAsyncDispatchSurface() throws Exception {
+        System.out.println("-- the emitted async dispatch surface: the DEAL_BODY "
+            + "and ADAPTER class branches and the fail-closed residue --");
+        Fixture fixture = fixture(ASYNC_ADAPTER_SOURCE, "dynamic async adapter");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "dynamic async adapter");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+        SemanticOp start = dynamicAsyncStart(unit);
+        if (start == null) {
+            fail("the async dispatch surface drive carries the dynamic ASYNC_START");
+            return;
+        }
+        ValueId callee = ((KindPayload.CallCallee.Dynamic)
+            ((KindPayload.AsyncStartPayload) start.payload()).callee()).callee();
+        FunctionExecutionBinding carrier = carrierBinding(unit, 0);
+        if (carrier == null) {
+            fail("the async dispatch surface drive resolves the adapter carrier");
+            return;
+        }
+        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
+            "dynamic async dispatch surface");
+        if (drive == null) {
+            return;
+        }
+        String lua = LuaSemanticEmitter.emitProductionProject(drive.project(),
+            Map.of(MODULE, drive.table()), Map.of(MODULE, drive.registry()),
+            new HostDeclarationSurface(Map.of()));
+        String jvm = JvmSemanticEmitter.emitProductionProject(drive.project(),
+            Map.of(MODULE, drive.table()), Map.of(MODULE, drive.registry()),
+            JvmBackend.classNameFor(drive.project().entryModule().path()),
+            new HostDeclarationSurface(Map.of())).source();
+        check(lua.contains("if __dynK == \"DEAL_BODY\" then")
+                && lua.contains("elseif __dynK == \"ADAPTER\" then")
+                && lua.contains("__adaptSource(__dynC)")
+                && lua.contains("pcall(__fncheck, __dynS, __dynC.__csrc,"),
+            "the LuaJIT async arm dispatches the DEAL_BODY and ADAPTER classes "
+                + "through the landed D15 sequence");
+        check(lua.contains("unpack(S.__sa")
+                && lua.contains(", 1, __dynC.__m)"),
+            "the LuaJIT async adapter path projects the leading-M recorded "
+                + "arguments (zero caller-side return boundaries)");
+        check(lua.contains("  end), S.__sa"),
+            "the LuaJIT async arm starts the class task with the recorded argument "
+                + "carrier");
+        check(jvm.contains("if (__dc" + start.opId().id()
+                + " instanceof JvmRuntime.AdapterValue)"),
+            "the JVM async arm reads the carrier's own class tag");
+        check(jvm.contains("JvmRuntime.fnCheck(JvmRuntime.adapterSource(")
+                && jvm.contains(".sourceSpec, ")
+                && jvm.contains("java.util.Arrays.copyOfRange(new Object[]{ ")
+                && jvm.contains(".arity));"),
+            "the JVM async adapter path runs the landed D15 sequence with the "
+                + "leading-M projection");
+        check(jvm.contains("dealModuleOfFunction(((JvmRuntime.FunctionValue) ")
+                && jvm.contains("instanceof JvmRuntime.FunctionValue ")
+                && jvm.contains(".fid != null"),
+            "the JVM async arm resolves the source's owning module through the "
+                + "emitted lookup");
+        check(lua.contains("else\n") && lua.contains("__dynE = __failExpr(\"E8001\"")
+                && jvm.contains("JvmRuntime.fail(\"E8001\", \"expected function, "
+                    + "got \""),
+            "every other carrier class residues with the pinned E8001 text");
+    }
+
     /** Whether the runtime's adapter carrier pins the null function id. */
     private static boolean JvmRuntimeAdapterPinsNull() throws Exception {
         String source = Files.readString(
@@ -1723,6 +1947,259 @@ public class DynamicDispatchEmissionTest {
     }
 
     // =========================================================================
+    // 5c. The DEAL-body return-cell fault
+    // =========================================================================
+
+    /**
+     * A dynamically invoked DEAL body whose {@code RETURN} cell check fails:
+     * the callee body's return-value producer is doctored to publish a value
+     * of a runtime kind the body's own declared return descriptor rejects, so
+     * the executed cell projects its pinned E8001 text at the cell's origin
+     * and the CALL op's FAILURE terminal carries the callee's origin — in the
+     * oracle and on both production artifacts.
+     */
+    private static void testDealBodyReturnCellFault() throws Exception {
+        System.out.println("-- the DEAL-body return-cell fault: the dynamically "
+            + "invoked body's own RETURN cell projects its pinned text with the "
+            + "callee's origin on both targets and in the oracle --");
+        Fixture fixture = fixture(CLOSURE_SOURCE, "closure drive");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "return-cell fault");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+        SemanticOp call = dynamicCall(unit);
+        if (call == null) {
+            fail("the return-cell fault unit carries the dynamic CALL");
+            return;
+        }
+        ValueId callee = ((KindPayload.CallCallee.Dynamic)
+            ((KindPayload.CallPayload) call.payload()).callee()).callee();
+        FunctionExecutionBinding carrier = carrierBinding(unit, 0);
+        if (!(carrier instanceof FunctionExecutionBinding.LoweredBody body)) {
+            fail("the return-cell fault drive resolves the closure carrier: " + carrier);
+            return;
+        }
+        // The callee body's own RETURN and its single FUNCTION_RETURN cell.
+        SemanticOp returnOp = null;
+        OpId cell = null;
+        for (OpId member : raw.table().blockOps().get(body.blockId())) {
+            SemanticOp op = opOf(unit, member);
+            if (op.kind() == SemanticOpKind.RETURN
+                    && op.payload() instanceof KindPayload.ReturnPayload returned) {
+                returnOp = op;
+                cell = returned.returnBoundaryOpId();
+            }
+        }
+        if (returnOp == null || cell == null) {
+            fail("the callee body records its single RETURN and FUNCTION_RETURN cell");
+            return;
+        }
+        SemanticOp cellOp = opOf(unit, cell);
+        String cellOrigin = cellOp == null ? "-" : originText(cellOp);
+        // The doctor: the body's return-value producer is replaced by a CONST
+        // of a string under the identical op identity and result slot, so the
+        // body's own descriptor-int cell runs its pinned E8001 projection on
+        // the produced value (the op's contract digest is recomputed).
+        ValueId returnedValue = ((KindPayload.ReturnPayload) returnOp.payload()).value();
+        List<SemanticOp> ops = new ArrayList<>();
+        for (SemanticOp op : unit.ops()) {
+            if (op.result() instanceof ValueId value && value.equals(returnedValue)) {
+                KindPayload payload = new KindPayload.ConstPayload(
+                    new deal.semantic.ir.ScalarValue.String("carrier"));
+                ops.add(new SemanticOp(op.opId(), SemanticOpKind.CONST, op.origin(),
+                    op.result(), RuntimeDescriptor.String.INSTANCE, List.of(), List.of(),
+                    payload, FailurePolicyId.NO_DEAL_FAILURE,
+                    contractOf(SemanticOpKind.CONST, payload,
+                        RuntimeDescriptor.String.INSTANCE,
+                        FailurePolicyId.NO_DEAL_FAILURE)));
+            } else {
+                ops.add(op);
+            }
+        }
+        Map<FunctionAllocationIdentity, FunctionExecutionBinding> bindings =
+            new LinkedHashMap<>(unit.functionBindings());
+        LoweredModuleUnit doctoredOps = new LoweredModuleUnit(unit.formatVersion(),
+            unit.semanticProfile(), unit.moduleId(), unit.interfaceHash(),
+            unit.loweringContextHash(), unit.requiredCapabilities(),
+            unit.constructCoverage(), unit.classLayouts(), unit.functions(),
+            unit.moduleInit(), unit.exportPlan(), bindings, ops);
+        Drive drive = doctorAndValidate(doctoredOps, raw, callee, carrier,
+            "return-cell fault");
+        if (drive == null) {
+            return;
+        }
+        // The trace-mode consumers and the oracle: the callee body's cell
+        // FAILURE and the CALL op's FAILURE terminal, each carrying the
+        // callee's origin (the START input atom of the doctored value is not
+        // comparable — the doctor deliberately breaks the declared-descriptor
+        // tie the atom agreement rests on, which no checker-valid program can
+        // break).
+        Path workspace = Files.createTempDirectory("dynamic-return-fault");
+        try {
+            SemanticDifferentialHarness.Verdict verdict =
+                SemanticDifferentialHarness.runProject(drive.project(),
+                    Map.of(MODULE, raw.table()), Map.of(MODULE, drive.registry()),
+                    SemanticDifferentialHarness.Expectation.failure("return-cell fault",
+                        List.of(), "E8001", cellOrigin), workspace);
+            checkEq(3, verdict.runs().size(), "the return-cell fault drive produced the "
+                + "three consumers: " + verdict.failures());
+            for (SemanticRuntimeModel.ConsumerRun consumer : verdict.runs()) {
+                check(consumer.terminal()
+                        instanceof SemanticRuntimeModel.Terminal.DealFailure failure
+                        && "E8001".equals(failure.error().code())
+                        && "expected int, got string".equals(failure.error().message())
+                        && cellOrigin.equals(failure.error().origin()),
+                    "the " + consumer.consumer() + " terminal projects the callee "
+                        + "body's RETURN-cell projection with the callee's origin "
+                        + cellOrigin + ": " + consumer.terminal());
+                SemanticRuntimeModel.ErrorSnapshot cellFailure =
+                    failureSnapshotOf(consumer, cell);
+                check(cellFailure != null && cellOrigin.equals(cellFailure.origin()),
+                    "the " + consumer.consumer() + " emits the cell's own FAILURE "
+                        + "with the callee's origin " + cellOrigin + ": " + cellFailure);
+                SemanticRuntimeModel.ErrorSnapshot callFailure =
+                    failureSnapshotOf(consumer, call.opId());
+                check(callFailure != null && cellOrigin.equals(callFailure.origin()),
+                    "the " + consumer.consumer() + " emits the CALL op's FAILURE "
+                        + "terminal with the callee's origin " + cellOrigin + ": "
+                        + callFailure);
+            }
+        } finally {
+            deleteRecursively(workspace);
+        }
+        assertFaultRun("luajit", luaResidue(drive.project(), raw.table()), "E8001",
+            "expected int, got string", cellOrigin);
+        assertFaultRun("java", jvmResidue(drive.project(), raw.table()), "E8001",
+            "expected int, got string", cellOrigin);
+    }
+
+    /** The FAILURE snapshot of one op in one consumer's trace, or null. */
+    private static SemanticRuntimeModel.ErrorSnapshot failureSnapshotOf(
+            SemanticRuntimeModel.ConsumerRun run, OpId opId) {
+        for (SemanticRuntimeModel.TraceEvent event : run.trace()) {
+            if (event.op().equals(opId)
+                    && event.phase() == SemanticRuntimeModel.Phase.FAILURE) {
+                return event.error();
+            }
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // 5d. The adapter source-class fault
+    // =========================================================================
+
+    /**
+     * The adapter source-class fault fixture: an adapter over a second
+     * adapter ({@code inc} adapted to two parameters, then to three). The
+     * D15 source value of the dynamically dispatched adapter is itself an
+     * adapter, so its class identifies no class the closed resolution
+     * protocol realizes.
+     */
+    private static final String ADAPTER_SOURCE_CLASS_FAULT_SOURCE = """
+        function inc(x: int): int {
+          return x + 1
+        }
+
+        function apply(f: (a: int, b: int, c: int) => int, x: int, y: int, z: int): int {
+          return f(x, y, z)
+        }
+
+        export function main(): null {
+          let one: (a: int, b: int) => int = inc
+          let two: (a: int, b: int, c: int) => int = one
+          let r: int = apply(two, 41, 8, 1)
+          if (r !== 42) {
+            throw { code: "TEST_FAIL", message: "adapter source class" }
+          }
+          return null
+        }
+        """;
+
+    /**
+     * An adapter whose D15 source value identifies no resolvable class: the
+     * oracle fails closed (the adapter-over-adapter source is outside the
+     * statically resolved slice) and both production artifacts project the
+     * pinned E8001 {@code expected function} residue at the call origin.
+     */
+    private static void testAdapterSourceClassFault() throws Exception {
+        System.out.println("-- the adapter source-class fault: an adapter whose D15 "
+            + "source value identifies no class fails closed with the pinned E8001 "
+            + "at the call origin --");
+        Fixture fixture = fixture(ADAPTER_SOURCE_CLASS_FAULT_SOURCE,
+            "adapter source-class fault");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "adapter source-class fault");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+        SemanticOp call = dynamicCall(unit);
+        if (call == null) {
+            fail("the source-class fault unit carries the dynamic CALL");
+            return;
+        }
+        ValueId callee = ((KindPayload.CallCallee.Dynamic)
+            ((KindPayload.CallPayload) call.payload()).callee()).callee();
+        FunctionExecutionBinding carrier = carrierBinding(unit, 0);
+        check(carrier instanceof FunctionExecutionBinding.AdapterBinding,
+            "the drive registers the callee carrier read with the adapter's own "
+                + "AdapterBinding: " + carrier);
+        if (!(carrier instanceof FunctionExecutionBinding.AdapterBinding)) {
+            return;
+        }
+        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
+            "adapter source-class fault");
+        if (drive == null) {
+            return;
+        }
+        // The oracle: the D15 source resolution classifies an adapter source,
+        // which the closed resolution protocol does not realize — the drive
+        // fails closed before any class path executes (the same fail-closed
+        // shape testFailClosedResidue pins for an unresolvable carrier).
+        String oracleFailure = null;
+        try {
+            SemanticOracle.executeProjectInits(drive.project(), Map.of(MODULE, raw.table()),
+                Map.of(MODULE, new ClassFactoryRegistry(Map.of())), null);
+        } catch (RuntimeException rejected) {
+            oracleFailure = rejected.getClass().getSimpleName() + ": "
+                + rejected.getMessage();
+        }
+        check(oracleFailure != null && oracleFailure.contains("adapter-of-adapter"),
+            "the oracle fails closed on the adapter source that identifies no "
+                + "class: " + oracleFailure);
+        // The artifacts project the pinned E8001 residue at the call origin.
+        String callOrigin = originText(call);
+        assertFaultRun("luajit", luaResidue(drive.project(), raw.table()), "E8001",
+            "expected function, got function", callOrigin);
+        assertFaultRun("java", jvmResidue(drive.project(), raw.table()), "E8001",
+            "expected function, got function", callOrigin);
+    }
+
+    /**
+     * A residue/fault run: the artifact exits with the pinned projection and
+     * the failure carries the failing cell's (or the call's) own origin.
+     */
+    private static void assertFaultRun(String target, Outcome outcome, String code,
+            String text, String origin) {
+        checkEq(0, outcome.exitCode(), "the fault drive (" + target
+            + ") exits cleanly: " + outcome.output());
+        check(outcome.stdout().startsWith("ERR:" + code + "|") && outcome.stdout()
+                .contains(text),
+            "the fault drive (" + target + ") projects the pinned " + code + " "
+                + "text at the failure origin: " + outcome.stdout().replace("\n", "\\n"));
+        check(outcome.stdout().contains("|" + origin + "|"), "the fault drive ("
+            + target + ") carries the failing op's origin " + origin + ": "
+            + outcome.stdout().replace("\n", "\\n"));
+    }
+
+    // =========================================================================
     // 6. No extension, no regression
     // =========================================================================
 
@@ -1807,10 +2284,14 @@ public class DynamicDispatchEmissionTest {
         testClosureCarrierDrive();
         testAdapterCarrierDrive();
         testDynamicAsyncDrive();
+        testDynamicAsyncAdapterDrive();
         testComposedDrive();
         testEmittedSurface();
+        testEmittedAsyncDispatchSurface();
         testFailClosedResidue();
         testAdapterSourceSignatureFault();
+        testDealBodyReturnCellFault();
+        testAdapterSourceClassFault();
         testNoExtension();
         System.out.println();
         System.out.println("Passed: " + passed + ", Failed: " + failed);
