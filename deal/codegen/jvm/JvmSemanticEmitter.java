@@ -671,6 +671,28 @@ public final class JvmSemanticEmitter {
             out.append("\n  static JvmRuntime.Table exportSurface(String module) {\n");
             out.append("    return JvmRuntime.exportSurface(module);\n");
             out.append("  }\n");
+            // The dynamic dispatch's function-id -> owning-module
+            // resolution (ISSUE-0658;
+            // dynamic-call-shape-production-and-emission Y6): a generated
+            // lookup over the closure's function ids, so the DEAL_BODY
+            // class path establishes the callee's module before invoking
+            // the resolved carrier's own invoker. A function id the
+            // closure does not carry resolves null and the dynamic call
+            // fails closed at its origin.
+            out.append("\n  /**\n   * The owning module path of one lowered function id of this\n"
+                + "   * closure, or null for an id outside the closure.\n   */\n");
+            out.append("  static String dealModuleOfFunction(String fid) {\n");
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (LoweredFunction function : moduleUnit.functions().values()) {
+                    out.append("    if (").append(javaString(
+                            String.valueOf(function.functionId().id())))
+                        .append(".equals(fid)) return ")
+                        .append(javaString(moduleUnit.moduleId().path()))
+                        .append(";\n");
+                }
+            }
+            out.append("    return null;\n");
+            out.append("  }\n");
             // Slots and cells (every module; ids are globally unique).
             java.util.LinkedHashSet<String> fields = new java.util.LinkedHashSet<>();
             for (LoweredModuleUnit moduleUnit : units.values()) {
@@ -2947,6 +2969,15 @@ public final class JvmSemanticEmitter {
                 emitBoundarySuccess(boundary, "__pb_" + boundary.opId().id(),
                     boundaryPayload.descriptor(), indent);
             }
+            if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
+                // The dynamic dispatch (ISSUE-0658): the recorded parameter
+                // cells above are the class-independent family; the
+                // carrier's own class tag selects the path.
+                emitDynamicCall(op, payload, dynamic, indent);
+                emitResultSuccess(op, slot((ValueId) op.result()),
+                    (RuntimeDescriptor) op.resultType(), indent);
+                return;
+            }
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     FunctionId callee = body.functionId();
@@ -3416,7 +3447,9 @@ public final class JvmSemanticEmitter {
          * inline Static binding or the unit's registered binding of an
          * Indirect callee identity (the same registration the semantic
          * oracle re-resolves at execution). A Dynamic callee is the
-         * runtime-resolution slice (ISSUE-0531) and fails closed here.
+         * runtime-resolution slice (ISSUE-0531/ISSUE-0658): its execution
+         * class is read from the resolved carrier at execution and the
+         * emission-time binding is null ({@link #emitDynamicCall}).
          */
         private FunctionExecutionBinding callBinding(KindPayload.CallPayload payload) {
             FunctionExecutionBinding binding = switch (payload.callee()) {
@@ -3427,13 +3460,380 @@ public final class JvmSemanticEmitter {
                             indirect.callee().id()));
                 case KindPayload.CallCallee.Dynamic ignored -> null;
             };
-            if (binding == null) {
+            if (binding == null
+                    && !(payload.callee() instanceof KindPayload.CallCallee.Dynamic)) {
                 throw new IllegalStateException("CALL " + payload
                     + " resolves no FunctionExecutionBinding (producer defect)");
             }
             return binding;
         }
 
+        /**
+         * The dynamic CALL arm (ISSUE-0658;
+         * {@code dynamic-call-shape-production-and-emission} Y2/Y3/Y5/Y6
+         * and the dynamic dispatch contract): the recorded parameter
+         * cells ran once, left to right, before the dispatch (the
+         * class-independent family); the carrier's own class tag then
+         * selects exactly one class path — never the checked descriptor,
+         * the callee spelling, or an argument value.
+         *
+         * <p>{@code DEAL_BODY} resolves the carrier's function id to its
+         * owning module through the emitted
+         * {@code dealModuleOfFunction} lookup (built over the closure's
+         * function ids), pushes the callee frame, switches the module
+         * context, and invokes the carrier's own invoker ({@code fn});
+         * {@code ADAPTER} runs the landed D15 sequence (the source
+         * value's own tag, the source-signature check, the leading-M
+         * argument projection) and executes the cell the source class
+         * selects — a DEAL-body source runs that body's own
+         * {@code RETURN} cell; {@code HOST} invokes the loaded surface
+         * entry carrier through its own invoker and runs the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell of the
+         * dynamic return-boundary set.</p>
+         *
+         * <p>Every other carrier — and an adapter whose D15 source value
+         * identifies no executable class at this boundary — fails closed
+         * with the pinned E8001 {@code expected function} projection
+         * ({@code expected}/{@code actual}) at the call origin, exactly
+         * the projection the materialization-site function row produces:
+         * never a guessed path and never a silent no-op. The module
+         * context and the frame stack are restored on success and on
+         * failure.</p>
+         */
+        private void emitDynamicCall(SemanticOp op, KindPayload.CallPayload payload,
+                                     KindPayload.CallCallee.Dynamic callee, int indent) {
+            KindPayload.DynamicReturnBoundary cells = payload.dynamicReturnBoundary();
+            if (cells == null) {
+                throw new IllegalStateException("the dynamic CALL " + op.opId()
+                    + " records no DynamicReturnBoundary cell set (producer defect)");
+            }
+            SemanticOp hostCell = opsById.get(cells.hostBoundaryOpId());
+            if (hostCell == null
+                    || !(hostCell.payload() instanceof KindPayload.BoundaryPayload boundary)
+                    || boundary.kind() != BoundaryKind.HOST_TO_DEAL) {
+                throw new IllegalStateException("the dynamic CALL " + op.opId()
+                    + " records the host return cell " + cells.hostBoundaryOpId()
+                    + ", which is not a HOST_TO_DEAL boundary of the emitted closure"
+                    + " (producer defect)");
+            }
+            String id = String.valueOf(op.opId().id());
+            String carrier = "__dc" + id;
+            String result = "__dr" + id;
+            String cls = "__dk" + id;
+            StringBuilder args = new StringBuilder();
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                if (args.length() > 0) {
+                    args.append(", ");
+                }
+                args.append(slot(((KindPayload.BoundaryPayload)
+                    opsById.get(boundaryId).payload()).input()));
+            }
+            String argList = args.toString();
+            out.append(indent(indent)).append("Object ").append(result)
+                .append(" = null;\n");
+            out.append(indent(indent)).append("Object ").append(carrier)
+                .append(" = ").append(slot(callee.callee())).append(";\n");
+            out.append(indent(indent)).append("String ").append(cls).append(";\n");
+            out.append(indent(indent)).append("if (").append(carrier)
+                .append(" instanceof JvmRuntime.AdapterValue) {\n");
+            out.append(indent(indent + 1)).append(cls).append(" = \"ADAPTER\";\n");
+            out.append(indent(indent)).append("} else if (").append(carrier)
+                .append(" instanceof JvmRuntime.FunctionValue __fv").append(id)
+                .append(" && __fv").append(id).append(".fid != null) {\n");
+            out.append(indent(indent + 1)).append(cls).append(" = \"DEAL_BODY\";\n");
+            out.append(indent(indent)).append("} else if (").append(carrier)
+                .append(" instanceof JvmRuntime.FunctionValue && !(").append(carrier)
+                .append(" instanceof JvmRuntime.StdlibFunctionValue)) {\n");
+            out.append(indent(indent + 1)).append(cls).append(" = \"HOST\";\n");
+            out.append(indent(indent)).append("} else {\n");
+            emitDynamicCarrierFailure(op, carrier, indent + 1);
+            out.append(indent(indent)).append("}\n");
+            // DEAL_BODY: the carrier's own invoker under the callee's
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append(indent(indent)).append("if (\"DEAL_BODY\".equals(")
+                .append(cls).append(")) {\n");
+            emitDynamicBodyInvoke(op, carrier, result,
+                "new Object[]{ " + argList + " }", id, indent + 1);
+            // ADAPTER: the landed D15 sequence; the source class selects
+            // the return cell (a DEAL-body source runs its own body's
+            // RETURN cell).
+            out.append(indent(indent)).append("} else if (\"ADAPTER\".equals(")
+                .append(cls).append(")) {\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.AdapterValue __ad")
+                .append(id).append(" = (JvmRuntime.AdapterValue) ").append(carrier)
+                .append(";\n");
+            out.append(indent(indent + 1)).append("Object __src").append(id)
+                .append(" = JvmRuntime.fnCheck(JvmRuntime.adapterSource(__ad")
+                .append(id).append("), __ad").append(id).append(".sourceSpec, ")
+                .append(javaString(originOf(op))).append(");\n");
+            out.append(indent(indent + 1)).append("if (__src").append(id)
+                .append(" instanceof JvmRuntime.FunctionValue) {\n");
+            emitDynamicBodyInvoke(op, "__src" + id, result,
+                "java.util.Arrays.copyOfRange(new Object[]{ " + argList
+                    + " }, 0, __ad" + id + ".arity)", id, indent + 2);
+            out.append(indent(indent + 1)).append("} else {\n");
+            emitDynamicCarrierFailure(op, "__src" + id, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            // HOST: the loaded surface entry carrier and the recorded
+            // HOST_TO_DEAL + HOST_SYNC_RETURN cell.
+            out.append(indent(indent)).append("} else {\n");
+            emitDynamicHostRow(op, payload, hostCell, carrier, result, id, indent + 1);
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append(slot((ValueId) op.result())).append(" = ")
+                .append(result).append(";\n");
+        }
+
+        /**
+         * One dynamically dispatched DEAL-body invocation: the carrier's
+         * function id resolves its owning module through the emitted
+         * lookup, the frame is pushed, the module context is switched,
+         * and the carrier's own invoker runs; the invocation's private
+         * state is restored and the op's FAILURE terminal carries the
+         * caller's module when the callee fails.
+         */
+        private void emitDynamicBodyInvoke(SemanticOp op, String source, String result,
+                                           String invokeArgs, String id, int indent) {
+            String fid = "__fy" + id;
+            out.append(indent(indent)).append("JvmRuntime.FunctionValue ").append(fid)
+                .append(" = (JvmRuntime.FunctionValue) ").append(source).append(";\n");
+            out.append(indent(indent)).append("if (").append(fid)
+                .append(".fid == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 1);
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append("String __fm").append(id)
+                .append(" = dealModuleOfFunction(").append(fid).append(".fid);\n");
+            out.append(indent(indent)).append("if (__fm").append(id)
+                .append(" == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 1);
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append("String __pm").append(id)
+                .append(" = MODULE;\n");
+            out.append(indent(indent)).append("String __pr").append(id)
+                .append(" = JvmRuntime.currentModule();\n");
+            out.append(indent(indent)).append("MODULE = __fm").append(id).append(";\n");
+            out.append(indent(indent)).append("JvmRuntime.setModule(MODULE);\n");
+            out.append(indent(indent)).append("JvmRuntime.pushFrame(").append(fid)
+                .append(".fid);\n");
+            out.append(indent(indent)).append("JvmRuntime.DealError __fd").append(id)
+                .append(" = null;\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(result).append(" = ")
+                .append(fid).append(".fn.invoke(").append(invokeArgs)
+                .append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e")
+                .append(id).append(") {\n");
+            out.append(indent(indent + 1)).append("__fd").append(id)
+                .append(" = __e").append(id).append(";\n");
+            out.append(indent(indent)).append("} finally {\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 1)).append("MODULE = __pm").append(id)
+                .append(";\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.setModule(__pr")
+                .append(id).append(");\n");
+            out.append(indent(indent)).append("}\n");
+            out.append(indent(indent)).append("if (__fd").append(id)
+                .append(" != null) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__fd" + id + ")", indent + 1);
+            out.append(indent(indent + 1)).append("throw __fd").append(id)
+                .append(";\n");
+            out.append(indent(indent)).append("}\n");
+        }
+
+        /**
+         * The dynamic dispatch's HOST row: the carrier is the loaded
+         * surface entry, so its own invoker bridges the emitted per-export
+         * wrapper ({@code carrier.fn}) with the completed production
+         * values, and the recorded {@code HOST_TO_DEAL} +
+         * {@code HOST_SYNC_RETURN} cell runs at the call origin (the
+         * oracle's {@code invokeResolvedHostRequest} followed by
+         * {@code runBoundaryChild}).
+         */
+        private void emitDynamicHostRow(SemanticOp op, KindPayload.CallPayload payload,
+                                        SemanticOp returnBoundary, String carrier,
+                                        String result, String id, int indent) {
+            StringBuilder args = new StringBuilder();
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                if (args.length() > 0) {
+                    args.append(", ");
+                }
+                args.append(slot(((KindPayload.BoundaryPayload)
+                    opsById.get(boundaryId).payload()).input()));
+            }
+            String hostValue = "__dh" + id;
+            out.append(indent(indent)).append("Object ").append(hostValue)
+                .append(" = ((JvmRuntime.FunctionValue) ").append(carrier)
+                .append(").fn.invoke(new Object[]{ ").append(args).append(" });\n");
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) returnBoundary.payload();
+            String checked = "__dhc" + id;
+            emitBoundaryStart(returnBoundary, hostValue, boundaryPayload.descriptor(),
+                indent);
+            out.append(indent(indent)).append("Object ").append(checked).append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(checked)
+                .append(" = JvmRuntime.bcheck(")
+                .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(javaString(staticKind(boundaryPayload.descriptor())))
+                .append(", ").append(hostValue).append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+            emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                "JvmRuntime.errtext(__be)", indent + 1);
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__be)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __be;\n");
+            out.append(indent(indent)).append("}\n");
+            emitBoundarySuccess(returnBoundary, checked, boundaryPayload.descriptor(),
+                indent);
+            out.append(indent(indent)).append(result).append(" = ").append(checked)
+                .append(";\n");
+        }
+
+        /**
+         * The dynamic dispatch's fail-closed residue: a carrier whose
+         * class is not resolvable at this boundary projects the pinned
+         * E8001 {@code expected function} text with the carrier's actual
+         * runtime kind at the call origin, emits the op's single FAILURE
+         * terminal, and throws — nothing executes silently.
+         */
+        private void emitDynamicCarrierFailure(SemanticOp op, String carrierExpr,
+                                               int indent) {
+            String error = "__dy_" + op.opId().id();
+            out.append(indent(indent)).append("JvmRuntime.DealError ").append(error)
+                .append(" = JvmRuntime.fail(\"E8001\", \"expected function, got \""
+                    + " + JvmRuntime.actualOf(\"function\", ").append(carrierExpr)
+                .append("), ").append(javaString(originOf(op)))
+                .append(", \"function\", JvmRuntime.actualOf(\"function\", ")
+                .append(carrierExpr).append("));\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(" + error + ")", indent);
+            out.append(indent(indent)).append("throw ").append(error).append(";\n");
+        }
+
+        /**
+         * The dynamic {@code ASYNC_START} arm (ISSUE-0658;
+         * {@code dynamic-call-shape-production-and-emission} Y4/Y5 and
+         * the dynamic async start contract): the recorded parameter
+         * cells ran above; a DEAL-body carrier starts the callee body
+         * task under the callee's module context with the recorded task
+         * cell (the body's own {@code RETURN} runs it); the adapter
+         * class runs the landed D15 sequence and starts the source
+         * class's task under the source's module context with the
+         * leading-M recorded arguments (the source body task), with
+         * zero caller-side return boundaries beyond the recorded task
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
+         * A carrier of any other class — the host operation handle, the
+         * external alias link — belongs to the function-typed-value
+         * child and fails closed here with the pinned E8001 at the start
+         * origin, as does an adapter whose D15 source value identifies
+         * no class the closed protocol resolves. The caller records no
+         * return boundary beyond the recorded task cell, and its single
+         * {@code AWAIT} drains the token.
+         */
+        private void emitDynamicAsyncStart(SemanticOp op,
+                                           KindPayload.AsyncStartPayload payload,
+                                           KindPayload.CallCallee.Dynamic callee,
+                                           AsyncTokenId token, List<String> args,
+                                           int indent) {
+            String id = String.valueOf(op.opId().id());
+            String carrier = "__dc" + id;
+            out.append(indent(indent)).append("Object ").append(carrier)
+                .append(" = ").append(slot(callee.callee())).append(";\n");
+            // ADAPTER: the landed D15 sequence resolves the source value
+            // and checks its carried source spec; the source class then
+            // starts its own task with the leading-M recorded arguments
+            // (a DEAL-body source runs that body's own RETURN cell under
+            // its module context, with zero caller-side return
+            // boundaries).
+            out.append(indent(indent)).append("if (").append(carrier)
+                .append(" instanceof JvmRuntime.AdapterValue) {\n");
+            String adapter = "__da" + id;
+            String source = "__ds" + id;
+            String sourceModule = "__dm" + id;
+            out.append(indent(indent + 1)).append("JvmRuntime.AdapterValue ")
+                .append(adapter).append(" = (JvmRuntime.AdapterValue) ")
+                .append(carrier).append(";\n");
+            out.append(indent(indent + 1)).append("Object ").append(source)
+                .append(" = JvmRuntime.fnCheck(JvmRuntime.adapterSource(")
+                .append(adapter).append("), ").append(adapter)
+                .append(".sourceSpec, ").append(javaString(originOf(op)))
+                .append(");\n");
+            out.append(indent(indent + 1)).append("if (!(").append(source)
+                .append(" instanceof JvmRuntime.FunctionValue) || "
+                    + "((JvmRuntime.FunctionValue) ").append(source)
+                .append(").fid == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("String ").append(sourceModule)
+                .append(" = dealModuleOfFunction(((JvmRuntime.FunctionValue) ")
+                .append(source).append(").fid);\n");
+            out.append(indent(indent + 1)).append("if (").append(sourceModule)
+                .append(" == null) {\n");
+            emitDynamicCarrierFailure(op, source, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.startBodyTask(")
+                .append(token.tokenId()).append(", \"DEAL_BODY_TASK\", () -> {\n");
+            out.append(indent(indent + 2)).append("String __prevM = "
+                + "JvmRuntime.currentModule();\n");
+            out.append(indent(indent + 2)).append("MODULE = ").append(sourceModule)
+                .append(";\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.pushFrame("
+                + "((JvmRuntime.FunctionValue) ").append(source).append(").fid);\n");
+            out.append(indent(indent + 2)).append("try {\n");
+            out.append(indent(indent + 3)).append("return "
+                + "((JvmRuntime.FunctionValue) ").append(source)
+                .append(").fn.invoke(java.util.Arrays.copyOfRange(new Object[]{ ")
+                .append(String.join(", ", args)).append(" }, 0, ")
+                .append(adapter).append(".arity));\n");
+            out.append(indent(indent + 2)).append("} finally {\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 3)).append("MODULE = __prevM;\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
+            out.append(indent(indent + 2)).append("}\n");
+            out.append(indent(indent + 1)).append("});\n");
+            // DEAL_BODY: the carrier's own invoker under the callee's
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append(indent(indent)).append("} else if (").append(carrier)
+                .append(" instanceof JvmRuntime.FunctionValue ")
+                .append("__fv").append(id).append(" && __fv").append(id)
+                .append(".fid != null) {\n");
+            String functionValue = "__fv" + id;
+            out.append(indent(indent + 1)).append("String __fm").append(id)
+                .append(" = dealModuleOfFunction(").append(functionValue)
+                .append(".fid);\n");
+            out.append(indent(indent + 1)).append("if (__fm").append(id)
+                .append(" == null) {\n");
+            emitDynamicCarrierFailure(op, carrier, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.startBodyTask(")
+                .append(token.tokenId()).append(", \"DEAL_BODY_TASK\", () -> {\n");
+            out.append(indent(indent + 2)).append("String __prevM = "
+                + "JvmRuntime.currentModule();\n");
+            out.append(indent(indent + 2)).append("MODULE = __fm").append(id)
+                .append(";\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.setModule(MODULE);\n");
+            out.append(indent(indent + 2)).append("JvmRuntime.pushFrame(")
+                .append(functionValue).append(".fid);\n");
+            out.append(indent(indent + 2)).append("try {\n");
+            out.append(indent(indent + 3)).append("return ")
+                .append(functionValue)
+                .append(".fn.invoke(new Object[]{ ").append(String.join(", ", args))
+                .append(" });\n");
+            out.append(indent(indent + 2)).append("} finally {\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
+            out.append(indent(indent + 3)).append("MODULE = __prevM;\n");
+            out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
+            out.append(indent(indent + 2)).append("}\n");
+            out.append(indent(indent + 1)).append("});\n");
+            // The fail-closed residue: no class is resolvable.
+            out.append(indent(indent)).append("} else {\n");
+            emitDynamicCarrierFailure(op, carrier, indent + 1);
+            out.append(indent(indent)).append("}\n");
+        }
         /**
          * The sync host call arm (ISSUE-0651;
          * {@code host-module-load-and-host-call-realization} H3/H7 and the
@@ -4951,14 +5351,39 @@ public final class JvmSemanticEmitter {
                 .append(" = ").append(value).append(";\n");
             emitBoundaryStart(boundary, "__rv_" + op.opId().id(),
                 boundaryPayload.descriptor(), indent);
-            out.append(indent(indent)).append("Object __rvc_").append(op.opId().id())
+            // The body-local return cell's own failure projection: the cell
+            // projection carries the cell's origin (the callee's RETURN), the
+            // boundary and the RETURN op emit their FAILURE terminals, and the
+            // identical error propagates (the semantic oracle's
+            // runBoundaryChild + the owning-op FAILURE).
+            String rvc = "__rvc_" + op.opId().id();
+            String rejection = "__bre_" + op.opId().id();
+            String caught = "__be_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(rvc).append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(rvc)
                 .append(" = JvmRuntime.bcheck(")
                 .append(javaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(javaString(staticKind(boundaryPayload.descriptor())))
                 .append(", __rv_").append(op.opId().id()).append(");\n");
-            emitBoundarySuccess(boundary, "__rvc_" + op.opId().id(),
-                boundaryPayload.descriptor(), indent);
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError ")
+                .append(caught).append(") {\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.DealError ")
+                .append(rejection).append(" = new JvmRuntime.DealError(")
+                .append(caught).append(".code, ").append(caught)
+                .append(".msg, ")
+                .append(javaString(originOf(boundary)))
+                .append(", ").append(caught).append(".expected, ").append(caught)
+                .append(".actual, ").append(caught).append(".frames, null);\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "JvmRuntime.errtext(" + rejection + ")", indent + 1);
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(" + rejection + ")", indent + 1);
+            out.append(indent(indent + 1)).append("throw ").append(rejection)
+                .append(";\n");
+            out.append(indent(indent)).append("}\n");
+            emitBoundarySuccess(boundary, rvc, boundaryPayload.descriptor(), indent);
             emitPlainSuccess(op, indent);
             if (tryDepth > 0) {
                 emitTransferClosures(op, null, true, indent);
@@ -5517,6 +5942,13 @@ public final class JvmSemanticEmitter {
                 for (ValueId operand : op.operands()) {
                     args.add(slot(operand));
                 }
+            }
+            if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
+                // The dynamic async start (ISSUE-0658): the class of the
+                // resolved carrier selects the task source.
+                emitDynamicAsyncStart(op, payload, dynamic, token, args, indent);
+                emitTokenSuccess(op, javaString(tokenAtom(token)), indent);
+                return;
             }
             FunctionExecutionBinding binding = switch (payload.callee()) {
                 case KindPayload.CallCallee.Static staticCallee -> staticCallee.binding();

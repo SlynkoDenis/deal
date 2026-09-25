@@ -745,6 +745,14 @@ public final class LuaSemanticEmitter {
             // execution per run. __module stays chunk-local (every chunk
             // names its own module in its events).
             out.append("__frames = __frames or {}\n");
+            // The function-id -> owning-module resolution of the dynamic
+            // dispatch's DEAL_BODY class path (ISSUE-0658;
+            // dynamic-call-shape-production-and-emission Y6): one
+            // chunk-global row per lowered function of the closure, built
+            // by the same walk that declares the function factories below.
+            // A carrier whose function id has no row identifies no class
+            // and the dynamic call fails closed at its origin.
+            out.append("__fnModules = __fnModules or {}\n");
             out.append("__seq = __seq or 0\n");
             out.append("local __module\n");
             // The nesting-safe module save/restore stack of the
@@ -855,7 +863,8 @@ public final class LuaSemanticEmitter {
             // scope; every check/return temp is a top-level assignment).
             out.append("local __chk, __rvT, __rvcT, __okT, __resT, __terrT, "
                 + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
-                + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT\n");
+                + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT, "
+                + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE\n");
 
             // Function factories first (capture cells are factory
             // arguments); the local names are pre-declared so bodies can
@@ -891,6 +900,16 @@ public final class LuaSemanticEmitter {
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (LoweredFunction function : moduleUnit.functions().values()) {
                     emitFunctionFactory(function);
+                    // The function-id -> owning-module resolution row of
+                    // the dynamic dispatch's DEAL_BODY class path
+                    // (ISSUE-0658; Y6): the same walk that declares the
+                    // factory registers the function's owning module, so
+                    // a dynamically invoked carrier establishes the
+                    // callee's module context before its body runs.
+                    out.append("__fnModules[")
+                        .append(function.functionId().id()).append("] = ")
+                        .append(luaString(moduleUnit.moduleId().path()))
+                        .append("\n");
                 }
             }
 
@@ -2838,7 +2857,13 @@ public final class LuaSemanticEmitter {
 
         private void emitCall(SemanticOp op) {
             KindPayload.CallPayload payload = (KindPayload.CallPayload) op.payload();
-            FunctionExecutionBinding binding = callBinding(payload);
+            // A Dynamic callee resolves its execution class at execution
+            // (ISSUE-0658; {@link #emitDynamicCall}) and has no
+            // emission-time binding; every other callee resolves its
+            // static binding here.
+            FunctionExecutionBinding binding = payload.callee()
+                    instanceof KindPayload.CallCallee.Dynamic
+                ? null : callBinding(payload);
             emitStart(op);
             // The host arms (ISSUE-0651; host-module-load-and-host-call-
             // realization H3/H7 and the sync host call contract): the
@@ -2867,6 +2892,17 @@ public final class LuaSemanticEmitter {
                         slot(boundaryPayload.input())))
                     .append("\n");
                 emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
+            }
+            if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
+                // The dynamic dispatch (ISSUE-0658): the recorded parameter
+                // cells above are the class-independent family; the
+                // carrier's own class tag selects the path.
+                emitDynamicCall(op, payload, dynamic);
+                String dynamicResult = slot((ValueId) op.result());
+                out.append(dynamicResult).append(" = __resT\n");
+                emitResultSuccess(op, dynamicResult,
+                    (RuntimeDescriptor) op.resultType());
+                return;
             }
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
@@ -3272,7 +3308,9 @@ public final class LuaSemanticEmitter {
          * inline Static binding or the unit's registered binding of an
          * Indirect callee identity (the same registration the semantic
          * oracle re-resolves at execution). A Dynamic callee is the
-         * runtime-resolution slice (ISSUE-0531) and fails closed here.
+         * runtime-resolution slice (ISSUE-0531/ISSUE-0658): its execution
+         * class is read from the resolved carrier at execution and the
+         * emission-time binding is null ({@link #emitDynamicCall}).
          */
         private FunctionExecutionBinding callBinding(KindPayload.CallPayload payload) {
             FunctionExecutionBinding binding = switch (payload.callee()) {
@@ -3282,7 +3320,8 @@ public final class LuaSemanticEmitter {
                         new FunctionAllocationIdentity(indirect.callee().id()));
                 case KindPayload.CallCallee.Dynamic ignored -> null;
             };
-            if (binding == null) {
+            if (binding == null
+                    && !(payload.callee() instanceof KindPayload.CallCallee.Dynamic)) {
                 throw new IllegalStateException("CALL " + payload
                     + " resolves no FunctionExecutionBinding (producer defect)");
             }
@@ -3381,16 +3420,29 @@ public final class LuaSemanticEmitter {
                     .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
                 index++;
             }
-            // The declared return cell: the single HOST_TO_DEAL child of
-            // the call, run at the call origin (the loaded wrapper already
-            // runs its own return rule; the cell re-projects the pinned
-            // text and keeps the boundary child's event pair exact). The
-            // child is resolved before the invocation, so the wrapper's
-            // own return-cell failure (raised inside the loaded wrapper)
-            // still carries the boundary child's FAILURE event — the same
-            // pair the JVM arm emits on its wrapper-error path.
-            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
-                ? null : opsById.get(payload.returnBoundaryOpId());
+            emitHostInvocationTail(op, target, index - 1,
+                payload.returnBoundaryOpId() == null
+                    ? null : opsById.get(payload.returnBoundaryOpId()));
+            String result = slot((ValueId) op.result());
+            out.append(result).append(" = __resT\n");
+            emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The invocation tail of one host row (ISSUE-0658 extraction of
+         * the landed ISSUE-0651 host arm): the {@code .f} call with the
+         * host-projected parameters ({@code __hbT[1..argCount]}) and the
+         * trailing literal span triplet, the wrapper-error projection,
+         * and the declared return cell — the checked value is left in
+         * {@code __resT}. Shared by the static host arms (target: the
+         * loaded surface entry; cell: the payload's single
+         * {@code HOST_TO_DEAL} child) and the dynamic dispatch's HOST
+         * row (target: the carrier's own loaded surface entry; cell: the
+         * recorded {@code HOST_TO_DEAL} cell of the dynamic
+         * return-boundary set).
+         */
+        private void emitHostInvocationTail(SemanticOp op, String target, int argCount,
+                                            SemanticOp returnBoundary) {
             String declaredReturn = returnBoundary == null ? null
                 : ((KindPayload.BoundaryPayload) returnBoundary.payload())
                     .descriptor().canonicalSpecText();
@@ -3398,7 +3450,7 @@ public final class LuaSemanticEmitter {
             // span triplet is how a boundary error reports the DEAL call
             // site byte-exact.
             out.append("__okT, __resT = pcall(").append(target).append(".f");
-            for (int i = 1; i < index; i++) {
+            for (int i = 1; i <= argCount; i++) {
                 out.append(", __hbT[").append(i).append("]");
             }
             out.append(", ").append(spanTripletArgs(op)).append(")\n");
@@ -3441,12 +3493,272 @@ public final class LuaSemanticEmitter {
                 emitBoundarySuccessAtom(returnBoundary, "__hostCellAtom("
                     + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
                         .payload()).descriptor())) + ", __resT)");
+                out.append("__resT = __chkB\n");
             }
-            String result = slot((ValueId) op.result());
-            out.append(result).append(" = ")
-                .append(returnBoundary == null ? "__resT" : "__chkB")
-                .append("\n");
-            emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The dynamic CALL arm (ISSUE-0658;
+         * {@code dynamic-call-shape-production-and-emission} Y2/Y3/Y5/Y6
+         * and the dynamic dispatch contract): the recorded parameter
+         * cells ran once, left to right, before the dispatch (the
+         * class-independent family); the carrier's own class tag then
+         * selects exactly one class path — never the checked descriptor,
+         * the callee spelling, or an argument value.
+         *
+         * <p>{@code DEAL_BODY} resolves the carrier's function id to its
+         * owning module through the chunk-global {@code __fnModules}
+         * table (built by the same walk that declares the function
+         * factories), pushes the callee frame, switches the module
+         * context, and invokes the carrier's own invoker
+         * ({@code __unfn}); {@code ADAPTER} runs the landed D15 sequence
+         * (the source value's own tag, the source-signature check, the
+         * leading-M argument projection) and executes the cell the
+         * source class selects — a DEAL-body source runs that body's own
+         * {@code RETURN} cell; {@code HOST} invokes the loaded surface
+         * entry through its host calling convention and runs the
+         * recorded {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell
+         * of the dynamic return-boundary set.</p>
+         *
+         * <p>Every other carrier — and an adapter whose D15 source value
+         * identifies no executable class at this boundary — fails closed
+         * with the pinned E8001 {@code expected function} projection
+         * ({@code expected}/{@code actual}) at the call origin, exactly
+         * the projection the materialization-site function row produces:
+         * never a guessed path and never a silent no-op. The module
+         * context and the frame stack are restored on success and on
+         * failure; the checked value is left in {@code __resT}.</p>
+         */
+        private void emitDynamicCall(SemanticOp op, KindPayload.CallPayload payload,
+                                     KindPayload.CallCallee.Dynamic callee) {
+            KindPayload.DynamicReturnBoundary cells = payload.dynamicReturnBoundary();
+            if (cells == null) {
+                throw new IllegalStateException("the dynamic CALL " + op.opId()
+                    + " records no DynamicReturnBoundary cell set (producer defect)");
+            }
+            SemanticOp hostCell = opsById.get(cells.hostBoundaryOpId());
+            if (hostCell == null
+                    || !(hostCell.payload() instanceof KindPayload.BoundaryPayload boundary)
+                    || boundary.kind() != BoundaryKind.HOST_TO_DEAL) {
+                throw new IllegalStateException("the dynamic CALL " + op.opId()
+                    + " records the host return cell " + cells.hostBoundaryOpId()
+                    + ", which is not a HOST_TO_DEAL boundary of the emitted closure"
+                    + " (producer defect)");
+            }
+            String origin = luaString(originOf(op));
+            StringBuilder argList = new StringBuilder();
+            StringBuilder argTable = new StringBuilder();
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp parameter = opsById.get(boundaryId);
+                String input = slot(((KindPayload.BoundaryPayload) parameter.payload())
+                    .input());
+                argList.append(", ").append(input);
+                if (argTable.length() > 0) {
+                    argTable.append(", ");
+                }
+                argTable.append(input);
+            }
+            out.append("__dynC = ").append(slot(callee.callee())).append("\n");
+            out.append("__dynK = __dynClass(__dynC)\n");
+            // DEAL_BODY: the carrier's function id resolves its owning
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append("if __dynK == \"DEAL_BODY\" then\n");
+            out.append("  __dynM = __fnModules[__dynC.__fid]\n");
+            out.append("  if __dynM == nil then\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __modStack[#__modStack + 1] = __module\n");
+            out.append("  __module = __dynM\n");
+            out.append("  table.insert(__frames, 1, tostring(__dynC.__fid))\n");
+            out.append("  __okT, __resT = pcall(__unfn(__dynC)").append(argList)
+                .append(")\n");
+            out.append("  table.remove(__frames, 1)\n");
+            out.append("  __module = __modStack[#__modStack]\n");
+            out.append("  __modStack[#__modStack] = nil\n");
+            out.append("  if not __okT then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("    error(__resT, 0)\n");
+            out.append("  end\n");
+            // ADAPTER: the landed D15 sequence; the source class selects
+            // the return cell (a DEAL-body source runs its own body's
+            // RETURN cell).
+            out.append("elseif __dynK == \"ADAPTER\" then\n");
+            out.append("  __dynS = __adaptSource(__dynC)\n");
+            out.append("  __okB, __chkB = pcall(__fncheck, __dynS, __dynC.__csrc, ")
+                .append(origin).append(")\n");
+            out.append("  if not __okB then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("    error(__chkB, 0)\n");
+            out.append("  end\n");
+            out.append("  __dynS = __chkB\n");
+            out.append("  __dynSK = __dynClass(__dynS)\n");
+            out.append("  if __dynSK == \"DEAL_BODY\" then\n");
+            out.append("    __dynM = __fnModules[__dynS.__fid]\n");
+            out.append("    if __dynM == nil then\n");
+            out.append("      __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("    end\n");
+            out.append("    __modStack[#__modStack + 1] = __module\n");
+            out.append("    __module = __dynM\n");
+            out.append("    table.insert(__frames, 1, tostring(__dynS.__fid))\n");
+            out.append("    __dynA = {").append(argTable).append("}\n");
+            out.append("    __okT, __resT = pcall(__unfn(__dynS), unpack(__dynA, 1, ")
+                .append("__dynC.__m))\n");
+            out.append("    table.remove(__frames, 1)\n");
+            out.append("    __module = __modStack[#__modStack]\n");
+            out.append("    __modStack[#__modStack] = nil\n");
+            out.append("  else\n");
+            out.append("    __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  if not __okT then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("    error(__resT, 0)\n");
+            out.append("  end\n");
+            // HOST: the loaded surface entry (the carrier itself) and the
+            // recorded HOST_TO_DEAL + HOST_SYNC_RETURN cell.
+            out.append("elseif __dynK == \"HOST\" then\n");
+            emitDynamicHostRow(op, payload, hostCell);
+            // The fail-closed residue: no class is resolvable.
+            out.append("else\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("end\n");
+        }
+
+        /**
+         * The dynamic dispatch's HOST row: the carrier is the loaded
+         * surface entry, so its host calling convention ({@code .f} with
+         * the projected parameters and the trailing literal span triplet)
+         * invokes it and the recorded {@code HOST_TO_DEAL} +
+         * {@code HOST_SYNC_RETURN} cell runs at the call origin (the
+         * oracle's {@code invokeResolvedHostRequest} followed by
+         * {@code runBoundaryChild}). The checked value is left in
+         * {@code __resT}.
+         */
+        private void emitDynamicHostRow(SemanticOp op, KindPayload.CallPayload payload,
+                                        SemanticOp returnBoundary) {
+            int index = 1;
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp parameter = opsById.get(boundaryId);
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) parameter.payload();
+                out.append("  __hbT[").append(index).append("] = __hostProjectArg(")
+                    .append(luaString(boundaryPayload.descriptor().canonicalSpecText()))
+                    .append(", ")
+                    .append(sourceTextOf(boundaryPayload.descriptor())).append(", ")
+                    .append(slot(boundaryPayload.input())).append(")\n");
+                index++;
+            }
+            emitHostInvocationTail(op, "__dynC", index - 1, returnBoundary);
+        }
+
+        /**
+         * The dynamic dispatch's fail-closed residue: a carrier whose
+         * class is not resolvable at this boundary projects the pinned
+         * E8001 {@code expected function} text with the carrier's actual
+         * runtime kind at the call origin, emits the op's single FAILURE
+         * terminal, and raises — nothing executes silently.
+         */
+        private void emitDynamicCarrierFailure(SemanticOp op, String origin) {
+            out.append("__dynE = __failExpr(\"E8001\", \"expected function, got \""
+                + "..__actualOf(\"function\", __dynC), ").append(origin)
+                .append(", \"function\", __actualOf(\"function\", __dynC))\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__dynE)");
+            out.append("error(__dynE, 0)\n");
+        }
+
+        /**
+         * The dynamic {@code ASYNC_START} arm (ISSUE-0658;
+         * {@code dynamic-call-shape-production-and-emission} Y4/Y5 and
+         * the dynamic async start contract): the recorded parameter
+         * cells ran above; a DEAL-body carrier starts the callee body
+         * task under the callee's module context with the recorded
+         * task cell (the body's own {@code RETURN} runs it); the adapter
+         * class runs the landed D15 sequence and starts the source
+         * class's task under the source's module context with the
+         * leading-M recorded arguments (the source body task), with
+         * zero caller-side return boundaries beyond the recorded task
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
+         * A carrier of any other class — the host operation handle, the
+         * external alias link — belongs to the function-typed-value
+         * child and fails closed here with the pinned E8001 at the start
+         * origin, as does an adapter whose D15 source value identifies
+         * no class the closed protocol resolves. The caller records no
+         * return boundary beyond the recorded task cell, and its single
+         * {@code AWAIT} drains the token.
+         */
+        private void emitDynamicAsyncStart(SemanticOp op,
+                                           KindPayload.AsyncStartPayload payload,
+                                           KindPayload.CallCallee.Dynamic callee,
+                                           AsyncTokenId token) {
+            String origin = luaString(originOf(op));
+            String carrierArgs = "S.__sa" + op.opId().id();
+            out.append("__dynC = ").append(slot(callee.callee())).append("\n");
+            out.append("__dynK = __dynClass(__dynC)\n");
+            // DEAL_BODY: the carrier's function id resolves its owning
+            // module; the frame and the module context are restored on
+            // every path.
+            out.append("if __dynK == \"DEAL_BODY\" then\n");
+            out.append("  __dynM = __fnModules[__dynC.__fid]\n");
+            out.append("  if __dynM == nil then\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __asyncStartTask(").append(token.tokenId())
+                .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+            out.append("    __modStack[#__modStack + 1] = __module\n");
+            out.append("    __module = __dynM\n");
+            out.append("    table.insert(__frames, 1, tostring(__dynC.__fid))\n");
+            out.append("    local __okA, __resA = pcall(__unfn(__dynC), unpack(")
+                .append(carrierArgs).append(", 1, #").append(carrierArgs)
+                .append("))\n");
+            out.append("    table.remove(__frames, 1)\n");
+            out.append("    __module = __modStack[#__modStack]\n");
+            out.append("    __modStack[#__modStack] = nil\n");
+            out.append("    if not __okA then error(__resA, 0) end\n");
+            out.append("    return __resA\n");
+            out.append("  end), ").append(carrierArgs).append(")\n");
+            // ADAPTER: the landed D15 sequence resolves the source value
+            // and checks its carried source spec; the source class then
+            // starts its own task with the leading-M recorded arguments
+            // (a DEAL-body source runs that body's own RETURN cell under
+            // its module context, with zero caller-side return
+            // boundaries).
+            out.append("elseif __dynK == \"ADAPTER\" then\n");
+            out.append("  __dynS = __adaptSource(__dynC)\n");
+            out.append("  __okB, __chkB = pcall(__fncheck, __dynS, __dynC.__csrc, ")
+                .append(origin).append(")\n");
+            out.append("  if not __okB then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("    error(__chkB, 0)\n");
+            out.append("  end\n");
+            out.append("  __dynS = __chkB\n");
+            out.append("  if __dynClass(__dynS) ~= \"DEAL_BODY\" then\n");
+            out.append("    __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __dynM = __fnModules[__dynS.__fid]\n");
+            out.append("  if __dynM == nil then\n");
+            out.append("    __dynC = __dynS\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __asyncStartTask(").append(token.tokenId())
+                .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+            out.append("    __modStack[#__modStack + 1] = __module\n");
+            out.append("    __module = __dynM\n");
+            out.append("    table.insert(__frames, 1, tostring(__dynS.__fid))\n");
+            out.append("    local __okA, __resA = pcall(__unfn(__dynS), unpack(")
+                .append(carrierArgs).append(", 1, __dynC.__m))\n");
+            out.append("    table.remove(__frames, 1)\n");
+            out.append("    __module = __modStack[#__modStack]\n");
+            out.append("    __modStack[#__modStack] = nil\n");
+            out.append("    if not __okA then error(__resA, 0) end\n");
+            out.append("    return __resA\n");
+            out.append("  end), ").append(carrierArgs).append(")\n");
+            // The fail-closed residue: no class is resolvable.
+            out.append("else\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("end\n");
         }
 
         /** Whether one declared host position is a function type. */
@@ -4529,9 +4841,30 @@ public final class LuaSemanticEmitter {
             String value = payload.value() == null ? "nil" : slot(payload.value());
             out.append("__rvT = ").append(value).append("\n");
             emitBoundaryStart(boundary, "__rvT", boundaryPayload.descriptor());
-            out.append("__rvcT = ")
-                .append(bcheckExpr(boundaryPayload.descriptor(), "__rvT"))
+            // The body-local return cell's own failure projection: the cell
+            // projection carries the cell's origin (the callee's RETURN), the
+            // boundary and the RETURN op emit their FAILURE terminals, and the
+            // identical error propagates (the semantic oracle's
+            // runBoundaryChild + the owning-op FAILURE).
+            out.append("__okB, __chkB = pcall(__bcheck, ")
+                .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(luaString(staticKind(boundaryPayload.descriptor())))
+                .append(", __rvT");
+            if (containsFunction(boundaryPayload.descriptor())) {
+                out.append(", ")
+                    .append(luaString(boundaryPayload.descriptor().canonicalSpecText()));
+            }
+            out.append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
                 .append("\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "__errtext(__chkB)");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            out.append("__rvcT = __chkB\n");
             emitBoundarySuccess(boundary, "__rvcT", boundaryPayload.descriptor());
             emitPlainSuccess(op);
             if (tryDepth > 0) {
@@ -4989,6 +5322,13 @@ public final class LuaSemanticEmitter {
                     out.append(slot(op.operands().get(i)));
                 }
                 out.append("}\n");
+            }
+            if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
+                // The dynamic async start (ISSUE-0658): the class of the
+                // resolved carrier selects the task source.
+                emitDynamicAsyncStart(op, payload, dynamic, token);
+                emitTokenSuccess(op, luaString(tokenAtom(token)));
+                return;
             }
             FunctionExecutionBinding binding = switch (payload.callee()) {
                 case KindPayload.CallCallee.Static staticCallee -> staticCallee.binding();
@@ -7537,6 +7877,22 @@ end
 local function __unfn(v)
   if type(v) == "table" and v.__fn ~= nil then return v.__fn end
   return v
+end
+-- The dynamic dispatch's carrier-class resolution (ISSUE-0658;
+-- dynamic-call-shape-production-and-emission Y2/Y3/Y5): the carrier's
+-- own tag selects exactly one closed resolution class — never the
+-- checked descriptor, the callee spelling, or an argument value. A DEAL
+-- closure or compiled export read carries its function id (__fid); an
+-- adapter carries its capture mode (__mode); a loaded host surface entry
+-- carries the host ABI wrapper kind (__kind == "function"). Every other
+-- value identifies no class (nil) and the dynamic call fails closed at
+-- its origin.
+local function __dynClass(v)
+  if type(v) ~= "table" then return nil end
+  if v.__fid ~= nil then return "DEAL_BODY" end
+  if v.__mode ~= nil then return "ADAPTER" end
+  if v.__kind == "function" then return "HOST" end
+  return nil
 end
 -- The actual-kind atom of one host-supplied argument (the callback
 -- dispatch surface): null/boolean/int/number/string by the runtime
