@@ -197,10 +197,21 @@ public final class DeclarationSemanticAnalyzer {
         List<CompilerClassDefaultEntry> entries = new ArrayList<>();
         List<DefaultResourceOccurrence> occurrences = new ArrayList<>();
         Set<SemanticResourceIdentity> seen = new LinkedHashSet<>();
+        Set<String> fieldNames = new LinkedHashSet<>();
 
         resolver.setCurrentScope(root);
         boolean failed = false;
         for (ClassField cf : cd.fields()) {
+            if (!fieldNames.add(cf.name())) {
+                // C-struct field names must be unique (the plan's
+                // entries require unique names); the FFI phase's E7002
+                // owns the policy. No plan-entry shape exists for a
+                // duplicated C-struct field name, so the class plan is
+                // withheld (the FFI phase fails the compile) — never a
+                // raw plan-construction exception.
+                failed = true;
+                continue;
+            }
             if (cf.optional()) {
                 // C-struct fields must be required (spec §C struct
                 // classes); the FFI phase's E7002 owns the policy. No

@@ -1214,4 +1214,33 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # asserted, and the landed IntrinsicSeedBindingsTest nested-static-callee
   # pin is retargeted in the same slice, never deleted.
   'fg|=== Running Intrinsic Value Call Tests (ISSUE-0679) ===|java -ea -cp build deal.test.IntrinsicValueCallTest'
+  # ISSUE-0669 registration: the JVM pre-artifact E6006 rejection proof
+  # and the declaration negatives
+  # (ffi-admission-and-jvm-e6006-rejection A2/A3 and the
+  # C-FFI-incapable-target rejection and declaration-negative contracts;
+  # luajit-ffi-shared-emission-and-jvm-rejection F4/F5; sequencing step 7):
+  # the seven extern-C corpus fixtures (ffi/022 through ffi/027 plus the
+  # T3 fixture ffi/051-ffi-invalid-string, enumerated so a missing fixture
+  # fails the drive) compile through the real manifest locator and the
+  # real orchestrator with Backend.JVM and fail with exactly one E6006
+  # whose message is the pinned FFI_UNSUPPORTED_BACKEND text at the
+  # declaration module's @extern-c directive range, after the checked
+  # project (declaration validation first) and before phase 4 (no
+  # FFI_PLAN lowering, no declaration surface, no FFI metadata, no
+  # emission) with the prior artifact set byte-identical and no stage
+  # residue; declaration validation runs first (ffi/047 with
+  # support/invalid-async.d.deal reports its E7002 family under JVM and
+  # LuaJIT with no E6006 for that module, and a mixed closure reports the
+  # invalid module's E7002 plus exactly one E6006 at the valid sibling's
+  # directive range); the declaration negatives keep their pinned
+  # diagnostics and ranges through the real pipeline (async, the
+  # parameter/return allowlist with a bytes return and nullable classed
+  # positions, a non-empty @c-pointer body, an optional or default-less
+  # field, a duplicate struct field — the analyzer now withholds the plan
+  # instead of throwing — a duplicate export, a plan-key collision, and
+  # the struct-field allowlist); a C_POINTER class literal stays a checker
+  # rejection (the validator's E7002 at the literal) and never reaches a
+  # construction; the JS backend keeps its import-site E6006 arm; and the
+  # JVM production entry keeps its pinned five-input list.
+  'fg|=== Running FFI JVM E6006 Rejection and Declaration Negatives Tests (ISSUE-0669) ===|java -ea -cp build deal.test.FfiJvmRejectionAndNegativesTest'
 )
