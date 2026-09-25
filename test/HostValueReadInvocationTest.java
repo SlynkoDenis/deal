@@ -853,7 +853,10 @@ public class HostValueReadInvocationTest {
                     (KindPayload.ExportReadPayload) read.payload();
                 RuntimeDescriptor.Func descriptor =
                     (RuntimeDescriptor.Func) payload.descriptor();
-                checkEq(1, occurrences(chunk, "__bcheck(" + luaStringFmt(
+                // The declaration crossing's free-boundary arm runs the check
+                // through the prelude pcall form with the boundary's own origin
+                // (ISSUE-0681): the canonical trailer rides along unchanged.
+                checkEq(1, occurrences(chunk, "pcall(__bcheck, " + luaStringFmt(
                         descriptorTextOf(descriptor)) + ", \"function\", S.v"
                         + payload.value().id() + ", "
                         + luaStringFmt(descriptor.canonicalSpecText()) + ")"),
@@ -861,10 +864,11 @@ public class HostValueReadInvocationTest {
                         + "' carries the declared canonical signature beside the "
                         + "host entry's own metadata");
             }
-            check(occurrences(chunk, "__bcheck(\"string\", \"string\", S.v") >= 1,
+            check(occurrences(chunk, "pcall(__bcheck, \"string\", \"string\", S.v") >= 1
+                    || occurrences(chunk, "__bcheck(\"string\", \"string\", S.v") >= 1,
                 "the ordinary checks keep the three-argument emitted form");
             check(!java.util.regex.Pattern.compile(
-                    "__bcheck\\(\\\"string\\\", \\\"string\\\", [^,)]+, "
+                    "__bcheck[,(] ?\\\"string\\\", \\\"string\\\", [^,)]+, "
                         + "\\\"string\\\"\\)").matcher(chunk).find(),
                 "a non-function check emits no canonical trailer");
 
@@ -888,11 +892,17 @@ public class HostValueReadInvocationTest {
                 Files.writeString(probe, luaDriver(artifact, compiled.entryPath()),
                     StandardCharsets.UTF_8);
                 Outcome outcome = runLua(probe, workspace);
+                // The materialization site's own origin: the `say` declaration's
+                // annotation span (line 4, column 12 of the entry source) —
+                // ISSUE-0681's declared-annotation origin.
                 checkEq("ERR:E8010|function signature mismatch: expected (string)->string, "
-                        + "got (int)->int|-|(string)->string|(int)->int",
+                        + "got (int)->int|" + compiled.root()
+                            .resolve("src/host-read-sync.deal").toAbsolutePath()
+                        + ":4:12|(string)->string|(int)->int",
                     outcome.value(),
                     "a host entry whose declared signature differs fails with the "
-                        + "canonical projection (stderr=" + escaped(outcome.stderr()) + ")");
+                        + "canonical projection at the declared annotation's span "
+                        + "(stderr=" + escaped(outcome.stderr()) + ")");
             }
         } finally {
             deleteRecursively(workspace);

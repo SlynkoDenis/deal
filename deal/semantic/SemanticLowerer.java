@@ -6517,12 +6517,17 @@ public final class SemanticLowerer {
                     ContainerPayloadDescriptors.resultDescriptorOf(declaredTypeOf(decl));
                 FailurePolicyId boundaryPolicy = descriptor instanceof RuntimeDescriptor.Func
                     ? FailurePolicyId.FUNCTION_SIGNATURE : FailurePolicyId.TYPE_DESCRIPTOR;
+                // The materialization site's origin is the declared type
+                // annotation's own span (M8 item 1: the retained
+                // backends' declared-origin projection and the corpus
+                // pins' coordinate), never the declaration's `let` span.
                 declarationBoundary = emitNullOp(SemanticOpKind.BOUNDARY,
                     new KindPayload.BoundaryPayload(BoundaryKind.VARIABLE_DECLARATION,
                         descriptor, value,
                         new BoundaryRealization.RuntimeValidation(
                             CANONICAL_RUNTIME_VALIDATION_ID)),
-                    decl.span(), boundaryPolicy, SourceOriginKind.SYNTHETIC, null);
+                    decl.typeAnnotation().get().span(), boundaryPolicy,
+                    SourceOriginKind.SYNTHETIC, null);
             }
             if (closureCore && descriptorOf(value) instanceof RuntimeDescriptor.Func) {
                 // The initializer's function identity is the cell's
@@ -6666,12 +6671,14 @@ public final class SemanticLowerer {
             ValueId adapterIdentity = adapter.identity();
             OpId declarationBoundary = null;
             if (decl.typeAnnotation().isPresent()) {
+                // The adapted arm's materialization site carries the same
+                // declared-annotation origin as the direct arm.
                 declarationBoundary = emitNullOp(SemanticOpKind.BOUNDARY,
                     new KindPayload.BoundaryPayload(BoundaryKind.VARIABLE_DECLARATION,
                         targetSignature, adapterIdentity,
                         new BoundaryRealization.RuntimeValidation(
                             CANONICAL_RUNTIME_VALIDATION_ID)),
-                    decl.span(), FailurePolicyId.FUNCTION_SIGNATURE,
+                    decl.typeAnnotation().get().span(), FailurePolicyId.FUNCTION_SIGNATURE,
                     SourceOriginKind.SYNTHETIC, null);
             }
             // The cell's tracked function identity becomes the adapter

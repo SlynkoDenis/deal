@@ -580,7 +580,14 @@ public final class BoundaryExecutor {
         return core(descriptor.inner(), view);
     }
 
-    /** Function values: the carried signature must be structurally equal. */
+    /**
+     * Function values: the carried signature must be structurally equal. A
+     * non-function value projects the pinned function row — the shared
+     * actual-kind classification with the fixed {@code function} expected
+     * token both target runtimes project (never the descriptor text) —
+     * while a differing carried signature keeps the canonical signature
+     * texts.
+     */
     private static CoreResult coreFunc(RuntimeDescriptor.Func descriptor,
                                        BoundaryValueView view) {
         if (view.kind() == ActualKind.FUNCTION) {
@@ -589,7 +596,8 @@ public final class BoundaryExecutor {
                 : new CoreFail(FailureCase.SIG_MISMATCH, descriptor.canonicalSpecText(),
                     carried.canonicalSpecText(), 0, null);
         }
-        return kindFail(descriptor, view);
+        return new CoreFail(FailureCase.KIND_MISMATCH, "function",
+            ActualKind.canonicalToken(view.kind(), view.classId()), 0, null);
     }
 
     // =========================================================================

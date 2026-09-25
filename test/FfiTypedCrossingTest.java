@@ -746,8 +746,10 @@ public class FfiTypedCrossingTest {
 
             // The chunk-side boundary of the program's own value requires
             // the chunk representation (__c + __id), so the drive's success
-            // proves the wrapper-to-chunk projection ran.
-            check(artifact.contains("__bcheck(\"" + HANDLE_DESC
+            // proves the wrapper-to-chunk projection ran. The declaration
+            // crossing's free-boundary arm runs the check through the
+            // prelude pcall form with the boundary's own origin (ISSUE-0681).
+            check(artifact.contains("pcall(__bcheck, \"" + HANDLE_DESC
                     + "\", \"class\", "),
                 "the chunk-side class boundary requires the chunk shape");
 
