@@ -6314,7 +6314,7 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("Object ").append(checked).append(";\n");
             out.append(indent(indent)).append("try {\n");
             out.append(indent(indent + 1)).append(checked).append(" = "
-                + "JvmRuntime.bcheck(")
+                + "JvmRuntime.bcheckCompletion(")
                 .append(javaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(javaString(staticKind(boundaryPayload.descriptor())))

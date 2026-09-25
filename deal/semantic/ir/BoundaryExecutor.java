@@ -50,7 +50,9 @@ import java.util.Set;
  * {@code return value 1 type mismatch: expected {expected}, got nothing}
  * (no value) or {@code … got {actual}} (wrong value);
  * {@code ASYNC_COMPLETION} mismatches as E8001
- * {@code expected {expected}, got {actual}} (operation-failure precedence
+ * {@code expected {expected}} with the cell's actual kind (a numeric
+ * completion carrier is the single {@code number} kind — the pinned corpus
+ * completion-cell transcript; operation-failure precedence
  * is the {@code AWAIT} machine's — ISSUE-0236 — never this op's). The
  * array cells enforce {@code negative array index} (read),
  * {@code array index out of bounds} (write/delete, index {@code < 0} or
@@ -293,10 +295,29 @@ public final class BoundaryExecutor {
         };
     }
 
-    /** ASYNC_COMPLETION: mismatches through the row's pinned E8001 template. */
+    /**
+     * ASYNC_COMPLETION: mismatches through the row's pinned E8001 template.
+     * The cell's actual-kind token is the pinned corpus projection: a
+     * completion value's numeric carrier has the single {@code number} kind
+     * (the corpus completion-cell pin {@code expected string} /
+     * {@code number} for an integral host completion), while every other
+     * kind keeps the shared token.
+     */
     private static BoundaryOutcome checkAsyncCompletion(RuntimeDescriptor descriptor,
                                                         BoundaryValueView view) {
-        return descriptorKindOutcome(asyncProjection(), core(descriptor, view));
+        return descriptorKindOutcome(asyncProjection(),
+            completionActual(core(descriptor, view), view));
+    }
+
+    /** The completion cell's numeric actual token ({@link #checkAsyncCompletion}). */
+    private static CoreResult completionActual(CoreResult result, BoundaryValueView view) {
+        if (result instanceof CoreFail fail
+                && fail.caseKind() == FailureCase.KIND_MISMATCH
+                && view.kind() == ActualKind.INT) {
+            return new CoreFail(fail.caseKind(), fail.expected(),
+                ActualKind.NUMBER.token(), 0, null);
+        }
+        return result;
     }
 
     /** ARRAY_ELEMENT_DESCRIPTOR: element check; E8003 with the leaf cause. */
@@ -576,26 +597,31 @@ public final class BoundaryExecutor {
     // =========================================================================
 
     /** The pinned template selection of one descriptor-kind projection set. */
-    private record Projection(FailurePolicyRow kindRow, int kindTemplate, int unicodeTemplate,
+    private record Projection(FailurePolicyRow kindRow, int kindTemplate,
+                              int refinementTemplate, int unicodeTemplate,
                               FailurePolicyRow sigRow) {
     }
 
     /** TYPE_DESCRIPTOR: kind mismatches, the pinned invalid-unicode variant, E8010 signatures. */
     private static Projection tdProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.TYPE_DESCRIPTOR),
-            0, 1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
+            0, -1, 1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
     }
 
     /** FUNCTION_SIGNATURE: non-functions project the E8001 kind template. */
     private static Projection signatureProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.TYPE_DESCRIPTOR),
-            0, -1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
+            0, -1, -1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
     }
 
-    /** ASYNC_COMPLETION: every mismatch through the row's single E8001 template. */
+    /**
+     * ASYNC_COMPLETION: kind mismatches through the row's corpus-aligned
+     * {@code expected {expected}} template, the int ladder's pinned refinement
+     * texts through the row's second template.
+     */
     private static Projection asyncProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.ASYNC_COMPLETION),
-            0, -1, null);
+            0, 1, 1, null);
     }
 
     /** The descriptor-kind outcome: Pass keeps the value; a failure projects per the set. */
@@ -617,8 +643,11 @@ public final class BoundaryExecutor {
         record Selected(FailurePolicyRow row, int templateIndex) {
         }
         Selected selected = switch (fail.caseKind()) {
-            case KIND_MISMATCH, INT_REFINEMENT ->
+            case KIND_MISMATCH ->
                 new Selected(projection.kindRow(), projection.kindTemplate());
+            case INT_REFINEMENT -> new Selected(projection.kindRow(),
+                projection.refinementTemplate() >= 0
+                    ? projection.refinementTemplate() : projection.kindTemplate());
             case INVALID_UNICODE -> new Selected(projection.kindRow(),
                 projection.unicodeTemplate() >= 0
                     ? projection.unicodeTemplate() : projection.kindTemplate());

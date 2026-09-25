@@ -42,7 +42,9 @@ import java.util.Objects;
  *       cause = the leaf failure (nested arrays included).</li>
  *   <li>E8010 signature mismatch versus non-function E8001.</li>
  *   <li>HOST_PARAMETER {@code {index}}, HOST_SYNC_RETURN
- *       {@code got nothing}/{@code got {actual}}, ASYNC_COMPLETION.</li>
+ *       {@code got nothing}/{@code got {actual}}, ASYNC_COMPLETION
+ *       (the corpus-aligned {@code expected {expected}} with the cell's
+ *       actual kind — a numeric completion carrier is the number kind).</li>
  *   <li>All four array cells including index/length boundaries.</li>
  *   <li>JSON_FROM_NULL swallow and JSON_TO_ERROR {@code {fieldPath}}.</li>
  *   <li>Missing→null at the two named cells and {@code got missing}
@@ -663,13 +665,24 @@ public class BoundaryExecutorTest {
     // =========================================================================
 
     static void testAsyncCompletion() {
-        System.out.println("-- ASYNC_COMPLETION: mismatch through the row's E8001 template --");
+        System.out.println("-- ASYNC_COMPLETION: mismatch through the row's E8001 template "
+            + "(the corpus-aligned expected-only text; a numeric carrier is the "
+            + "number kind) --");
 
         expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, STRING,
                 BoundaryValueView.ofNumber(1)),
             FailurePolicyId.ASYNC_COMPLETION, DiagnosticCode.E8001,
-            "expected string, got number", "string", "number", new LinkedHashMap<>(), null,
+            "expected string", "string", "number", new LinkedHashMap<>(), null,
             "async completion vs number");
+
+        // The cell's numeric carriers share the single number kind: the
+        // shared int carrier mismatching a non-numeric descriptor projects
+        // the pinned corpus actual kind, never "int".
+        expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, STRING,
+                BoundaryValueView.ofInt(1)),
+            FailurePolicyId.ASYNC_COMPLETION, DiagnosticCode.E8001,
+            "expected string", "string", "number", new LinkedHashMap<>(), null,
+            "async completion vs int carrier");
 
         expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, INT,
                 BoundaryValueView.ofNumber(Double.NaN)),
@@ -993,7 +1006,7 @@ public class BoundaryExecutorTest {
             new LinkedHashMap<>(), null, "function boundary vs missing");
         expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, STRING, missing),
             FailurePolicyId.ASYNC_COMPLETION, DiagnosticCode.E8001,
-            "expected string, got missing", "string", "missing", new LinkedHashMap<>(), null,
+            "expected string", "string", "missing", new LinkedHashMap<>(), null,
             "completion boundary vs missing");
     }
 

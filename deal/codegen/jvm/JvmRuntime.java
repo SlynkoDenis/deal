@@ -733,6 +733,20 @@ public final class JvmRuntime {
     }
 
     /**
+     * The completion cell's actual kind (the {@code ASYNC_COMPLETION}
+     * boundary at an {@code AWAIT}): the pinned corpus projection of the
+     * cell has one numeric kind, so every numeric carrier — the shared int
+     * carrier and the number carrier — projects as "number"; every other
+     * carrier keeps the shared classification.
+     */
+    public static String completionActualOf(String staticKind, Object v) {
+        if (v instanceof Long || v instanceof Integer || v instanceof Double) {
+            return "number";
+        }
+        return actualOf(staticKind, v);
+    }
+
+    /**
      * The descriptor-kind boundary check over the closed descriptor texts
      * ({@code null|boolean|int|number|string|table|array(INNER)|
      * nullable(INNER)|function(PARAMS;RETURN)}): the pinned int ladder
@@ -740,18 +754,47 @@ public final class JvmRuntime {
      * cause chain (E8003), and the function-signature projection (E8010).
      */
     public static Object bcheck(String desc, String staticKind, Object v) {
-        String actual = actualOf(staticKind, v);
+        return bcheck(desc, staticKind, v, false);
+    }
+
+    /**
+     * The completion cell's check (the {@code ASYNC_COMPLETION} boundary at
+     * an {@code AWAIT}): the acceptance logic is {@link #bcheck} 's, while a
+     * kind mismatch projects the cell's pinned transcript — message
+     * {@code expected {expected}} (the corpus completion-cell text) with the
+     * cell's actual kind ({@link #completionActualOf}).
+     */
+    public static Object bcheckCompletion(String desc, String staticKind, Object v) {
+        return bcheck(desc, staticKind, v, true);
+    }
+
+    /**
+     * The kind-mismatch failure text: the shared form, or the completion
+     * cell's pinned {@code expected {expected}} form.
+     */
+    private static String kindMismatch(String expected, String actual,
+            boolean completion) {
+        return completion ? "expected " + expected
+            : "expected " + expected + ", got " + actual;
+    }
+
+    private static Object bcheck(String desc, String staticKind, Object v,
+            boolean completion) {
+        String actual = completion ? completionActualOf(staticKind, v)
+            : actualOf(staticKind, v);
         if ("null".equals(desc)) {
             if (v == null) {
                 return v;
             }
-            throw fail("E8001", "expected null, got " + actual, "-", "null", actual);
+            throw fail("E8001", kindMismatch("null", actual, completion), "-", "null",
+                actual);
         }
         if ("boolean".equals(desc)) {
             if (v instanceof Boolean) {
                 return v;
             }
-            throw fail("E8001", "expected boolean, got " + actual, "-", "boolean", actual);
+            throw fail("E8001", kindMismatch("boolean", actual, completion), "-",
+                "boolean", actual);
         }
         if ("int".equals(desc)) {
             if (v instanceof Long longValue) {
@@ -775,25 +818,29 @@ public final class JvmRuntime {
                 }
                 return d;
             }
-            throw fail("E8001", "expected int, got " + actual, "-", "int", actual);
+            throw fail("E8001", kindMismatch("int", actual, completion), "-", "int",
+                actual);
         }
         if ("number".equals(desc)) {
             if (v instanceof Double || v instanceof Long) {
                 return v;
             }
-            throw fail("E8001", "expected number, got " + actual, "-", "number", actual);
+            throw fail("E8001", kindMismatch("number", actual, completion), "-",
+                "number", actual);
         }
         if ("string".equals(desc)) {
             if (v instanceof String) {
                 return v;
             }
-            throw fail("E8001", "expected string, got " + actual, "-", "string", actual);
+            throw fail("E8001", kindMismatch("string", actual, completion), "-",
+                "string", actual);
         }
         if ("table".equals(desc)) {
             if (v instanceof Table) {
                 return v;
             }
-            throw fail("E8001", "expected table, got " + actual, "-", "table", actual);
+            throw fail("E8001", kindMismatch("table", actual, completion), "-",
+                "table", actual);
         }
         if (desc.startsWith("@")) {
             if ("@/Error".equals(desc)) {
@@ -802,7 +849,7 @@ public final class JvmRuntime {
                 if (v instanceof ErrorValue) {
                     return v;
                 }
-                throw fail("E8001", "expected " + desc + ", got " + actual, "-", desc,
+                throw fail("E8001", kindMismatch(desc, actual, completion), "-", desc,
                     actual);
             }
             // A nominal class descriptor (E5): the canonical
@@ -812,7 +859,7 @@ public final class JvmRuntime {
                     && desc.equals(instance.classIdText())) {
                 return v;
             }
-            throw fail("E8001", "expected " + desc + ", got " + actual, "-", desc,
+            throw fail("E8001", kindMismatch(desc, actual, completion), "-", desc,
                 actual);
         }
         if (desc.startsWith("array(")) {
@@ -834,13 +881,15 @@ public final class JvmRuntime {
                 }
                 return v;
             }
-            throw fail("E8001", "expected array, got " + actual, "-", "array", actual);
+            throw fail("E8001", kindMismatch("array", actual, completion), "-",
+                "array", actual);
         }
         if (desc.startsWith("nullable(")) {
             if (v == null || v == MISSING) {
                 return null;
             }
-            return bcheck(desc.substring(9, desc.length() - 1), staticKind, v);
+            return bcheck(desc.substring(9, desc.length() - 1), staticKind, v,
+                completion);
         }
         if (desc.startsWith("function(")) {
             if (v instanceof FunctionValue function) {
@@ -851,8 +900,8 @@ public final class JvmRuntime {
                 throw fail("E8010", "function signature mismatch: expected " + desc
                     + ", got " + carried, "-", desc, carried);
             }
-            throw fail("E8001", "expected function, got " + actual, "-", "function",
-                actual);
+            throw fail("E8001", kindMismatch("function", actual, completion), "-",
+                "function", actual);
         }
         return v;
     }

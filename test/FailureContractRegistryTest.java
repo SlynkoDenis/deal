@@ -287,7 +287,8 @@ public class FailureContractRegistryTest {
             "no value first, then wrong value");
 
         expectRow(FailurePolicyId.ASYNC_COMPLETION, "E8001", "RUNTIME",
-            List.of("expected {expected}, got {actual}"), List.of("expected", "actual"),
+            List.of("expected {expected}", "expected {expected}, got {actual}"),
+            List.of("expected", "actual"),
             "await origin", none, frames,
             "operation failure wins, then the completion descriptor check");
 

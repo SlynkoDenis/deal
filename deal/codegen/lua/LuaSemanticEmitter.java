@@ -5711,7 +5711,7 @@ public final class LuaSemanticEmitter {
                 .append(luaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(luaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __tA.value)\n");
+                .append(", __tA.value, nil, true)\n");
             out.append("if not __okB then\n");
             out.append("  __chkB.o = ").append(luaString(originOf(boundary))).append("\n");
             emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
@@ -7467,9 +7467,27 @@ local function __failExpr(code, msg, o, e, a)
   return {__d = true, code = code, m = msg, o = o, e = e, a = a, f = __framesText(),
           cause = nil}
 end
-local function __bcheck(desc, staticKind, v, csig)
-  local actual = __actualOf(staticKind, v)
+-- The completion cell's actual kind (the ASYNC_COMPLETION boundary at an
+-- AWAIT): the pinned corpus projection of the cell has one numeric kind,
+-- so every numeric carrier — the plain Lua number (the shared int carrier)
+-- and the {__jn} number carrier — projects as "number"; every other
+-- carrier keeps the shared classification.
+local function __completionActualOf(staticKind, v)
+  if type(v) == "number" or (type(v) == "table" and v.__jn) then
+    return "number"
+  end
+  return __actualOf(staticKind, v)
+end
+local function __bcheck(desc, staticKind, v, csig, completion)
+  local actual = completion and __completionActualOf(staticKind, v)
+    or __actualOf(staticKind, v)
   local function fail(expected)
+    if completion then
+      -- The completion cell's pinned transcript: message
+      -- "expected {expected}" (the corpus completion-cell text).
+      return error(__failExpr("E8001", "expected "..expected, "-", expected,
+        actual), 0)
+    end
     return error(__failExpr("E8001", "expected "..expected..", got "..actual,
       "-", expected, actual), 0)
   end
@@ -7574,7 +7592,7 @@ local function __bcheck(desc, staticKind, v, csig)
     if innerSig ~= nil and string.sub(innerSig, 1, 1) == "?" then
       innerSig = string.sub(innerSig, 2)
     end
-    return __bcheck(string.sub(desc, 10, -2), staticKind, v, innerSig)
+    return __bcheck(string.sub(desc, 10, -2), staticKind, v, innerSig, completion)
   elseif string.sub(desc, 1, 9) == "function(" then
     if type(v) == "function" then
       local carried = v.__sig or ""

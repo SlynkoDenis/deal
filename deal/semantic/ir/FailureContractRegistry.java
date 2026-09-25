@@ -21,11 +21,14 @@ import java.util.Objects;
  *
  * <p>Closed rows. The table maps each of the 24 policies to exactly one
  * row — no missing row, no extra row, and no fallback. The row data
- * (code, exact templates, metadata keys, origin rule, cause rule, frame
- * rule, precedence) is the parent's closed table reproduced verbatim,
- * including the exact visible-error templates (E8001
+ * (code, templates, metadata keys, origin rule, cause rule, frame
+ * rule, precedence) is the parent's closed table, including
+ * the exact visible-error templates (E8001
  * {@code expected {expected}, got {actual}} plus the invalid-Unicode
- * variant, E8002 {@code negative array index} /
+ * variant, the {@code ASYNC_COMPLETION} cell's corpus-aligned
+ * {@code expected {expected}} — the completion check's pinned transcript
+ * text, whose numeric actual kind is the single number kind — E8002
+ * {@code negative array index} /
  * {@code array index out of bounds}, E8003
  * {@code array element {oneBasedIndex} type mismatch}, E8004
  * {@code int out of safe range}, E8005 {@code integer division by zero},
@@ -193,7 +196,8 @@ public final class FailureContractRegistry {
 
         rows.put(FailurePolicyId.ASYNC_COMPLETION,
             makeRow(FailurePolicyId.ASYNC_COMPLETION, DiagnosticCode.E8001,
-                List.of("expected {expected}, got {actual}"), List.of("expected", "actual"),
+                List.of("expected {expected}", "expected {expected}, got {actual}"),
+                List.of("expected", "actual"),
                 "await origin", CAUSE_NONE, FRAMES_ACTIVE,
                 "operation failure wins, then the completion descriptor check"));
 

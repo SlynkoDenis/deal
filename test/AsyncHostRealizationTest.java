@@ -30,6 +30,8 @@ import deal.semantic.ir.ProjectInterfaceIndex;
 import deal.semantic.ir.RuntimeDescriptor;
 import deal.semantic.ir.SemanticOp;
 import deal.semantic.ir.SemanticOpKind;
+import deal.test.conformance.ErrorSnapshot;
+import deal.test.conformance.SidecarExpectations;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -38,6 +40,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -76,8 +79,11 @@ import java.util.concurrent.CompletableFuture;
  *       fixtures ({@code host-async-ok}, {@code host-async-shape-bad},
  *       {@code host-async-bad}) compile through the production emission
  *       and execute under {@code luajit} and {@code java} with the
- *       sidecar-pinned code, origin, and expected projection; the shared
- *       completion-cell projection is asserted equal to the oracle's.</li>
+ *       sidecar-pinned code, message, origin, expected, and actual: the
+ *       completion cell ({@code host-async-bad}) reproduces the pinned
+ *       corpus projection {@code expected string} / {@code actual number}
+ *       at the await origin on both targets and in the oracle, and the
+ *       executed error snapshot equals the sidecar's.</li>
  *   <li><b>A pending operation and the poisoned seams.</b> A host
  *       operation that is still pending when {@code ASYNC_START} returns
  *       (LuaJIT {@code __rt.async_create}; JVM a future completed on
@@ -426,8 +432,8 @@ public class AsyncHostRealizationTest {
     // The sidecar pins
     // =========================================================================
 
-    private record Expectation(String mode, String code, String message, int line,
-                               int column, String expected, String actual) {
+    private record Expectation(String mode, String code, String message, String sourceFile,
+                               int line, int column, String expected, String actual) {
     }
 
     /** The pinned expectation of one corpus sidecar (the authoritative record). */
@@ -440,11 +446,12 @@ public class AsyncHostRealizationTest {
         String message = field(json, "\"message\"");
         int errorAt = json.indexOf("\"error\"");
         String errorBlock = errorAt < 0 ? "" : json.substring(errorAt);
+        String sourceFile = field(errorBlock, "\"sourceFile\"");
         String expected = field(errorBlock, "\"expected\"");
         String actual = field(errorBlock, "\"actual\"");
         Integer line = number(json, "\"line\"");
         Integer column = number(json, "\"column\"");
-        return new Expectation(mode, code, message,
+        return new Expectation(mode, code, message, sourceFile,
             line == null ? -1 : line, column == null ? -1 : column, expected, actual);
     }
 
@@ -495,12 +502,13 @@ public class AsyncHostRealizationTest {
 
     /**
      * Asserts one fixture run against its sidecar pin: a runtime-ok fixture
-     * exits OK with no error; a runtime-error fixture reports the pinned code,
-     * origin line/column, and expected descriptor. The declared-async shape
-     * check is the loaded wrapper's own rule, so its message and actual kind
-     * are pinned exactly too; the completion cell's message is the shared
-     * closed-boundary row projection, recorded here and asserted equal to the
-     * oracle's snapshot by the oracle drive below.
+     * exits OK with no error; a runtime-error fixture reports every pinned
+     * field — the code, the message, the origin line/column, and the
+     * expected/actual pair — byte-exact, and the executed error snapshot
+     * rendered from those fields equals the sidecar's pinned
+     * {@code DEAL_ERROR_SNAPSHOT} transcript (the field set, order, and
+     * canonical text; the span's own path is the temp layout's, so only its
+     * pinned text is compared).
      */
     private static void checkFixtureOutcome(String name, Outcome outcome,
             String target, int headerLinesStripped) throws Exception {
@@ -520,28 +528,61 @@ public class AsyncHostRealizationTest {
         }
         String[] parts = outcome.value().substring(4).split("\\|", -1);
         checkEq(expectation.code(), parts[0], name + " (" + target + ") pinned code");
+        checkEq(expectation.message(), parts[1],
+            name + " (" + target + ") pinned message");
         String origin = parts[2];
         int lastColon = origin.lastIndexOf(':');
         int prevColon = origin.lastIndexOf(':', lastColon - 1);
-        checkEq(expectation.line(),
-            Integer.valueOf(origin.substring(prevColon + 1, lastColon))
-                + headerLinesStripped,
+        int observedLine = Integer.valueOf(origin.substring(prevColon + 1, lastColon))
+            + headerLinesStripped;
+        int observedColumn = Integer.valueOf(origin.substring(lastColon + 1));
+        checkEq(expectation.line(), observedLine,
             name + " (" + target + ") pinned origin line");
-        checkEq(expectation.column(), Integer.valueOf(origin.substring(lastColon + 1)),
+        checkEq(expectation.column(), observedColumn,
             name + " (" + target + ") pinned origin column");
         check(origin.substring(0, prevColon).endsWith(name + ".deal"),
             name + " (" + target + ") pinned origin file: " + origin);
         checkEq(expectation.expected(), "-".equals(parts[3]) ? null : parts[3],
             name + " (" + target + ") pinned expected");
+        checkEq(expectation.actual(), "-".equals(parts[4]) ? null : parts[4],
+            name + " (" + target + ") pinned actual");
         ARTIFACT_ERRORS.put(name, new String[] {parts[1], parts[4]});
-        if ("host-async-shape-bad".equals(name)) {
-            // The declared-async shape check is the loaded wrapper's own rule
-            // (the deployed runtime's text): pinned byte-exact.
-            checkEq(expectation.message(), parts[1],
-                name + " (" + target + ") pinned shape-check message");
-            checkEq(expectation.actual(), "-".equals(parts[4]) ? null : parts[4],
-                name + " (" + target + ") pinned shape-check actual");
+
+        // The executed transcript equals the sidecar's pinned snapshot: every
+        // field, its order, and the canonical rendering are the sidecar's.
+        String observedFile = origin.substring(0, prevColon);
+        SidecarExpectations.ErrorExpectation observed =
+            new SidecarExpectations.ErrorExpectation(parts[0], parts[1], observedFile,
+                observedLine, observedColumn,
+                Optional.ofNullable("-".equals(parts[3]) ? null : parts[3]),
+                Optional.ofNullable("-".equals(parts[4]) ? null : parts[4]),
+                Optional.empty(), Optional.empty());
+        checkEq(pinnedSnapshotJson(name, expectation.sourceFile(), observedFile),
+            ErrorSnapshot.canonicalJson(observed),
+            name + " (" + target + ") executed error snapshot equals the pinned "
+                + "sidecar snapshot");
+    }
+
+    /**
+     * The sidecar's pinned {@code DEAL_ERROR_SNAPSHOT} JSON of one fixture,
+     * with its pinned source file replaced by the run's own (the temp layout's)
+     * source path — every other field, its order, and its canonical rendering
+     * stay the sidecar's.
+     */
+    private static String pinnedSnapshotJson(String name, String pinnedFile,
+            String observedFile) throws Exception {
+        String stdout = field(Files.readString(
+            Path.of("test/conformance/backend-runtime/host-abi/" + name
+                + ".expect.json"), StandardCharsets.UTF_8), "\"stdout\"");
+        for (String line : stdout.split("\\n", -1)) {
+            if (line.startsWith(ErrorSnapshot.SNAPSHOT_LINE_PREFIX)) {
+                return line.substring(ErrorSnapshot.SNAPSHOT_LINE_PREFIX.length())
+                    .replace("\"sourceFile\":\"" + pinnedFile + "\"",
+                        "\"sourceFile\":\"" + observedFile + "\"");
+            }
         }
+        throw new IllegalStateException("the sidecar of '" + name
+            + "' pins no DEAL_ERROR_SNAPSHOT line");
     }
 
     // =========================================================================
@@ -622,13 +663,17 @@ public class AsyncHostRealizationTest {
                         "the oracle's completion cell fails at the await site (the "
                             + "single ASYNC_COMPLETION boundary): "
                             + terminalText(run.terminal()));
-                    checkEq("int", error.actual(),
-                        name + " (oracle) completed value's actual kind (the shared "
-                            + "closed-boundary projection)");
-                    // The shared closed-boundary row projection is one authority:
-                    // both artifacts produce the identical completion-cell message
-                    // and actual kind (the corpus sidecar's retained-runtime
-                    // spelling is the lane cutover's, not this cell's).
+                    // The completion cell reproduces the pinned corpus
+                    // projection: message "expected string", expected
+                    // "string", actual "number" (the completion value is an
+                    // integral host number; the cell's numeric carrier is the
+                    // single number kind).
+                    checkEq(expectation.message(), error.message(),
+                        name + " (oracle) pinned message");
+                    checkEq(expectation.expected(), error.expected(),
+                        name + " (oracle) pinned expected");
+                    checkEq(expectation.actual(), error.actual(),
+                        name + " (oracle) pinned actual");
                     String[] artifacts = ARTIFACT_ERRORS.get(name);
                     check(artifacts != null,
                         "the " + name + " artifact drives recorded their projection");
