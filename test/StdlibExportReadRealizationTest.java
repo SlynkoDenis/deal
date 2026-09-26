@@ -483,17 +483,19 @@ public class StdlibExportReadRealizationTest {
             }
 
             // The row invoker: the direct STDLIB_CALL arm runs the same
-            // realization the cataloged callable's __fn does.
+            // realization the cataloged callable's __fn does (with the
+            // invoking op's own event kind label; the cataloged callable and the
+            // dynamic dispatch's HOST sub-class pass theirs).
             SemanticOp stdlibCall = opsOfKind(appUnit, SemanticOpKind.STDLIB_CALL).get(0);
             String directCall = "S.v" + ((ValueId) stdlibCall.result()).id()
-                + " = __stdlibInvoke(\"CONSOLE_LOG\"";
+                + " = __stdlibInvoke(\"STDLIB_CALL\", \"CONSOLE_LOG\"";
             checkEq(1, countOccurrences(traceLua, directCall),
                 "the direct console arm runs the shared row invoker: " + directCall);
-            check(traceLua.contains("local function __stdlibInvoke(fn, opKey, digest, "
-                    + "parent, origin, ...)"),
-                "the prelude carries the one row invoker");
-            check(traceLua.contains("return __stdlib(fn, opKey, digest, parent, origin, "
-                    + "...)"),
+            check(traceLua.contains("local function __stdlibInvoke(kind, fn, opKey, "
+                    + "digest, parent, origin, ...)"),
+                "the prelude carries the one row invoker with the invoking op's kind");
+            check(traceLua.contains("return __stdlib(kind, fn, opKey, digest, parent, "
+                    + "origin, ...)"),
                 "the row invoker delegates every algorithmic row to the one algorithm "
                     + "authority");
             check(traceLua.contains("__consoleEffect(\"STDOUT\", __consoleText(...))"),

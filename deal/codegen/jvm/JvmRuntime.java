@@ -85,6 +85,42 @@ public final class JvmRuntime {
     }
 
     /**
+     * The declared identity (module path, export name) of one loaded host
+     * surface entry (ISSUE-0678; design source
+     * {@code function-typed-value-materialization-and-dispatch} M5's
+     * asynchronous host class): the program-scoped export-surface registry
+     * is the identity-indexed home of the entries the host load published
+     * (H1), so a carrier that is a declared host export names the export
+     * the dynamic dispatch's host operation start derives its operation
+     * label and its {@code ASYNC_OPERATION_HANDLE} terminal from — the same
+     * declared identity the oracle's binding resolution reports. Exactly
+     * one home is required: a value with no home, or one shared by two
+     * entries (never a loaded surface entry), resolves nothing and the
+     * dispatch fails closed.
+     *
+     * @param value the carrier value; may be null
+     * @return a two-element {@code {module, export}} array, or null when
+     *         the value has no unique home
+     */
+    public static String[] surfaceNameOf(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String[] found = null;
+        for (Map.Entry<String, Table> module : EXPORT_SURFACES.entrySet()) {
+            for (Map.Entry<String, Object> entry : module.getValue().entries.entrySet()) {
+                if (entry.getValue() == value) {
+                    if (found != null) {
+                        return null;
+                    }
+                    found = new String[] { module.getKey(), entry.getKey() };
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
      * The program-scoped cataloged-callable registry (M4): one memoized
      * carrier per catalog row per module per program, keyed by the module
      * identity and the export name. Hosted with the runtime's existing
@@ -384,9 +420,9 @@ public final class JvmRuntime {
         public final String rowId;
 
         StdlibFunctionValue(String rowId, String signature, String spec) {
-            super(args -> stdlibInvoke(rowId, (String) args[0], (String) args[1],
-                (String) args[2], (String) args[3],
-                java.util.Arrays.copyOfRange(args, 4, args.length)), signature, spec,
+            super(args -> stdlibInvoke((String) args[0], rowId, (String) args[1],
+                (String) args[2], (String) args[3], (String) args[4],
+                java.util.Arrays.copyOfRange(args, 5, args.length)), signature, spec,
                 null);
             this.rowId = rowId;
         }
@@ -394,20 +430,23 @@ public final class JvmRuntime {
 
     /**
      * Invokes one cataloged stdlib callable under the invoking call's
-     * context (M4): the trace key, contract digest, parent key, and origin
-     * pack the leading four array entries, the boundary-admitted call
-     * arguments follow — the same context the direct {@code STDLIB_CALL}
-     * arm passes to {@link #stdlibInvoke}.
+     * context (M4; ISSUE-0678 for the {@code kind}): the invoking op's own
+     * event kind label, the trace key, contract digest, parent key, and
+     * origin pack the leading five array entries, the boundary-admitted
+     * call arguments follow — the same context the direct
+     * {@code STDLIB_CALL} arm passes to {@link #stdlibInvoke}, with the
+     * invoking op's own kind so an algorithm FAILURE event carries it.
      */
-    public static Object invokeStdlibCallable(StdlibFunctionValue callable, String opKey,
-                                              String digest, String parent, String origin,
-                                              Object[] args) {
-        Object[] packed = new Object[args.length + 4];
-        packed[0] = opKey;
-        packed[1] = digest;
-        packed[2] = parent;
-        packed[3] = origin;
-        System.arraycopy(args, 0, packed, 4, args.length);
+    public static Object invokeStdlibCallable(StdlibFunctionValue callable, String kind,
+                                              String opKey, String digest, String parent,
+                                              String origin, Object[] args) {
+        Object[] packed = new Object[args.length + 5];
+        packed[0] = kind;
+        packed[1] = opKey;
+        packed[2] = digest;
+        packed[3] = parent;
+        packed[4] = origin;
+        System.arraycopy(args, 0, packed, 5, args.length);
         return callable.fn.invoke(packed);
     }
 
@@ -1738,10 +1777,14 @@ public final class JvmRuntime {
      * ({@link System#currentTimeMillis()}) and its single terminal is the
      * declared int {@code STDLIB_RETURN} boundary, never an algorithm
      * failure. The two console ids are the row invoker's
-     * ({@link #stdlibInvoke}), never this surface's.
+     * ({@link #stdlibInvoke}), never this surface's. The {@code kind}
+     * parameter is the invoking op's own event kind label (the direct
+     * {@code STDLIB_CALL} arm's own kind, or the dynamic dispatch's CALL
+     * kind), so an algorithm failure publishes the invoking op's FAILURE
+     * event under its own kind.
      */
-    public static Object stdlib(String fn, String opKey, String digest, String parent,
-                                String origin, Object[] args) {
+    public static Object stdlib(String kind, String fn, String opKey, String digest,
+                                String parent, String origin, Object[] args) {
         try {
             switch (fn) {
                 case "STRING_LENGTH" -> {
@@ -1903,7 +1946,7 @@ public final class JvmRuntime {
                     "unknown stdlib call " + fn, null, null);
             }
         } catch (StdlibFailure failure) {
-            raise(opKey, digest, parent, origin, "STDLIB_CALL", failure.code, failure.msg,
+            raise(opKey, digest, parent, origin, kind, failure.code, failure.msg,
                 failure.expected, failure.actual);
             return null; // unreachable: raise throws
         }
@@ -1912,15 +1955,16 @@ public final class JvmRuntime {
     /**
      * The one row invoker of the closed stdlib catalog (M4): the single
      * callable realization per catalog row, shared by the direct
-     * {@code STDLIB_CALL} arm and the cataloged callable's {@code fn}. The
-     * two console rows run the row's single-effect write through
+     * {@code STDLIB_CALL} arm, the cataloged callable's {@code fn}, and the
+     * dynamic dispatch's cataloged-callable HOST sub-class (ISSUE-0678).
+     * The two console rows run the row's single-effect write through
      * {@link #console}/{@link #consoleError} (the direct arm's text
      * projection); every algorithmic row delegates to {@link #stdlib} with
      * the same row identity and the same invoking-call context — one
      * algorithm authority, never two.
      */
-    public static Object stdlibInvoke(String fn, String opKey, String digest, String parent,
-                                      String origin, Object[] args) {
+    public static Object stdlibInvoke(String kind, String fn, String opKey, String digest,
+                                      String parent, String origin, Object[] args) {
         switch (fn) {
             case "CONSOLE_LOG" -> {
                 console(consoleText(args));
@@ -1931,7 +1975,7 @@ public final class JvmRuntime {
                 return null;
             }
             default -> {
-                return stdlib(fn, opKey, digest, parent, origin, args);
+                return stdlib(kind, fn, opKey, digest, parent, origin, args);
             }
         }
     }

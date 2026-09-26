@@ -3866,8 +3866,7 @@ public final class SemanticOracle {
                     case FunctionExecutionBinding.AdapterBinding adapter ->
                         invokeAdapter(op, payload, adapter, checkedArgs);
                     case FunctionExecutionBinding.HostFunction host ->
-                        invokeHostCallWithBoundary(op, payload, host.hostModuleId(),
-                            host.exportName(), host.descriptor(), checkedArgs);
+                        invokeHostBindingWithBoundary(op, payload, host, checkedArgs);
                     case FunctionExecutionBinding.HostFunctionValue hostValue ->
                         invokeHostCallWithBoundary(op, payload, hostValue.hostModuleId(),
                             "@value#" + hostValue.materializingBoundaryOpId().id(),
@@ -3895,28 +3894,64 @@ public final class SemanticOracle {
             return checked;
         }
 
-        /** The body execution of one LoweredBody binding under the invoking op. */
+        /**
+         * The body execution of one {@code LoweredBody} binding under the
+         * callee body's owning unit (ISSUE-0678; design source
+         * {@code function-typed-value-materialization-and-dispatch} M5 and the
+         * dynamic call contract): the resolution consumes the value-channel
+         * class delivered by the producer rule, so a cross-module callee value's
+         * body lives in the unit the project closure records for its function id
+         * — the oracle twin of the artifacts' function-id to owning-module
+         * resolution — never in the invoking op's unit.
+         */
         private Value invokeLoweredBody(SemanticOp op, KindPayload.CallPayload payload,
                                         FunctionExecutionBinding.LoweredBody body,
                                         List<Value> checkedArgs) {
-            UnitState state = stateOf(op.opId());
-            LoweredFunction function = state.unit.functions().get(body.functionId());
-            if (function == null) {
-                throw new IllegalStateException("CALL resolves a missing lowered function "
-                    + body.functionId());
-            }
-            bindParamCells(state, body.blockId(), payload.signature().paramTypes().size(),
-                checkedArgs);
-            frames.add(0, body.functionId());
-            Value returned;
+            return runOwnedBodyBlock(body.functionId(), body.blockId(),
+                payload.signature().paramTypes().size(), checkedArgs);
+        }
+
+        /**
+         * One lowered body block run under its owning unit: the owning unit's
+         * membership table and state execute the body, the parameter cells bind
+         * in that unit, and the containing unit's state stack entry is restored
+         * on every path. The identity is resolved from the body's own function id
+         * ({@link #unitOwningFunction}); an identity no unit records is a
+         * fail-closed producer defect.
+         */
+        private Value runOwnedBodyBlock(FunctionId functionId, BlockId bodyBlock,
+                                        int paramCount, List<Value> args) {
+            UnitState state = unitOwningFunction(functionId);
+            bindParamCells(state, bodyBlock, paramCount, args);
+            frames.add(0, functionId);
             try {
-                returned = runBodyBlock(body.blockId(),
-                    payload.signature().paramTypes().size(), state);
+                stateStack.push(state);
+                try {
+                    return runBodyBlock(bodyBlock, paramCount, state);
+                } finally {
+                    stateStack.pop();
+                }
             } finally {
                 frames.remove(0);
                 popParamCells();
             }
-            return returned;
+        }
+
+        /**
+         * The unit of the closure that owns one lowered function identity (the
+         * callee-body terminal's resolution): a cross-module callee value's body
+         * is owned by the unit its function id belongs to, so the body runs under
+         * its own unit and module context. A function id no unit records is a
+         * fail-closed producer defect.
+         */
+        private UnitState unitOwningFunction(FunctionId functionId) {
+            for (UnitState state : units.values()) {
+                if (state.unit.functions().containsKey(functionId)) {
+                    return state;
+                }
+            }
+            throw new IllegalStateException("the lowered function " + functionId
+                + " is not recorded by any unit of the closure (producer defect)");
         }
 
         /** Binds one body block's leading parameter ALLOC cells (the invocation overlay). */
@@ -3935,20 +3970,13 @@ public final class SemanticOracle {
             FunctionExecutionBinding sourceBinding = resolveBindingOfValue(sourceValue);
             List<Value> leading = List.copyOf(checkedArgs.subList(0, m));
             return switch (sourceBinding) {
-                case FunctionExecutionBinding.LoweredBody body -> {
-                    UnitState state = stateOf(op.opId());
-                    bindParamCells(state, body.blockId(), m, leading);
-                    frames.add(0, body.functionId());
-                    try {
-                        yield runBodyBlock(body.blockId(), m, state);
-                    } finally {
-                        frames.remove(0);
-                        popParamCells();
-                    }
-                }
+                case FunctionExecutionBinding.LoweredBody body ->
+                    runOwnedBodyBlock(body.functionId(), body.blockId(), m, leading);
                 case FunctionExecutionBinding.HostFunction host -> {
-                    Value value = invokeHostRequest(op, host.hostModuleId(),
-                        host.exportName(), host.descriptor(), leading);
+                    // The cataloged-callable HOST sub-class resolves the closed
+                    // catalog row's algorithm (never a host responder); every
+                    // other host binding runs its loaded surface request.
+                    Value value = invokeResolvedHostRequest(op, host, leading);
                     yield runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
                         BoundaryContext.none());
                 }
@@ -4052,16 +4080,10 @@ public final class SemanticOracle {
                 case ReturnBoundarySelection.CalleeReturn ignored -> {
                     FunctionExecutionBinding.LoweredBody body =
                         (FunctionExecutionBinding.LoweredBody) sourceBinding;
-                    UnitState state = stateOf(op.opId());
-                    bindParamCells(state, body.blockId(), m, leading);
-                    frames.add(0, body.functionId());
-                    Value returned;
-                    try {
-                        returned = runBodyBlock(body.blockId(), m, state);
-                    } finally {
-                        frames.remove(0);
-                        popParamCells();
-                    }
+                    // The resolved body runs under its own unit (the
+                    // value-channel class of a cross-module source value).
+                    Value returned = runOwnedBodyBlock(body.functionId(), body.blockId(),
+                        m, leading);
                     yield runRecordedDealBodyCell(op,
                         payload.dynamicReturnBoundary().dealBodyBoundaryOpId(), returned);
                 }
@@ -4078,12 +4100,28 @@ public final class SemanticOracle {
             };
         }
 
-        /** The host-request terminal of a HOST-class or retained-ABI external binding. */
+        /**
+         * The host-request terminal of a HOST-class or retained-ABI external
+         * binding. The HOST class of a <em>declared function export of a spec
+         * stdlib module</em> (the cataloged callable's registration, K2/M5) is
+         * the closed catalog row's algorithm instead of a host request: the
+         * catalog row is the resolution authority, the shared
+         * {@link SharedStdlibSemantics} table is the one algorithm authority the
+         * direct {@code STDLIB_CALL} arm and the read's callable also run, and no
+         * host responder is consulted — the same class path and the same
+         * failures all three consumers produce for the cataloged callable.
+         */
         private Value invokeResolvedHostRequest(SemanticOp op,
                 FunctionExecutionBinding binding, List<Value> args) {
             return switch (binding) {
-                case FunctionExecutionBinding.HostFunction host -> invokeHostRequest(op,
-                    host.hostModuleId(), host.exportName(), host.descriptor(), args);
+                case FunctionExecutionBinding.HostFunction host -> {
+                    StdlibFunctionCatalog.Entry row = stdlibRowOf(host.hostModuleId(),
+                        host.exportName(), host.descriptor());
+                    yield row == null
+                        ? invokeHostRequest(op, host.hostModuleId(), host.exportName(),
+                            host.descriptor(), args)
+                        : invokeStdlibCallee(op, row, args);
+                }
                 case FunctionExecutionBinding.HostFunctionValue hostValue ->
                     invokeHostRequest(op, hostValue.hostModuleId(),
                         "@value#" + hostValue.materializingBoundaryOpId().id(),
@@ -4101,6 +4139,64 @@ public final class SemanticOracle {
                     throw intrinsicExecutionDefect(intrinsic);
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicFunctionValueDefect(dynamic);
+            };
+        }
+
+        /**
+         * The closed catalog row of one host-shaped binding, or {@code null}
+         * when the binding names no cataloged row (a real host module/export).
+         * The catalog is the stdlib kind's resolution authority: a
+         * {@code (module path, export name)} pair without a row is a host
+         * surface entry, and a pair with a row whose declared descriptor differs
+         * from the binding's descriptor is a producer defect (the row's declared
+         * descriptor is the read's own).
+         */
+        private static StdlibFunctionCatalog.Entry stdlibRowOf(ModuleId module,
+                String export, RuntimeDescriptor.Func descriptor) {
+            StdlibFunctionCatalog.Entry row = StdlibFunctionCatalog
+                .lookup(module.path(), export).orElse(null);
+            if (row == null) {
+                return null;
+            }
+            if (!row.declaredDescriptor().equals(descriptor)) {
+                throw new IllegalStateException("the cataloged callable '" + module.path()
+                    + "#" + export + "' carries " + descriptor.canonicalSpecText()
+                    + " but the closed catalog row declares "
+                    + row.declaredDescriptor().canonicalSpecText()
+                    + " (the row's declared descriptor is the read's own — a producer"
+                    + " defect)");
+            }
+            return row;
+        }
+
+        /**
+         * The cataloged-callable HOST sub-class (M5): the catalog row's invoker
+         * with the invoking call's context — the single shared algorithm
+         * authority ({@link SharedStdlibSemantics#dispatch}) with the catalogue
+         * row's declared arity and the call op's own origin — never a host
+         * responder and never a second algorithm copy. The recorded dynamic
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell runs by the call op
+         * after the algorithm result, exactly as for every other HOST binding.
+         */
+        private Value invokeStdlibCallee(SemanticOp invocation,
+                StdlibFunctionCatalog.Entry row, List<Value> args) {
+            List<SharedStdlibSemantics.Value> argv = new ArrayList<>();
+            for (Value value : args) {
+                argv.add(stdlibCarrierOf(value));
+            }
+            SharedStdlibSemantics.ConsoleSink sink = consoleSinkFor(row.function());
+            SharedStdlibSemantics.Outcome<SharedStdlibSemantics.Value> outcome =
+                SharedStdlibSemantics.dispatch(row.function(), invocation.origin(), argv,
+                    sink, ORACLE_CLOCK);
+            return switch (outcome) {
+                case SharedStdlibSemantics.Outcome.Success<SharedStdlibSemantics.Value>
+                        success -> stdlibResultOf(success.value());
+                case SharedStdlibSemantics.Outcome.Failure<SharedStdlibSemantics.Value>
+                        failure -> {
+                    SharedStdlibSemantics.StdlibFailure stdlibFailure = failure.failure();
+                    throw DealFailure.of(stdlibFailure.failure(), stdlibFailure.origin(),
+                        List.copyOf(frames));
+                }
             };
         }
 
@@ -4219,6 +4315,24 @@ public final class SemanticOracle {
                 ModuleId module, String export, RuntimeDescriptor.Func descriptor,
                 List<Value> args) {
             Value value = invokeHostRequest(op, module, export, descriptor, args);
+            return runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
+                BoundaryContext.none());
+        }
+
+        /**
+         * One host-shaped call binding's terminal: the cataloged-callable HOST
+         * sub-class resolves the closed catalog row's algorithm (never a host
+         * responder, through {@link #invokeResolvedHostRequest}), and every
+         * other host binding runs its loaded surface request; the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell runs by the call
+         * op either way. The read's own registration used as a call callee (the
+         * static/indirect arm), the callback binding, and the dynamically
+         * resolved callee share this one terminal.
+         */
+        private Value invokeHostBindingWithBoundary(SemanticOp op,
+                KindPayload.CallPayload payload,
+                FunctionExecutionBinding.HostFunction host, List<Value> args) {
+            Value value = invokeResolvedHostRequest(op, host, args);
             return runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
                 BoundaryContext.none());
         }
@@ -4537,6 +4651,8 @@ public final class SemanticOracle {
                     readyQueue.add(token.tokenId());
                 }
                 case FunctionExecutionBinding.HostFunction host -> {
+                    requireAsyncHostBinding(host.hostModuleId(), host.exportName(),
+                        host.descriptor());
                     requireHostResponder();
                     String label = payload.hostOperationLabel();
                     effects.add(new SemanticRuntimeModel.EffectEvent(
@@ -4618,6 +4734,8 @@ public final class SemanticOracle {
                     RuntimeDescriptor.Func descriptor;
                     String label;
                     if (binding instanceof FunctionExecutionBinding.HostFunction host) {
+                        requireAsyncHostBinding(host.hostModuleId(), host.exportName(),
+                            host.descriptor());
                         module = host.hostModuleId();
                         export = host.exportName();
                         descriptor = host.descriptor();
@@ -4678,16 +4796,8 @@ public final class SemanticOracle {
                     FunctionExecutionBinding.LoweredBody body =
                         (FunctionExecutionBinding.LoweredBody) sourceBinding;
                     tasks.put(token.tokenId(), new Task(token, () -> {
-                        UnitState state = stateOf(op.opId());
-                        bindParamCells(state, body.blockId(), m, leading);
-                        frames.add(0, body.functionId());
-                        Value returned;
-                        try {
-                            returned = runBodyBlock(body.blockId(), m, state);
-                        } finally {
-                            frames.remove(0);
-                            popParamCells();
-                        }
+                        Value returned = runOwnedBodyBlock(body.functionId(),
+                            body.blockId(), m, leading);
                         return runRecordedDealBodyCell(op, recordedTaskCellOf(op),
                             returned);
                     }));
@@ -4700,6 +4810,8 @@ public final class SemanticOracle {
                     RuntimeDescriptor.Func descriptor;
                     String label;
                     if (sourceBinding instanceof FunctionExecutionBinding.HostFunction host) {
+                        requireAsyncHostBinding(host.hostModuleId(), host.exportName(),
+                            host.descriptor());
                         module = host.hostModuleId();
                         export = host.exportName();
                         descriptor = host.descriptor();
@@ -4742,18 +4854,31 @@ public final class SemanticOracle {
             }
         }
 
+        /**
+         * The async HOST class's closed guard: a declared function export of a
+         * spec stdlib module is the cataloged callable's registration — a
+         * synchronous boundary-shaped callable — so an async start on it is a
+         * fail-closed producer defect, never a host operation request (the closed
+         * conversion/time rows are synchronous values).
+         */
+        private static void requireAsyncHostBinding(ModuleId module, String export,
+                RuntimeDescriptor.Func descriptor) {
+            if (stdlibRowOf(module, export, descriptor) != null) {
+                throw new IllegalStateException("the cataloged stdlib callable '"
+                    + module.path() + "#" + export + "' is a synchronous"
+                    + " boundary-shaped callable; an async host operation start on it"
+                    + " is a producer defect");
+            }
+        }
+
         /** One DEAL body task: the body executes exactly once and completes the token. */
         private Value runTaskBody(SemanticOp op, FunctionExecutionBinding.LoweredBody body,
                                   List<Value> args) {
-            UnitState state = stateOf(op.opId());
-            bindParamCells(state, body.blockId(), args.size(), args);
-            frames.add(0, body.functionId());
-            try {
-                return runBodyBlock(body.blockId(), args.size(), state);
-            } finally {
-                frames.remove(0);
-                popParamCells();
-            }
+            // The resolved body runs under its own unit (the value-channel
+            // class of a cross-module callee value): a body whose function id
+            // belongs to another module of the closure executes through that
+            // unit's membership table and module context.
+            return runOwnedBodyBlock(body.functionId(), body.blockId(), args.size(), args);
         }
 
         /**
@@ -5103,8 +5228,7 @@ public final class SemanticOracle {
                         };
                     }
                     case FunctionExecutionBinding.HostFunction host -> {
-                        Value value = invokeHostRequest(callback, host.hostModuleId(),
-                            host.exportName(), host.descriptor(), checked);
+                        Value value = invokeResolvedHostRequest(callback, host, checked);
                         yield runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
                             BoundaryContext.none());
                     }
@@ -5793,9 +5917,13 @@ public final class SemanticOracle {
          * (K11/M3): the published value already carries the owner's
          * registration, so re-keying it would replace the owner-side
          * {@code LoweredBody} resolution; a STDLIB read's own created
-         * callable is keyed once at its creation and never re-keyed; the
-         * read's own registration stays addressable by the read result's
-         * allocation identity ({@link #bindingOf}).</p>
+         * callable is keyed once at its creation and never re-keyed; a
+         * HOST read's loaded entry is the read's own class carrier (the
+         * loaded surface entry itself), so it is keyed once to that read's
+         * {@code HostFunction} registration — the value-keyed channel a
+         * later dynamic resolution consumes; the read's own registration
+         * stays addressable by the read result's allocation identity
+         * ({@link #bindingOf}).</p>
          */
         private String executeExportRead(SemanticOp op) {
             KindPayload.ExportReadPayload payload =
@@ -5820,6 +5948,9 @@ public final class SemanticOracle {
                                 ignored -> new LinkedHashMap<>()).put(payload.name(), entry);
                         }
                     }
+                    if (kind == ModuleImportKind.HOST && entry != null) {
+                        keyLoadedHostEntry(op, entry);
+                    }
                     value = entry == null ? Value.MissingValue.INSTANCE : entry;
                 }
                 case STDLIB -> value = stdlibCallableOf(op, payload);
@@ -5827,6 +5958,31 @@ public final class SemanticOracle {
                     + payload.module().path() + "." + payload.name());
             }
             return publish(op, value);
+        }
+
+        /**
+         * The HOST read's loaded entry keyed to the read's own
+         * {@code HostFunction} registration (the value-keyed channel the
+         * dynamic resolution consumes): the loaded surface entry is the class
+         * carrier the read publishes, so a later use of that value — a
+         * function-typed argument, a dynamic call/await callee, an adapter's
+         * source — resolves the identical HOST class the read's identity
+         * carries. The entry is keyed once, at its first publication; the
+         * value's own producing registration always wins (a surface entry whose
+         * value the owner's allocation already registered keeps that class, and
+         * the value-keyed map is never overwritten).
+         */
+        private void keyLoadedHostEntry(SemanticOp op, Value entry) {
+            FunctionExecutionBinding readBinding = op.result() instanceof ValueId valueId
+                ? bindingOf(valueId) : null;
+            if (!(readBinding instanceof FunctionExecutionBinding.HostFunction)) {
+                // A non-function descriptor produces the read without a
+                // registration (R3): nothing to key.
+                return;
+            }
+            if (bindingsByValue.get(entry) == null) {
+                bindingsByValue.put(entry, readBinding);
+            }
         }
 
         /**

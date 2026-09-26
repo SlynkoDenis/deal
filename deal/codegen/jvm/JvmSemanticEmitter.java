@@ -9,6 +9,7 @@ import deal.semantic.ir.BindingCellKind;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BlockId;
 import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.FailurePolicyId;
 import deal.semantic.ir.ChainOperandCompletion;
 import deal.semantic.ir.ClassFactoryRegistry;
 import deal.semantic.ir.ClassId;
@@ -368,6 +369,49 @@ public final class JvmSemanticEmitter {
         }
 
         /**
+         * Whether the closure's op walk carries a HOST-kind import (a host or
+         * extern-C declaration module).
+         */
+        private static boolean closureHasHostImports(ExecutableLoweredProject project) {
+            for (LoweredModuleUnit moduleUnit : project.modules().values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.MODULE_IMPORT
+                            && ((KindPayload.ModuleImportPayload) op.payload()).kind()
+                                == deal.semantic.ir.ModuleImportKind.HOST) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Whether the closure's op walk carries at least one host-boundary cell
+         * (the DEAL_TO_HOST/HOST_PARAMETER/HOST_TO_DEAL/HOST_SYNC_RETURN family
+         * the emitted host seam's checks realize).
+         */
+        private static boolean closureHasHostCellBoundaries(
+                ExecutableLoweredProject project) {
+            for (LoweredModuleUnit moduleUnit : project.modules().values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() != SemanticOpKind.BOUNDARY
+                            || !(op.payload()
+                                instanceof KindPayload.BoundaryPayload boundary)) {
+                        continue;
+                    }
+                    BoundaryKind kind = boundary.kind();
+                    FailurePolicyId policy = op.failurePolicy();
+                    if (kind == BoundaryKind.DEAL_TO_HOST || kind == BoundaryKind.HOST_TO_DEAL
+                            || policy == FailurePolicyId.HOST_PARAMETER
+                            || policy == FailurePolicyId.HOST_SYNC_RETURN) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
          * The project-mode session (the cross-module factory surface):
          * every module's unit, table, and class-factory registry in one
          * combined artifact — the CLASS_NEW(SHARED_FACTORY) arm resolves
@@ -399,9 +443,21 @@ public final class JvmSemanticEmitter {
                 : sharedClassName(project.modules().containsKey(project.entryModule())
                     ? project.modules().get(project.entryModule()).moduleId().path()
                     : project.entryModule().path());
-            this.hostAbi = hostSurface == null ? null
-                : new JvmHostAbiEmission(JvmHostAbiEmission.collect(
-                    project, hostSurface), resolvedClassName);
+            // The host ABI emission surface: the compile's declaration surface
+            // when the session carries one, and — since ISSUE-0678 — a
+            // seam-only surface for a closure whose op walk carries
+            // host-boundary cells of its own (the
+            // DEAL_TO_HOST/HOST_PARAMETER/HOST_TO_DEAL/HOST_SYNC_RETURN family):
+            // a spec-stdlib declared-function export read called as a value
+            // carries that family (K2) without any host import, and its emitted
+            // checks are the seam's. A session with host imports keeps its
+            // landed surface (or its landed null: the scenario-seam sessions).
+            this.hostAbi = hostSurface != null
+                ? new JvmHostAbiEmission(JvmHostAbiEmission.collect(project, hostSurface),
+                    resolvedClassName)
+                : (!closureHasHostImports(project) && closureHasHostCellBoundaries(project)
+                    ? new JvmHostAbiEmission(java.util.List.of(), resolvedClassName)
+                    : null);
             this.unit = project.modules().get(project.entryModule());
             this.table = tables.get(project.entryModule());
             if (this.unit == null || this.table == null) {
@@ -3712,8 +3768,7 @@ public final class JvmSemanticEmitter {
                 .append(" && __fv").append(id).append(".fid != null) {\n");
             out.append(indent(indent + 1)).append(cls).append(" = \"DEAL_BODY\";\n");
             out.append(indent(indent)).append("} else if (").append(carrier)
-                .append(" instanceof JvmRuntime.FunctionValue && !(").append(carrier)
-                .append(" instanceof JvmRuntime.StdlibFunctionValue)) {\n");
+                .append(" instanceof JvmRuntime.FunctionValue) {\n");
             out.append(indent(indent + 1)).append(cls).append(" = \"HOST\";\n");
             out.append(indent(indent)).append("} else {\n");
             emitDynamicCarrierFailure(op, carrier, indent + 1);
@@ -3821,12 +3876,18 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * The dynamic dispatch's HOST row: the carrier is the loaded
-         * surface entry, so its own invoker bridges the emitted per-export
-         * wrapper ({@code carrier.fn}) with the completed production
-         * values, and the recorded {@code HOST_TO_DEAL} +
-         * {@code HOST_SYNC_RETURN} cell runs at the call origin (the
-         * oracle's {@code invokeResolvedHostRequest} followed by
+         * The dynamic dispatch's HOST row: the carrier's own HOST sub-class
+         * decides the path (never the checked descriptor). The cataloged stdlib
+         * callable ({@code StdlibFunctionValue}) runs the closed catalog row's
+         * one invoker — {@code JvmRuntime.invokeStdlibCallable} with the
+         * invoking CALL op's context (the row identity plus the op key, contract
+         * digest, parent key, origin, and the invoking op's own kind label for
+         * its FAILURE event) — one algorithm authority with the direct
+         * {@code STDLIB_CALL} arm and the read's callable. A loaded surface entry
+         * bridges the emitted per-export wrapper ({@code carrier.fn}) with the
+         * completed production values. Both sub-classes then run the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell at the call origin
+         * (the oracle's {@code invokeResolvedHostRequest} followed by
          * {@code runBoundaryChild}).
          */
         private void emitDynamicHostRow(SemanticOp op, KindPayload.CallPayload payload,
@@ -3841,9 +3902,23 @@ public final class JvmSemanticEmitter {
                     opsById.get(boundaryId).payload()).input()));
             }
             String hostValue = "__dh" + id;
-            out.append(indent(indent)).append("Object ").append(hostValue)
+            out.append(indent(indent)).append("Object ").append(hostValue).append(";\n");
+            out.append(indent(indent)).append("if (").append(carrier)
+                .append(" instanceof JvmRuntime.StdlibFunctionValue) {\n");
+            out.append(indent(indent + 1)).append(hostValue)
+                .append(" = JvmRuntime.invokeStdlibCallable((JvmRuntime."
+                    + "StdlibFunctionValue) ")
+                .append(carrier).append(", ").append(javaString(op.kind().name()))
+                .append(", ").append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(javaString(originOf(op))).append(", new Object[]{ ")
+                .append(args).append(" });\n");
+            out.append(indent(indent)).append("} else {\n");
+            out.append(indent(indent + 1)).append(hostValue)
                 .append(" = ((JvmRuntime.FunctionValue) ").append(carrier)
                 .append(").fn.invoke(new Object[]{ ").append(args).append(" });\n");
+            out.append(indent(indent)).append("}\n");
             KindPayload.BoundaryPayload boundaryPayload =
                 (KindPayload.BoundaryPayload) returnBoundary.payload();
             String checked = "__dhc" + id;
@@ -3941,22 +4016,37 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * The dynamic {@code ASYNC_START} arm (ISSUE-0658;
+         * The dynamic {@code ASYNC_START} arm (ISSUE-0658; ISSUE-0678 for the
+         * asynchronous host class;
          * {@code dynamic-call-shape-production-and-emission} Y4/Y5 and
          * the dynamic async start contract): the recorded parameter
          * cells ran above; a DEAL-body carrier starts the callee body
          * task under the callee's module context with the recorded task
-         * cell (the body's own {@code RETURN} runs it); the adapter
+         * cell (the body's own {@code RETURN} runs it) — a callee value of
+         * another unit resolves its owning module through the carrier's
+         * function id and runs its own body under that module context, the
+         * emitter twin of the oracle's owning-unit body terminal; the adapter
          * class runs the landed D15 sequence and starts the source
          * class's task under the source's module context with the
          * leading-M recorded arguments (the source body task), with
          * zero caller-side return boundaries beyond the recorded task
-         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
-         * A carrier of any other class — the host operation handle, the
-         * external alias link — belongs to the function-typed-value
-         * child and fails closed here with the pinned E8001 at the start
-         * origin, as does an adapter whose D15 source value identifies
-         * no class the closed protocol resolves. The caller records no
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}; a
+         * loaded host surface entry (a {@code FunctionValue} with no frame id)
+         * starts the declared async export through the same host calling
+         * convention and {@code ASYNC_OPERATION_HANDLE} terminal as the static
+         * arm, with the operation handle bound to this token under the entry's
+         * declared identity (the oracle's dynamic HOST resolution; zero
+         * caller-side return cells). A shared-body/retained-ABI external
+         * function value carries no value tag at all (M4: the identity channel
+         * only), so a value-resolved external callee of another unit is the
+         * DEAL-body class above — its own body under its own module context —
+         * and the identity-channel external async link stays the landed static
+         * {@code ASYNC_START(EXTERNAL)} arm's recorded
+         * {@code ExternalAsyncLink}. A carrier of any other class fails closed
+         * here with the pinned E8001 at the start origin, as does an adapter
+         * whose D15 source value identifies no class the closed protocol
+         * resolves and a host-tagged carrier whose declared identity resolves
+         * no unique loaded surface entry. The caller records no
          * return boundary beyond the recorded task cell, and its single
          * {@code AWAIT} drains the token.
          */
@@ -4090,6 +4180,52 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
             out.append(indent(indent + 2)).append("}\n");
             out.append(indent(indent + 1)).append("});\n");
+            // HOST: the carrier is a loaded host surface entry, so the declared
+            // host export's async start runs through the same host calling
+            // convention and the same ASYNC_OPERATION_HANDLE terminal as the
+            // static arm — the loaded wrapper's declared-async shape check
+            // inside the emitted wrapper, the operation handle bound to this
+            // token under the declared identity's operation label (the same
+            // label the oracle's dynamic HOST resolution derives from the
+            // binding). The declared identity is the carrier's own
+            // identity-indexed home in the program's export-surface registry; a
+            // carrier with no unique home (never a loaded surface entry) fails
+            // closed.
+            out.append(indent(indent)).append("} else if (").append(carrier)
+                .append(" instanceof JvmRuntime.FunctionValue __hv").append(id)
+                .append(" && __hv").append(id).append(".fid == null")
+                .append(" && !(").append(carrier)
+                .append(" instanceof JvmRuntime.StdlibFunctionValue)) {\n");
+            String hostName = "__hn" + id;
+            String hostLabel = "__hl" + id;
+            String hostHandle = "__hh" + id;
+            out.append(indent(indent + 1)).append("String[] ").append(hostName)
+                .append(" = JvmRuntime.surfaceNameOf(").append(carrier).append(");\n");
+            out.append(indent(indent + 1)).append("if (").append(hostName)
+                .append(" == null) {\n");
+            emitDynamicCarrierFailure(op, carrier, indent + 2);
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("String ").append(hostLabel)
+                .append(" = ").append(hostName).append("[0] + \".\" + ")
+                .append(hostName).append("[1];\n");
+            out.append(indent(indent + 1))
+                .append("JvmRuntime.effect(\"ASYNC_START_OP\", ").append(hostLabel)
+                .append(");\n");
+            out.append(indent(indent + 1)).append("Object ").append(hostHandle)
+                .append(";\n");
+            out.append(indent(indent + 1)).append("try {\n");
+            out.append(indent(indent + 2)).append(hostHandle).append(" = ")
+                .append("((JvmRuntime.FunctionValue) ").append(carrier)
+                .append(").fn.invoke(new Object[]{ ").append(String.join(", ", args))
+                .append(" });\n");
+            out.append(indent(indent + 1)).append("} catch (JvmRuntime.DealError __e) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__e)", indent + 2);
+            out.append(indent(indent + 2)).append("throw __e;\n");
+            out.append(indent(indent + 1)).append("}\n");
+            out.append(indent(indent + 1)).append("JvmRuntime.startHostTask(")
+                .append(token.tokenId()).append(", ").append(hostLabel).append(", ")
+                .append(hostHandle).append(");\n");
             // The fail-closed residue: no class is resolvable.
             out.append(indent(indent)).append("} else {\n");
             emitDynamicCarrierFailure(op, carrier, indent + 1);
@@ -4117,6 +4253,18 @@ public final class JvmSemanticEmitter {
          */
         private void emitHostCall(SemanticOp op, KindPayload.CallPayload payload,
                 ModuleId hostModuleId, String exportName, int indent) {
+            // The cataloged-callable sub-class (ISSUE-0678; K2): the read's own
+            // registration of a spec-stdlib declared function exports resolves
+            // the closed catalog row, so the invocation is the row's one invoker
+            // with the invoking call's own context — never a loaded surface entry
+            // and never a host responder. The recorded HOST cell family runs
+            // exactly as the landed host arm's does.
+            StdlibFunctionCatalog.Entry catalogRow = StdlibFunctionCatalog
+                .lookup(hostModuleId.path(), exportName).orElse(null);
+            if (catalogRow != null) {
+                emitStdlibCalleeCall(op, payload, catalogRow, indent);
+                return;
+            }
             if (hostAbi == null) {
                 throw new IllegalStateException("CALL " + op.opId()
                     + " resolves the host export '" + hostModuleId.path() + "."
@@ -4136,6 +4284,102 @@ public final class JvmSemanticEmitter {
             call.append(originArgs(op)).append(')');
             finishHostCall(op, payload, declared, arguments, call.toString(), true,
                 indent);
+        }
+
+        /**
+         * The cataloged-callable static arm: the read's own registration used as
+         * a call callee (the static/indirect arm) resolved the closed catalog
+         * row, so the declared parameter cells run through the emitted host-check
+         * seam (the landed host cell family and its pinned E8010 texts), the row's
+         * one invoker runs with the invoking call's own context, and the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell admits the result at
+         * the call origin — one algorithm authority with the direct
+         * {@code STDLIB_CALL} arm, exactly the oracle's cataloged branch of
+         * {@code invokeResolvedHostRequest}.
+         *
+         * <p>The argument domain is the recorded {@code HOST_PARAMETER} cells'
+         * checked values: the closed catalog rows declare non-nullable
+         * scalar/table parameter positions only, for which the host-facing
+         * projection is the identity — a nullable, function, or class position is
+         * a fail-closed producer defect, never a silently projected argument.</p>
+         */
+        private void emitStdlibCalleeCall(SemanticOp op, KindPayload.CallPayload payload,
+                StdlibFunctionCatalog.Entry row, int indent) {
+            List<String> checked = new ArrayList<>();
+            int index = 1;
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp boundary = opsById.get(boundaryId);
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                RuntimeDescriptor descriptor = boundaryPayload.descriptor();
+                if (descriptor instanceof RuntimeDescriptor.Nullable
+                        || descriptor instanceof RuntimeDescriptor.Class
+                        || descriptor instanceof RuntimeDescriptor.Func) {
+                    throw new IllegalStateException("the cataloged callable '"
+                        + row.declaredDescriptor().canonicalSpecText() + "' arrives at "
+                        + op.opId() + " with the parameter position "
+                        + descriptor.canonicalSpecText() + ", whose host-facing "
+                        + "projection is not the identity — a producer defect");
+                }
+                String input = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, input, descriptor, indent);
+                String name = "__sp_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(name).append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent + 1)).append(name)
+                    .append(" = __hostParamCheck(").append(index).append(", ")
+                    .append(javaString(descriptorText(descriptor))).append(", ")
+                    .append(input).append(", ").append(originArgs(op)).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                out.append(indent(indent + 1)).append("throw __be;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, name, descriptor, indent);
+                checked.add(name);
+                index++;
+            }
+            String result = "__sc_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(result)
+                .append(" = JvmRuntime.invokeStdlibCallable(JvmRuntime.stdlibCallable(")
+                .append(stdlibRowArgs(row)).append("), ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(javaString(originOf(op))).append(", new Object[]{ ")
+                .append(String.join(", ", checked)).append(" });\n");
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
+                : opsById.get(payload.returnBoundaryOpId());
+            if (returnBoundary != null) {
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) returnBoundary.payload();
+                emitBoundaryStart(returnBoundary, result, boundaryPayload.descriptor(),
+                    indent);
+                String admitted = "__sr_" + op.opId().id();
+                out.append(indent(indent)).append("Object ").append(admitted).append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent + 1)).append(admitted).append(" = __hostCheck(")
+                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ").append(result).append(", false, ")
+                    .append(originArgs(op)).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                out.append(indent(indent + 1)).append("throw __be;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(returnBoundary, admitted,
+                    boundaryPayload.descriptor(), indent);
+                result = admitted;
+            }
+            out.append(indent(indent)).append(slot((ValueId) op.result())).append(" = ")
+                .append(result).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
         }
 
         /**
@@ -5198,6 +5442,7 @@ public final class JvmSemanticEmitter {
             // the direct arm's observable is unchanged.
             out.append(indent(indent)).append(target)
                 .append(" = JvmRuntime.stdlibInvoke(")
+                .append(javaString(op.kind().name())).append(", ")
                 .append(javaString(payload.function().name())).append(", ")
                 .append(javaString(opKey(op.opId()))).append(", ")
                 .append(javaString(op.contract().canonicalDigest())).append(", ")

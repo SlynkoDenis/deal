@@ -473,14 +473,16 @@ public class CanonicalFailureTextParityTest {
             JvmRuntime.intConv(Double.valueOf(2147483648.0), "number",
                 "op", "digest", "parent", originAtom()));
         expectJvmInt32Failure("absInt(-2147483648)", () ->
-            JvmRuntime.stdlib("MATH_ABS_INT", "op", "digest", "parent", originAtom(),
+            JvmRuntime.stdlib("STDLIB_CALL", "MATH_ABS_INT", "op", "digest", "parent",
+                originAtom(),
                 new Object[] {Long.valueOf(Integer.MIN_VALUE)}));
 
         // The std/json walker's rejection.
         JvmRuntime.Table table = new JvmRuntime.Table();
         table.write("n", Double.valueOf(Double.NaN));
         try {
-            JvmRuntime.stdlib("JSON_STRINGIFY", "op", "digest", "parent", originAtom(),
+            JvmRuntime.stdlib("STDLIB_CALL", "JSON_STRINGIFY", "op", "digest", "parent",
+                originAtom(),
                 new Object[] {table});
             fail("json.stringify over a NaN member must fail");
         } catch (JvmRuntime.DealError e) {

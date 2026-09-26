@@ -587,43 +587,75 @@ public final class SharedStdlibSemantics {
                 + "producer defect, never executed");
         }
         List<Value> argv = List.copyOf(args); // rejects null elements
+        return dispatch(function, op.origin(), argv, sink, clock);
+    }
+
+    /**
+     * Executes one cataloged row's algorithm at a caller-supplied origin
+     * (the cataloged-callable seam): the same closed algorithm table, the
+     * same arity authority, and the same failure projections the direct
+     * {@code STDLIB_CALL} arm's {@link #execute(SemanticOp, List,
+     * ConsoleSink, Clock)} runs — one authority, never a second copy. The
+     * dynamic HOST sub-class of the function-typed-value dispatch calls
+     * this seam with the invoking call op's own origin, so the cataloged
+     * callable's failures keep the call site's pinned projection.
+     *
+     * @param function the closed catalog row identity; non-null
+     * @param origin   the invoking call op's origin; non-null
+     * @param args     the boundary-admitted argument carriers in declared
+     *                 order; non-null, no null elements
+     * @param sink     the injected console sink (may be null for
+     *                 non-console ids)
+     * @param clock    the injected clock of {@code TIME_NOW_MILLIS}; non-null
+     * @return the sealed per-family outcome
+     * @throws Defect if the argument count mismatches the declared arity
+     *                or an argument carrier is outside the boundary
+     *                admission set
+     */
+    public static Outcome<Value> dispatch(StdlibFunctionId function, SourceOrigin origin,
+                                          List<Value> args, ConsoleSink sink, Clock clock) {
+        Objects.requireNonNull(function, "function must not be null");
+        Objects.requireNonNull(origin, "origin must not be null");
+        Objects.requireNonNull(args, "args must not be null");
+        Objects.requireNonNull(clock, "clock must not be null");
+        List<Value> argv = List.copyOf(args); // rejects null elements
         requireArity(function, argv.size());
         return switch (function) {
             case CONSOLE_LOG ->
-                consoleLog(op.origin(), validTextOf(argv, 0, function), sink);
+                consoleLog(origin, validTextOf(argv, 0, function), sink);
             case CONSOLE_ERROR ->
-                consoleError(op.origin(), validTextOf(argv, 0, function), sink);
+                consoleError(origin, validTextOf(argv, 0, function), sink);
             case STRING_LENGTH ->
-                stringLength(op.origin(), validTextOf(argv, 0, function));
-            case STRING_SUBSTRING -> stringSubstring(op.origin(),
+                stringLength(origin, validTextOf(argv, 0, function));
+            case STRING_SUBSTRING -> stringSubstring(origin,
                 validTextOf(argv, 0, function), intOf(argv, 1, function),
                 intOf(argv, 2, function));
-            case STRING_CONTAINS -> stringContains(op.origin(),
+            case STRING_CONTAINS -> stringContains(origin,
                 validTextOf(argv, 0, function), validTextOf(argv, 1, function));
-            case STRING_STARTS_WITH -> stringStartsWith(op.origin(),
+            case STRING_STARTS_WITH -> stringStartsWith(origin,
                 validTextOf(argv, 0, function), validTextOf(argv, 1, function));
-            case STRING_ENDS_WITH -> stringEndsWith(op.origin(),
+            case STRING_ENDS_WITH -> stringEndsWith(origin,
                 validTextOf(argv, 0, function), validTextOf(argv, 1, function));
-            case STRING_REPLACE -> stringReplace(op.origin(),
+            case STRING_REPLACE -> stringReplace(origin,
                 validTextOf(argv, 0, function), validTextOf(argv, 1, function),
                 validTextOf(argv, 2, function));
-            case STRING_SPLIT -> stringSplit(op.origin(),
+            case STRING_SPLIT -> stringSplit(origin,
                 validTextOf(argv, 0, function), validTextOf(argv, 1, function));
-            case STRING_TRIM -> stringTrim(op.origin(), validTextOf(argv, 0, function));
-            case TABLE_KEYS -> tableKeys(op.origin(), tableOf(argv, 0, function));
-            case JSON_PARSE -> jsonParse(op.origin(), validTextOf(argv, 0, function));
-            case JSON_STRINGIFY -> jsonStringify(op.origin(), tableOf(argv, 0, function));
-            case MATH_FLOOR -> mathFloor(op.origin(), numberOf(argv, 0, function));
-            case MATH_CEIL -> mathCeil(op.origin(), numberOf(argv, 0, function));
-            case MATH_SQRT -> mathSqrt(op.origin(), numberOf(argv, 0, function));
-            case MATH_ABS_INT -> mathAbsInt(op.origin(), intOf(argv, 0, function));
+            case STRING_TRIM -> stringTrim(origin, validTextOf(argv, 0, function));
+            case TABLE_KEYS -> tableKeys(origin, tableOf(argv, 0, function));
+            case JSON_PARSE -> jsonParse(origin, validTextOf(argv, 0, function));
+            case JSON_STRINGIFY -> jsonStringify(origin, tableOf(argv, 0, function));
+            case MATH_FLOOR -> mathFloor(origin, numberOf(argv, 0, function));
+            case MATH_CEIL -> mathCeil(origin, numberOf(argv, 0, function));
+            case MATH_SQRT -> mathSqrt(origin, numberOf(argv, 0, function));
+            case MATH_ABS_INT -> mathAbsInt(origin, intOf(argv, 0, function));
             case MATH_ABS_NUMBER ->
-                mathAbsNumber(op.origin(), numberOf(argv, 0, function));
-            case MATH_MIN_INT -> mathMinInt(op.origin(), intOf(argv, 0, function),
+                mathAbsNumber(origin, numberOf(argv, 0, function));
+            case MATH_MIN_INT -> mathMinInt(origin, intOf(argv, 0, function),
                 intOf(argv, 1, function));
-            case MATH_MAX_INT -> mathMaxInt(op.origin(), intOf(argv, 0, function),
+            case MATH_MAX_INT -> mathMaxInt(origin, intOf(argv, 0, function),
                 intOf(argv, 1, function));
-            case TIME_NOW_MILLIS -> timeNowMillis(op.origin(), clock);
+            case TIME_NOW_MILLIS -> timeNowMillis(origin, clock);
         };
     }
 

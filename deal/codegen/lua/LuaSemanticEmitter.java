@@ -1219,15 +1219,45 @@ public final class LuaSemanticEmitter {
 
         /**
          * Whether the chunk carries the runtime binding and the host-boundary
-         * prelude (ISSUE-0650, extended by ISSUE-0668): a project session
-         * whose closure's op walk carries a HOST-kind import (host or
-         * extern-C), read from the closure's own {@code MODULE_IMPORT} ops —
-         * never from the session's declaration surface, so the trace project
-         * entry without the compile's declaration surface binds the runtime
-         * for its FFI arms exactly like the production project session does.
+         * prelude (ISSUE-0650, extended by ISSUE-0668 and ISSUE-0678): a
+         * project session whose closure's op walk carries a HOST-kind import
+         * (host or extern-C), read from the closure's own {@code MODULE_IMPORT}
+         * ops — never from the session's declaration surface, so the trace
+         * project entry without the compile's declaration surface binds the
+         * runtime for its FFI arms exactly like the production project session
+         * does — or a host-boundary cell of its own (the
+         * {@code DEAL_TO_HOST}/{@code HOST_PARAMETER}/{@code HOST_TO_DEAL}/
+         * {@code HOST_SYNC_RETURN} family), whose emitted checks are the host
+         * prelude's: a spec-stdlib declared-function export read called as a
+         * value carries the same host cell family (K2) without any host import,
+         * so its chunk binds the helpers too.
          */
         private boolean bindsHostRuntime() {
-            return projectSession && hasHostImports();
+            return projectSession && (hasHostImports() || hasHostCellBoundaries());
+        }
+
+        /**
+         * Whether the session's op walk carries at least one host-boundary cell
+         * (the family the host prelude's parameter/return checks realize).
+         */
+        private boolean hasHostCellBoundaries() {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() != SemanticOpKind.BOUNDARY
+                            || !(op.payload()
+                                instanceof KindPayload.BoundaryPayload boundary)) {
+                        continue;
+                    }
+                    BoundaryKind kind = boundary.kind();
+                    FailurePolicyId policy = op.failurePolicy();
+                    if (kind == BoundaryKind.DEAL_TO_HOST || kind == BoundaryKind.HOST_TO_DEAL
+                            || policy == FailurePolicyId.HOST_PARAMETER
+                            || policy == FailurePolicyId.HOST_SYNC_RETURN) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         /**
@@ -3660,7 +3690,8 @@ public final class LuaSemanticEmitter {
                 ModuleId hostModuleId, String exportName, boolean moduleEntry) {
             emitHostInvocation(op, payload,
                 "__exportSurfaces[" + luaString(hostModuleId.path()) + "]["
-                    + luaString(exportName) + "]");
+                    + luaString(exportName) + "]",
+                StdlibFunctionCatalog.lookup(hostModuleId.path(), exportName).orElse(null));
         }
 
         /**
@@ -3699,6 +3730,11 @@ public final class LuaSemanticEmitter {
          */
         private void emitHostInvocation(SemanticOp op, KindPayload.CallPayload payload,
                 String target) {
+            emitHostInvocation(op, payload, target, null);
+        }
+
+        private void emitHostInvocation(SemanticOp op, KindPayload.CallPayload payload,
+                String target, StdlibFunctionCatalog.Entry catalogRow) {
             out.append("__hbT = {}\n");
             int index = 1;
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
@@ -3736,12 +3772,80 @@ public final class LuaSemanticEmitter {
                     .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
                 index++;
             }
-            emitHostInvocationTail(op, target, index - 1,
-                payload.returnBoundaryOpId() == null
-                    ? null : opsById.get(payload.returnBoundaryOpId()));
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            if (catalogRow == null) {
+                emitHostInvocationTail(op, target, index - 1, returnBoundary);
+            } else {
+                emitStdlibCalleeInvocation(op, payload, target, catalogRow, index - 1,
+                    returnBoundary);
+            }
             String result = slot((ValueId) op.result());
             out.append(result).append(" = __resT\n");
             emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The cataloged-callable sub-class of one host-shaped call: the read's
+         * own registration resolved the closed catalog row, so the invocation is
+         * the row's one invoker with the invoking call's own context — never the
+         * loaded surface entry's {@code .f} — and the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell runs at the call
+         * origin, exactly the direct {@code STDLIB_CALL} arm's observables and the
+         * oracle's cataloged branch of {@code invokeResolvedHostRequest}.
+         *
+         * <p>The argument domain is the recorded {@code HOST_PARAMETER} cells'
+         * host-facing projection: the closed catalog rows declare non-nullable
+         * scalar/table parameter positions only, for which that projection is the
+         * identity — a nullable, function, or class position is a fail-closed
+         * producer defect, never a silently projected argument.</p>
+         *
+         * @param op              the invoking CALL op; non-null
+         * @param payload         the CALL payload (its recorded parameter cells);
+         *                        non-null
+         * @param target          the surface entry expression (the cataloged
+         *                        carrier); non-null
+         * @param row             the resolved catalog row; non-null
+         * @param argCount        the completed argument count; ≥0
+         * @param returnBoundary  the recorded {@code HOST_TO_DEAL} cell, or null
+         */
+        private void emitStdlibCalleeInvocation(SemanticOp op,
+                KindPayload.CallPayload payload, String target,
+                StdlibFunctionCatalog.Entry row, int argCount, SemanticOp returnBoundary) {
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                RuntimeDescriptor descriptor = ((KindPayload.BoundaryPayload)
+                    opsById.get(boundaryId).payload()).descriptor();
+                if (isFunctionPosition(descriptor)
+                        || descriptor instanceof RuntimeDescriptor.Class
+                        || descriptor instanceof RuntimeDescriptor.Nullable) {
+                    throw new IllegalStateException("the cataloged callable '"
+                        + row.declaredDescriptor().canonicalSpecText() + "' arrives at "
+                        + op.opId() + " with the parameter position "
+                        + descriptor.canonicalSpecText() + ", whose host-facing "
+                        + "projection is not the identity — a producer defect");
+                }
+            }
+            out.append("if ").append(target).append(" ~= nil and ").append(target)
+                .append(".__sid ~= nil then\n");
+            out.append("  __resT = ").append(target).append(".__fn(")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op)));
+            for (int i = 1; i <= argCount; i++) {
+                out.append(", __hbT[").append(i).append("]");
+            }
+            out.append(")\n");
+            // The recorded cell's admission: the cataloged callable's result is a
+            // plain chunk value, admitted by the same general check the direct
+            // STDLIB_CALL arm's STDLIB_RETURN cell runs (its failures keep the
+            // descriptor-kind projection), so a null-typed row's Lua nil is the
+            // language null exactly as the oracle's NullValue is.
+            emitHostReturnCellRun(op, returnBoundary, "__atom");
+            out.append("else\n");
+            emitHostInvocationTail(op, target, argCount, returnBoundary);
+            out.append("end\n");
         }
 
         /**
@@ -3788,41 +3892,86 @@ public final class LuaSemanticEmitter {
             emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
             out.append("  error(__resT, 0)\n");
             out.append("end\n");
-            if (returnBoundary != null) {
-                // The class-value carrier projection (F4): on a class-typed
-                // return the wrapper's loaded value is projected into the
-                // chunk's class representation *before* the crossing's
-                // events, so the boundary's START/SUCCESS atoms and the
-                // program observe the one projected heap value — never the
-                // wrapper's raw runtime value (the trace-identity rule).
-                if (((KindPayload.BoundaryPayload) returnBoundary.payload())
-                        .descriptor() instanceof RuntimeDescriptor.Class) {
-                    out.append("__resT = __hostDealProject(")
-                        .append(luaString(declaredReturn)).append(", __resT, ")
-                        .append(luaString(originOf(returnBoundary))).append(")\n");
-                }
-                // The boundary events' atoms are the DEAL-null-aware host
-                // atom (the deployed runtime's null sentinel is the
-                // language null, so a null return atomizes as "null"
-                // exactly like the oracle's NullValue).
-                emitBoundaryStartAtom(returnBoundary, "__hostCellAtom("
-                    + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
-                        .payload()).descriptor())) + ", __resT)");
+            emitHostReturnCellRun(op, returnBoundary, "__hostCellAtom");
+        }
+
+        /**
+         * The declared-return half of one host-shaped result: the call op runs
+         * the recorded {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell on
+         * the value left in {@code __resT} — the class-value carrier projection
+         * (F4) first, then the boundary's START/SUCCESS atoms and the
+         * descriptor check under the cell's own origin. Shared by the static
+         * host arms' invocation tail and the dynamic dispatch's HOST row (the
+         * landed host wrapper and the cataloged stdlib callable alike), so the
+         * recorded cell runs exactly once per invocation on every HOST path.
+         *
+         * @param op              the invoking call op; non-null
+         * @param returnBoundary  the recorded {@code HOST_TO_DEAL} cell, or
+         *                        {@code null} for a call with no return cell;
+         *                        the caller leaves the checked value in
+         *                        {@code __resT}
+         * @param atomizer        the prelude atom helper for the cell's
+         *                        boundary atoms: the DEAL-null-aware host
+         *                        atom for a loaded host surface value, the
+         *                        general value atom for the cataloged stdlib
+         *                        callable's result (a session without a host
+         *                        declaration surface emits no host atom helper)
+         */
+        private void emitHostReturnCellRun(SemanticOp op, SemanticOp returnBoundary,
+                                           String atomizer) {
+            if (returnBoundary == null) {
+                return;
+            }
+            boolean hostValue = "__hostCellAtom".equals(atomizer);
+            KindPayload.BoundaryPayload cellPayload =
+                (KindPayload.BoundaryPayload) returnBoundary.payload();
+            String declaredReturn = cellPayload.descriptor().canonicalSpecText();
+            // The class-value carrier projection (F4): on a class-typed
+            // return the wrapper's loaded value is projected into the
+            // chunk's class representation *before* the crossing's
+            // events, so the boundary's START/SUCCESS atoms and the
+            // program observe the one projected heap value — never the
+            // wrapper's raw runtime value (the trace-identity rule).
+            // A cataloged stdlib result is a plain chunk value: no
+            // projection applies.
+            if (hostValue && cellPayload.descriptor() instanceof RuntimeDescriptor.Class) {
+                out.append("__resT = __hostDealProject(")
+                    .append(luaString(declaredReturn)).append(", __resT, ")
+                    .append(luaString(originOf(returnBoundary))).append(")\n");
+            }
+            // The boundary events' atoms are the DEAL-null-aware host
+            // atom for a loaded host surface value (the deployed
+            // runtime's null sentinel is the language null, so a null
+            // return atomizes as "null" exactly like the oracle's
+            // NullValue) and the general value atom for the cataloged
+            // stdlib callable's result (whose session emits no host
+            // helper).
+            emitBoundaryStartAtom(returnBoundary, atomizer + "("
+                + luaString(staticKind(cellPayload.descriptor())) + ", __resT)");
+            if (hostValue) {
                 out.append("__okB, __chkB = pcall(__hostReturnCell, ")
                     .append(luaString(declaredReturn)).append(", __resT, ")
                     .append(luaString(originOf(returnBoundary))).append(", false)\n");
-                out.append("if not __okB then\n");
-                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
-                    "__errtext(__chkB)");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(__chkB)");
-                out.append("  error(__chkB, 0)\n");
-                out.append("end\n");
-                emitBoundarySuccessAtom(returnBoundary, "__hostCellAtom("
-                    + luaString(staticKind(((KindPayload.BoundaryPayload) returnBoundary
-                        .payload()).descriptor())) + ", __resT)");
-                out.append("__resT = __chkB\n");
+            } else {
+                out.append("__okB, __chkB = pcall(__bcheck, ")
+                    .append(luaString(declaredReturn)).append(", ")
+                    .append(luaString(staticKind(cellPayload.descriptor())))
+                    .append(", __resT)\n");
             }
+            out.append("if not __okB then\n");
+            if (!hostValue) {
+                out.append("  __chkB.o = ")
+                    .append(luaString(originOf(returnBoundary))).append("\n");
+            }
+            emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                "__errtext(__chkB)");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            emitBoundarySuccessAtom(returnBoundary, atomizer + "("
+                + luaString(staticKind(cellPayload.descriptor())) + ", __resT)");
+            out.append("__resT = __chkB\n");
         }
 
         /**
@@ -3971,17 +4120,42 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * The dynamic dispatch's HOST row: the carrier is the loaded
-         * surface entry, so its host calling convention ({@code .f} with
-         * the projected parameters and the trailing literal span triplet)
-         * invokes it and the recorded {@code HOST_TO_DEAL} +
-         * {@code HOST_SYNC_RETURN} cell runs at the call origin (the
-         * oracle's {@code invokeResolvedHostRequest} followed by
-         * {@code runBoundaryChild}). The checked value is left in
+         * The dynamic dispatch's HOST row: the carrier's own HOST sub-class
+         * decides the path (never the checked descriptor). A loaded surface
+         * entry is invoked through its host calling convention ({@code .f} with
+         * the projected parameters and the trailing literal span triplet); the
+         * cataloged stdlib callable ({@code __sid}) runs the closed catalog
+         * row's one invoker with the invoking CALL op's context (the row
+         * identity plus the op key, contract digest, parent key, and origin —
+         * one algorithm authority with the direct {@code STDLIB_CALL} arm and
+         * the read's callable), its failures projecting the CALL op's own
+         * FAILURE event kind. Both sub-classes then run the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell exactly once at
+         * the call origin (the oracle's {@code invokeResolvedHostRequest}
+         * followed by {@code runBoundaryChild}). The checked value is left in
          * {@code __resT}.
          */
         private void emitDynamicHostRow(SemanticOp op, KindPayload.CallPayload payload,
                                         SemanticOp returnBoundary) {
+            // The cataloged stdlib callable's sub-class: the row invoker runs
+            // with the invoking call's own context (including the invoking
+            // op's kind label, so an algorithm failure publishes the CALL op's
+            // FAILURE event), then the recorded cell admits the result.
+            out.append("  if __dynC.__sid ~= nil then\n");
+            out.append("    __resT = __dynC.__fn(")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op)));
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp parameter = opsById.get(boundaryId);
+                out.append(", ").append(slot(((KindPayload.BoundaryPayload)
+                    parameter.payload()).input()));
+            }
+            out.append(")\n");
+            emitHostReturnCellRun(op, returnBoundary, "__atom");
+            out.append("  else\n");
             int index = 1;
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp parameter = opsById.get(boundaryId);
@@ -3995,6 +4169,7 @@ public final class LuaSemanticEmitter {
                 index++;
             }
             emitHostInvocationTail(op, "__dynC", index - 1, returnBoundary);
+            out.append("  end\n");
         }
 
         /**
@@ -4088,22 +4263,37 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * The dynamic {@code ASYNC_START} arm (ISSUE-0658;
+         * The dynamic {@code ASYNC_START} arm (ISSUE-0658; ISSUE-0678 for the
+         * asynchronous host class;
          * {@code dynamic-call-shape-production-and-emission} Y4/Y5 and
          * the dynamic async start contract): the recorded parameter
          * cells ran above; a DEAL-body carrier starts the callee body
          * task under the callee's module context with the recorded
-         * task cell (the body's own {@code RETURN} runs it); the adapter
+         * task cell (the body's own {@code RETURN} runs it) — a callee value
+         * of another unit resolves its owning module through the carrier's
+         * function id and runs its own body under that module context, the
+         * emitter twin of the oracle's owning-unit body terminal; the adapter
          * class runs the landed D15 sequence and starts the source
          * class's task under the source's module context with the
          * leading-M recorded arguments (the source body task), with
          * zero caller-side return boundaries beyond the recorded task
-         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}.
-         * A carrier of any other class — the host operation handle, the
-         * external alias link — belongs to the function-typed-value
-         * child and fails closed here with the pinned E8001 at the start
-         * origin, as does an adapter whose D15 source value identifies
-         * no class the closed protocol resolves. The caller records no
+         * cell — the oracle's {@code executeDynamicAdapterAsyncStart}; a
+         * loaded host surface entry ({@code __kind == "function"}) starts the
+         * declared async export through the same host calling convention and
+         * {@code ASYNC_OPERATION_HANDLE} terminal as the static arm, with the
+         * operation handle bound to this token under the entry's declared
+         * identity (the oracle's dynamic HOST resolution; zero caller-side
+         * return cells). A shared-body/retained-ABI external function value
+         * carries no value tag at all (M4: the identity channel only), so a
+         * value-resolved external callee of another unit is the DEAL-body
+         * class above — its own body under its own module context — and the
+         * identity-channel external async link stays the landed static
+         * {@code ASYNC_START(EXTERNAL)} arm's recorded
+         * {@code ExternalAsyncLink}. A carrier of any other class fails closed
+         * here with the pinned E8001 at the start origin, as does an adapter
+         * whose D15 source value identifies no class the closed protocol
+         * resolves and a host-tagged carrier whose declared identity resolves
+         * no unique loaded surface entry. The caller records no
          * return boundary beyond the recorded task cell, and its single
          * {@code AWAIT} drains the token.
          */
@@ -4189,10 +4379,55 @@ public final class LuaSemanticEmitter {
             }
             out.append("    return __resA\n");
             out.append("  end), ").append(carrierArgs).append(")\n");
+            // HOST: the carrier is a loaded host surface entry, so the
+            // declared host export's async start runs through the same host
+            // calling convention and the same ASYNC_OPERATION_HANDLE terminal
+            // as the static arm — the loaded wrapper's declared-async shape
+            // check inside the pcall, the operation handle bound to this
+            // token under the declared identity's operation label (the
+            // oracle's dynamic HOST resolution: the loaded declared async
+            // export, the responder's startAsync under the same label). The
+            // declared identity is the carrier's own identity-indexed home in
+            // the program's export-surface registry; a carrier with no unique
+            // home identifies no loaded surface entry and fails closed.
+            out.append("elseif __dynK == \"HOST\" then\n");
+            out.append("  __dynHN = __surfaceNameOf(__dynC)\n");
+            out.append("  if __dynHN == nil then\n");
+            emitDynamicCarrierFailure(op, origin);
+            out.append("  end\n");
+            out.append("  __dynLbl = __dynHN[1]..\".\"..__dynHN[2]\n");
+            if (trace) {
+                out.append("  io.stderr:write(\"F|ASYNC_START_OP|-|\"..__esc(__dynLbl)"
+                    + "..\"\\n\")\n");
+                out.append("  io.stderr:flush()\n");
+            }
+            out.append("  __okH, __resH = pcall(__dynC.f");
+            for (int i = 1; i <= recordedArgCount(payload, op); i++) {
+                out.append(", ").append(carrierArgs).append("[").append(i).append("]");
+            }
+            out.append(", ").append(spanTripletArgs(op)).append(")\n");
+            out.append("  if not __okH then\n");
+            out.append("    __resH = __hostError(__resH, ").append(origin).append(")\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resH)");
+            out.append("    error(__resH, 0)\n");
+            out.append("  end\n");
+            out.append("  __asyncStartHost(").append(token.tokenId())
+                .append(", __dynLbl, __resH)\n");
             // The fail-closed residue: no class is resolvable.
             out.append("else\n");
             emitDynamicCarrierFailure(op, origin);
             out.append("end\n");
+        }
+
+        /**
+         * The completed argument count of one {@code ASYNC_START} payload: the
+         * parameter boundaries under {@code RUN}, the raw operands under
+         * {@code ELIDED_BY_ADAPTER} (the carrier table holds exactly them).
+         */
+        private static int recordedArgCount(KindPayload.AsyncStartPayload payload,
+                                            SemanticOp op) {
+            return payload.parameterBoundaryMode() == ParameterBoundaryMode.RUN
+                ? payload.parameterBoundaryOpIds().size() : op.operands().size();
         }
 
         /** Whether one declared host position is a function type. */
@@ -4315,6 +4550,7 @@ public final class LuaSemanticEmitter {
                 // effect is exactly one write on the row's channel with
                 // the direct arm's text projection.
                 out.append(target).append(" = __stdlibInvoke(")
+                    .append(luaString(op.kind().name())).append(", ")
                     .append(luaString(payload.function().name())).append(", ")
                     .append(luaString(opKey(op.opId()))).append(", ")
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
@@ -4332,6 +4568,7 @@ public final class LuaSemanticEmitter {
                 // closed projection at the call origin (the __stdlib
                 // helper converts it through the fail-closed pattern).
                 out.append(target).append(" = __stdlibInvoke(")
+                    .append(luaString(op.kind().name())).append(", ")
                     .append(luaString(payload.function().name())).append(", ")
                     .append(luaString(opKey(op.opId()))).append(", ")
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
@@ -8785,20 +9022,43 @@ local function __unfn(v)
   return v
 end
 -- The dynamic dispatch's carrier-class resolution (ISSUE-0658;
--- dynamic-call-shape-production-and-emission Y2/Y3/Y5): the carrier's
--- own tag selects exactly one closed resolution class — never the
--- checked descriptor, the callee spelling, or an argument value. A DEAL
--- closure or compiled export read carries its function id (__fid); an
--- adapter carries its capture mode (__mode); a loaded host surface entry
--- carries the host ABI wrapper kind (__kind == "function"). Every other
--- value identifies no class (nil) and the dynamic call fails closed at
--- its origin.
+-- dynamic-call-shape-production-and-emission Y2/Y3/Y5; ISSUE-0678 for the
+-- cataloged callable's tag): the carrier's own tag selects exactly one
+-- closed resolution class — never the checked descriptor, the callee
+-- spelling, or an argument value. A DEAL closure or compiled export read
+-- carries its function id (__fid); an adapter carries its capture mode
+-- (__mode); a loaded host surface entry carries the host ABI wrapper kind
+-- (__kind == "function"); the cataloged stdlib callable carries its closed
+-- catalog row tag (__sid) and resolves the HOST class, whose catalog row
+-- invoker the call site runs. Every other value identifies no class (nil)
+-- and the dynamic call fails closed at its origin.
 local function __dynClass(v)
   if type(v) ~= "table" then return nil end
   if v.__fid ~= nil then return "DEAL_BODY" end
   if v.__mode ~= nil then return "ADAPTER" end
   if v.__kind == "function" then return "HOST" end
+  if v.__sid ~= nil then return "HOST" end
   return nil
+end
+-- The declared identity (module path, export name) of one loaded host
+-- surface entry: the program's export-surface registry is the
+-- identity-indexed home of the entries the host load published (H1), so
+-- the carrier itself names the declared host export the dynamic dispatch's
+-- host operation start derives its operation label and its
+-- ASYNC_OPERATION_HANDLE terminal from. Exactly one home is required: a
+-- shared entry (never a loaded surface entry) resolves no declared
+-- identity and the dispatch fails closed.
+local function __surfaceNameOf(v)
+  local found = nil
+  for __m, __s in pairs(__exportSurfaces) do
+    for __n, __e in pairs(__s) do
+      if __e == v then
+        if found ~= nil then return nil end
+        found = {__m, __n}
+      end
+    end
+  end
+  return found
 end
 -- The actual-kind atom of one host-supplied argument (the callback
 -- dispatch surface): null/boolean/int/number/string by the runtime
@@ -9202,10 +9462,13 @@ local function __subseqIndexOf(hay, needle, from)
 end
 -- The in-target realization of the closed stdlib table: the parameter
 -- boundaries already ran, so the carriers are boundary-admitted (valid
--- scalar strings, integral numbers, tables). An algorithm failure
--- publishes the op FAILURE event and raises the exact closed projection
--- at the call origin with the active frames.
-local function __stdlib(fn, opKey, digest, parent, origin, ...)
+-- scalar strings, integral numbers, tables). The invoking op's event
+-- kind label is the first argument (the direct STDLIB_CALL arm's own
+-- kind, or the dynamic dispatch's CALL kind): every algorithm failure
+-- publishes the invoking op's FAILURE event under its own kind and
+-- raises the exact closed projection at the call origin with the active
+-- frames.
+local function __stdlib(kind, fn, opKey, digest, parent, origin, ...)
   local __args = {...}
   -- Every numeric parameter carrier unwraps to its number: the parameter
   -- boundaries already admitted the value (a JSON_PARSE carrier passes
@@ -9218,7 +9481,7 @@ local function __stdlib(fn, opKey, digest, parent, origin, ...)
   end
   local function __sfail(code, msg, expected, actual)
     local e = __failExpr(code, msg, origin, expected, actual)
-    __ev(opKey, "FAILURE", "STDLIB_CALL", digest, parent, {}, nil, __errtext(e))
+    __ev(opKey, "FAILURE", kind, digest, parent, {}, nil, __errtext(e))
     error(e, 0)
   end
   local function __int32Gate(value)
@@ -9689,11 +9952,13 @@ local function __consoleText(...)
 end
 -- The one row invoker of the closed catalog (M4): the single callable
 -- realization per catalog row, shared by the direct STDLIB_CALL arm and
--- the cataloged callable. The two console rows run the single-effect
--- write through __consoleEffect; every algorithmic row delegates to
--- __stdlib (the row identity and the invoking call's context travel
--- through unchanged — one algorithm authority, never two).
-local function __stdlibInvoke(fn, opKey, digest, parent, origin, ...)
+-- the cataloged callable (and by the dynamic dispatch's HOST sub-class,
+-- which passes the invoking CALL op's own kind label). The two console
+-- rows run the single-effect write through __consoleEffect; every
+-- algorithmic row delegates to __stdlib (the row identity and the
+-- invoking call's context travel through unchanged — one algorithm
+-- authority, never two).
+local function __stdlibInvoke(kind, fn, opKey, digest, parent, origin, ...)
   if fn == "CONSOLE_LOG" then
     __consoleEffect("STDOUT", __consoleText(...))
     return nil
@@ -9701,7 +9966,7 @@ local function __stdlibInvoke(fn, opKey, digest, parent, origin, ...)
     __consoleEffect("STDERR", __consoleText(...))
     return nil
   end
-  return __stdlib(fn, opKey, digest, parent, origin, ...)
+  return __stdlib(kind, fn, opKey, digest, parent, origin, ...)
 end
 -- The memoized cataloged callable of one catalog row (M4): one carrier
 -- per catalog row per module per program — {__fn = the row invoker,
@@ -9715,8 +9980,8 @@ local function __stdlibEntry(module, name, sid, sig, csig)
   local key = module..string.char(1)..name
   local entry = __stdlibEntries[key]
   if entry == nil then
-    entry = {__fn = function(opKey, digest, parent, origin, ...)
-        return __stdlibInvoke(sid, opKey, digest, parent, origin, ...)
+    entry = {__fn = function(kind, opKey, digest, parent, origin, ...)
+        return __stdlibInvoke(kind, sid, opKey, digest, parent, origin, ...)
       end,
       __sig = sig, __csig = csig, __fid = nil, __sid = sid}
     __stdlibEntries[key] = entry

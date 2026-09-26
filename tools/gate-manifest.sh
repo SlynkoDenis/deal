@@ -688,6 +688,13 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # class lives in package deal.semantic to reach the package-internal
   # project walk.
   'fg|=== Running Dynamic Dispatch Emission Tests (ISSUE-0658) ===|java -ea -cp build deal.semantic.DynamicDispatchEmissionTest'
+  # ISSUE-0678 registration: the dispatch realization for the cataloged
+  # stdlib callable and the asynchronous host class, with the oracle's
+  # cross-module callee-body resolution (function-typed-value-
+  # materialization-and-dispatch M5 — the class table's HOST sub-classes,
+  # the async classes, the owning-unit body terminal, and the fail-closed
+  # residue; conversion-intrinsic-function-values J3/J4).
+  'fg|=== Running Dynamic Class Dispatch Tests (ISSUE-0678) ===|java -ea -cp build deal.test.DynamicClassDispatchTest'
   # ISSUE-0647 registration: the spec-stdlib import-read realization in
   # the three consumers (module-export-reads-and-in-project-class-
   # construction M4, the cataloged stdlib callable contract, and M3's
