@@ -18,6 +18,7 @@ import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.ExternalAsyncLink;
 import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.FunctionId;
+import deal.semantic.ir.IntrinsicKind;
 import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredFunction;
 import deal.semantic.ir.LoweredModuleUnit;
@@ -2581,8 +2582,11 @@ public final class JvmSemanticEmitter {
             emitStart(op, indent);
             BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
                 BindingCellKind.DIRECT);
-            String valueExpr = hasProducer(payload.value())
-                ? slot(payload.value()) : "new JvmRuntime.Intrinsic()";
+            String valueExpr = intrinsicCarrierExpr(payload.value());
+            if (valueExpr == null) {
+                valueExpr = hasProducer(payload.value())
+                    ? slot(payload.value()) : exportPlaceholderCarrier();
+            }
             if (kind == BindingCellKind.SHARED_CELL) {
                 out.append(indent(indent)).append("((").append("Object[]) ")
                     .append(cell(payload.binding(), payload.generation())).append(")[0] = ")
@@ -2604,6 +2608,136 @@ public final class JvmSemanticEmitter {
                 }
             }
             return false;
+        }
+
+        /**
+         * The memoized intrinsic carrier expression of one value identity
+         * (J2): the closed {@code IntrinsicFunction} registration of the
+         * closure resolves the kind — never a spelling — and every op
+         * result publishing the identity is an identity-preserving
+         * {@code BINDING_LOAD} of the seed {@code BINDING_INIT}'s own cell
+         * (or nothing publishes it, the seed's producer-less identity), so
+         * an identity-preserving load of the seeded binding never replaces
+         * the memoized carrier with a slot read. {@code null} when the
+         * identity is not a registered intrinsic: every other value keeps
+         * the landed {@code hasProducer} behavior (a closure identity has
+         * its real creation op).
+         */
+        private String intrinsicCarrierExpr(ValueId valueId) {
+            IntrinsicKind kind = intrinsicKindOf(valueId);
+            return kind == null ? null : intrinsicAccessor(kind);
+        }
+
+        /**
+         * The intrinsic kind of one value identity under the strict
+         * identity-preserving-load predicate (the seed and adapter carrier
+         * sites): the registration must be an {@code IntrinsicFunction} and
+         * every op result publishing the identity must be an
+         * identity-preserving load of the seed init's own cell.
+         */
+        private IntrinsicKind intrinsicKindOf(ValueId valueId) {
+            FunctionExecutionBinding registration = null;
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
+                    new deal.semantic.ir.FunctionAllocationIdentity(valueId.id()));
+                if (found != null) {
+                    registration = found;
+                    break;
+                }
+            }
+            if (!(registration instanceof FunctionExecutionBinding.IntrinsicFunction
+                    intrinsic)) {
+                return null;
+            }
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (!valueId.equals(op.result())) {
+                        continue;
+                    }
+                    if (op.kind() != SemanticOpKind.BINDING_LOAD
+                            || !(op.payload() instanceof KindPayload.BindingLoadPayload
+                                load)
+                            || !isSeedInitOperand(valueId, load.binding(),
+                                load.generation())) {
+                        return null;
+                    }
+                }
+            }
+            return intrinsic.kind();
+        }
+
+        /**
+         * The memoized intrinsic carrier expression of one identity whose
+         * registration — the kind's only authority — resolves an intrinsic
+         * kind (the residual export-read kind arm's rule), or {@code null}.
+         */
+        private String registeredIntrinsicCarrierExpr(ValueId valueId) {
+            IntrinsicKind kind = registeredIntrinsicKindOf(valueId);
+            return kind == null ? null : intrinsicAccessor(kind);
+        }
+
+        /** The registered intrinsic kind of one value identity, or null. */
+        private IntrinsicKind registeredIntrinsicKindOf(ValueId valueId) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
+                    new deal.semantic.ir.FunctionAllocationIdentity(valueId.id()));
+                if (found instanceof FunctionExecutionBinding.IntrinsicFunction
+                        intrinsic) {
+                    return intrinsic.kind();
+                }
+                if (found != null) {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * True iff a seed {@code BINDING_INIT} of the closure carries the
+         * given identity as its producer-less operand and names the given
+         * cell (the identity-preserving-load test's seed position).
+         */
+        private boolean isSeedInitOperand(ValueId identity, BindingId binding,
+                                          long generation) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.BINDING_INIT
+                            && op.payload() instanceof KindPayload.BindingInitPayload
+                                init
+                            && identity.equals(init.value())
+                            && init.binding().equals(binding)
+                            && init.generation() == generation) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
+         * The deterministic placeholder expression of a site whose identity
+         * resolves no intrinsic registration (the landed residual arm): a
+         * fresh, per-site value carrying the landed opaque export view — the
+         * oracle's {@code ()->number} projection — and the real carrier's
+         * interface, so the landed function row admits it exactly as the
+         * oracle's view does. Never the removed marker: the placeholder is a
+         * real carrier surface.
+         */
+        private static String exportPlaceholderCarrier() {
+            return "JvmRuntime.intrinsicExport()";
+        }
+
+        /**
+         * The memoized carrier accessor of one intrinsic kind: the kind
+         * tag and the intrinsic's declared descriptor text and canonical
+         * spec text — the only descriptor source (never a call site's or
+         * an adapter target's).
+         */
+        private static String intrinsicAccessor(IntrinsicKind kind) {
+            RuntimeDescriptor.Func declared = kind.declaredSignature();
+            return "JvmRuntime.intrinsic(" + javaString(kind.name()) + ", "
+                + javaString(descriptorText(declared)) + ", "
+                + javaString(declared.canonicalSpecText()) + ")";
         }
 
         private void emitBindingLoad(SemanticOp op, int indent) {
@@ -2687,11 +2821,14 @@ public final class JvmSemanticEmitter {
                 case REEVALUATE_THUNK -> out.append("2");
             }
             switch (payload.source()) {
-                case AdaptSourceRef.Value value ->
-                    out.append(", ")
-                        .append(hasProducer(value.value()) ? slot(value.value())
-                            : "new JvmRuntime.Intrinsic()")
-                        .append(", null, null");
+                case AdaptSourceRef.Value value -> {
+                    String sourceExpr = intrinsicCarrierExpr(value.value());
+                    if (sourceExpr == null) {
+                        sourceExpr = hasProducer(value.value())
+                            ? slot(value.value()) : exportPlaceholderCarrier();
+                    }
+                    out.append(", ").append(sourceExpr).append(", null, null");
+                }
                 case AdaptSourceRef.SharedCell cell ->
                     out.append(", null, (Object[]) ")
                         .append(cell(cell.binding(), cell.generation()))
@@ -6604,8 +6741,9 @@ public final class JvmSemanticEmitter {
          * row (the one memoized carrier per row per module per program —
          * the identical object the whole-surface population writes,
          * carrying the row's declared signature and canonical spec text); a
-         * read whose unit records no import fact keeps the landed
-         * placeholder. The emitted read expression is identical in trace
+         * read whose unit records no import fact keeps the residual kind
+         * arm's memoized intrinsic carrier. The emitted read expression is
+         * identical in trace
          * and production mode. In a project session a COMPILED read whose
          * owner module is not among the closure's units is a producer
          * defect and fails the emission closed; a per-unit session never
@@ -6619,7 +6757,8 @@ public final class JvmSemanticEmitter {
             // fact (M6). A module the session records no import fact for —
             // the test-only class-core carrier sessions, whose units carry
             // no module-level import op — keeps the landed interim
-            // realization (the STDLIB placeholder); the production and
+            // realization (the residual kind arm's memoized intrinsic
+            // carrier); the production and
             // conformance sessions record every resolved import, so a
             // COMPILED read is never guessed from a path.
             ModuleImportKind kind = importKinds.get(payload.module());
@@ -6647,7 +6786,17 @@ public final class JvmSemanticEmitter {
                     .append(stdlibRowArgs(stdlibRowOf(payload.module().path(),
                         payload.name()))).append(");\n");
             } else {
-                out.append(" = new JvmRuntime.Intrinsic();\n");
+                // The residual kind arm (a session whose unit records no
+                // import fact for the read's module): the placeholder
+                // publishes the memoized intrinsic carrier the identity's
+                // own registration resolves, and a fresh opaque export
+                // carrier otherwise (the landed per-read allocation, now a
+                // real carrier surface) — never the removed marker and
+                // never a re-read of the read's own slot.
+                String carrier = registeredIntrinsicCarrierExpr((ValueId) op.result());
+                out.append(" = ")
+                    .append(carrier == null ? exportPlaceholderCarrier() : carrier)
+                    .append(";\n");
             }
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType(), indent);

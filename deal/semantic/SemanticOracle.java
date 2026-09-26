@@ -2881,9 +2881,11 @@ public final class SemanticOracle {
                             ClassOpsExecutor.Value.string(error.code())),
                         new ClassOpsExecutor.FieldState.Present(
                             ClassOpsExecutor.Value.string(error.message()))));
-                case Value.IntrinsicValue ignored ->
-                    new ClassOpsExecutor.Value.Function(new RuntimeDescriptor.Func(
-                        List.of(), RuntimeDescriptor.Number.INSTANCE, false));
+                case Value.IntrinsicValue intrinsic ->
+                    // The seeded intrinsic value's class-ops function view
+                    // (J2): the closed kind's declared signature — never
+                    // the landed opaque placeholder.
+                    new ClassOpsExecutor.Value.Function(intrinsicViewOf(intrinsic));
                 case Value.SlotValue ignored ->
                     throw new IllegalStateException("a normalize-computed slot is never "
                         + "a construction input (producer defect)");
@@ -3297,6 +3299,27 @@ public final class SemanticOracle {
             oracleOriginals.put(updated, receiver);
         }
 
+        /**
+         * The declared-signature view of one oracle intrinsic value: the
+         * closed kind's declared signature ({@code IntrinsicKind
+         * .declaredSignature()}, the identity's own {@code IntrinsicFunction}
+         * registration's descriptor), so the seeded intrinsic value's
+         * class-ops and boundary views carry the declared signature and
+         * the actual kind stays {@code function}. A value whose name is
+         * not a conversion kind (the host-entry projections) keeps the
+         * landed opaque function view.
+         */
+        private static RuntimeDescriptor.Func intrinsicViewOf(
+                Value.IntrinsicValue value) {
+            for (IntrinsicKind kind : IntrinsicKind.values()) {
+                if (kind.name().equals(value.name())) {
+                    return kind.declaredSignature();
+                }
+            }
+            return new RuntimeDescriptor.Func(List.of(), RuntimeDescriptor.Number.INSTANCE,
+                false);
+        }
+
         /** The array/table commit mutation (slot mechanics of the carrier). */
         private void commitIndexWrite(Value container, NormalizedSlot slot, Value value) {
             switch (slot) {
@@ -3471,8 +3494,11 @@ public final class SemanticOracle {
                 case Value.AdapterValue adapter ->
                     BoundaryValueView.ofFunction(adapter.signature());
                 case Value.IntrinsicValue intrinsic ->
-                    BoundaryValueView.ofFunction(new RuntimeDescriptor.Func(List.of(),
-                        RuntimeDescriptor.Number.INSTANCE, false));
+                    // The seeded intrinsic value's boundary function view
+                    // (J2): the closed kind's declared signature — never
+                    // the landed opaque placeholder; the host-entry
+                    // projections keep the opaque view.
+                    BoundaryValueView.ofFunction(intrinsicViewOf(intrinsic));
                 case Value.StdlibCallableValue callable ->
                     BoundaryValueView.ofFunction(callable.descriptor());
                 case Value.HostEntryValue entry ->
@@ -3533,10 +3559,26 @@ public final class SemanticOracle {
             Cell cell = cellOf(payload.binding(), payload.generation(), true);
             Value value = valueOf(payload.value());
             if (value == null) {
-                // An intrinsic function identity (int()/number() as
-                // first-class values — the producer-less identity slot).
-                value = new Value.IntrinsicValue("intrinsic");
+                // The seed's producer-less intrinsic identity (int()/number()
+                // as first-class values; J2): one value per seeded identity
+                // carrying the closed intrinsic kind tag, keyed once in the
+                // value-keyed binding map to the identity's own
+                // IntrinsicFunction registration, so every later use — the
+                // load's republished value, a boundary check, a call's
+                // value-keyed resolution — resolves the same registration.
+                // Its two function views project the kind's declared
+                // signature.
+                FunctionExecutionBinding registration = bindingOf(payload.value());
+                String name = "intrinsic";
+                if (registration instanceof FunctionExecutionBinding.IntrinsicFunction
+                        intrinsic) {
+                    name = intrinsic.kind().name();
+                }
+                value = new Value.IntrinsicValue(name);
                 putValue(payload.value(), value);
+                if (registration instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                    bindingsByValue.put(value, registration);
+                }
             }
             cell.value = value;
             cell.initialized = true;

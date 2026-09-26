@@ -728,8 +728,8 @@ public class HostValueReadInvocationTest {
                 "the emitted chunk loads the host module exactly once per program");
             check(readLua.contains("__exportHostValue(\"host.read_sync\", \"greet\")"),
                 "the read publishes the loaded surface entry (the HOST read arm)");
-            check(occurrences(readLua, "= __intrinsicFn()") <= 2,
-                "the read arm emits no intrinsic placeholder for the host reads "
+            check(occurrences(readLua, "= __intrinsicFn(") <= 2,
+                "the read arm emits no intrinsic carrier for the host reads "
                     + "(only the intrinsic seed bindings carry one)");
             for (SemanticOp readOp : opsOfKind(entryUnit(readResult.project()),
                     SemanticOpKind.EXPORT_READ)) {

@@ -914,7 +914,7 @@ public class ReadValueIntegrationVerificationTest {
             checkEq(1, countOccurrences(luaText, expected),
                 "the production LuaJIT artifact carries the surface-resolving read: "
                     + expected);
-            check(!luaText.contains("S.v" + id + " = __intrinsicFn()"),
+            check(!luaText.contains("S.v" + id + " = __intrinsicFn("),
                 "the production LuaJIT artifact carries no placeholder read for slot "
                     + id);
         }
@@ -962,7 +962,7 @@ public class ReadValueIntegrationVerificationTest {
             checkEq(1, countOccurrences(jvmText, expected),
                 "the production JVM artifact carries the uniform surface read: "
                     + expected);
-            check(!jvmText.contains("v" + id + " = new JvmRuntime.Intrinsic()"),
+            check(!jvmText.contains("v" + id + " = JvmRuntime.intrinsic("),
                 "the production JVM artifact carries no placeholder read for slot "
                     + id);
         }

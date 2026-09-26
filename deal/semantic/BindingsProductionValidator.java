@@ -169,16 +169,19 @@ public final class BindingsProductionValidator {
      * {@code BINDING_INIT} operand; a member read with a function-typed
      * result is one of the dynamic producer arms, so it is not a static
      * position). The producer-less test
-     * carries the identity-preserving-load exclusion: a load naming the
-     * seed {@code BINDING_INIT}'s {@code {binding, generation}} that
-     * publishes that init's operand identity is not a producing position,
-     * while a load naming any other binding or generation is — the
-     * exclusion is per publishing op (ISSUE-0675): an identity whose
-     * candidate cell carries at least one load that does not name that
-     * cell's {@code {binding, generation}} is a producing position even
-     * when another load over the same identity preserves it, so a
-     * dynamically allocated identity tracked into a later cell is never
-     * mistaken for a producer-less seed operand.
+     * carries the identity-preserving-load exclusion: a load whose result
+     * identity is an already-allocated identity of the cell it names (that
+     * cell's {@code BINDING_INIT} carries it) is not a producing position,
+     * while a load naming a cell whose init carries another identity (a
+     * parameter, catch, or iteration cell, or a dynamically allocated
+     * identity tracked into a later cell) is — the exclusion is per
+     * publishing op and closed (ISSUE-0675): an identity any load of which
+     * does not republish a carrying cell is a producing position even when
+     * another load over the same identity preserves it, so a dynamically
+     * allocated identity tracked into a later cell is never mistaken for a
+     * producer-less seed operand. An alias declaration's re-publication of
+     * the seed write into its own cell makes its alias loads
+     * identity-preserving too (ISSUE-0676 J1's alias-load refinement).
      */
     public static final String REGISTRY_ONE_TO_ONE = "REGISTRY_ONE_TO_ONE";
 
@@ -2191,6 +2194,11 @@ public final class BindingsProductionValidator {
      * @param seedInits             the producer-less seed BINDING_INITs per operand identity
      * @param seedInitsOf           the {@code {binding, generation}} of the seed init of an
      *                              init operand identity (the first, diagnostic-order entry)
+     * @param preservedCells        the cell an identity-preserving load of a seeded identity
+     *                              reads (that identity's seeded binding/generation)
+     * @param preservedInits        the BINDING_INITs landing on a preserved cell per identity
+     *                              (the seed write; the other inits over the identity are the
+     *                              declaration's re-publications of it)
      * @param producingValues       every identity produced by an op of the unit under the
      *                              identity-preserving-load exclusion
      */
@@ -2204,6 +2212,8 @@ public final class BindingsProductionValidator {
             Map<Long, Integer> functionBoundaryInputs,
             Map<Long, Integer> seedInits,
             Map<Long, BindingSite> seedInitsOf,
+            Map<Long, BindingSite> preservedCells,
+            Map<Long, Integer> preservedInits,
             Set<Long> producingValues) {
 
         /** The DEAL-op production count of one key (closure, adapt, group, and read positions). */
@@ -2235,15 +2245,22 @@ public final class BindingsProductionValidator {
      * The producing positions of the unit's identities. The producer-less
      * test of the intrinsic-seed clauses carries the identity-preserving
      * load exclusion (the intrinsic-load refinement): a
-     * {@code BINDING_LOAD} whose payload names a seed {@code BINDING_INIT}'s
-     * {@code {binding, generation}} and whose result identity is that
-     * init's operand identity is not a producing position — the load
-     * republishes the allocation identity the seed init created. The
-     * exclusion is closed: every other op result stays a producing
-     * position, including a {@code BINDING_LOAD} naming any other binding
-     * or generation (a closure, adapt, group, read, or call production of
-     * the seeded identity also stays one), so the seeded operand's seed
-     * clause fails closed for them.
+     * {@code BINDING_LOAD} whose result identity is an already-allocated
+     * identity of the cell it names — the cell's {@code BINDING_INIT}
+     * carries that identity — is not a producing position; the load
+     * republishes an identity the cell already holds. The exclusion is
+     * closed: every non-load op result stays a producing position (a
+     * closure, adapt, group, read, or call production of the seeded
+     * identity also stays one), and a load naming a cell whose init carries
+     * another identity (a parameter, catch, or iteration cell, or a
+     * dynamically allocated identity tracked into a later cell) stays one,
+     * so the seeded operand's seed clause fails closed for them while the
+     * seeded identity's alias loads (the alias declaration's
+     * re-publication) stay identity-preserving. The seed writes of an
+     * identity a preserved load publishes are the inits landing on the
+     * loaded (seeded) cell: a later {@code BINDING_INIT} storing the same
+     * identity into another binding's cell is the declaration's
+     * re-publication of the one seed write, not a second seed write.
      */
     private static ProductionFacts productionFacts(Model model) {
         // Production counts per key: CLOSURE_NEW results, FUNCTION_ADAPT
@@ -2336,43 +2353,85 @@ public final class BindingsProductionValidator {
                     new BindingSite(init.binding(), init.generation()));
             }
         }
-        // The identity-preserving loads: a BINDING_LOAD naming a seed init's
-        // {binding, generation} whose result identity is that init's operand
-        // identity. The preservation decision is per op and closed
-        // (ISSUE-0675): an identity whose candidate cell carries at least
-        // one load that does NOT name that cell's {binding, generation} is
-        // a producing position, even when another load over the same
-        // identity preserves it — the exclusion admits only identities
-        // every publishing load of which republishes the candidate init's
-        // own operand.
+        // The identity-preserving loads: a BINDING_LOAD whose result
+        // identity is an already-allocated identity of the cell it names —
+        // the cell's BINDING_INIT carries that identity. The preservation
+        // decision is per publishing op and closed (ISSUE-0675): a load
+        // naming a cell whose init carries another identity (a parameter,
+        // catch, or iteration cell, or a dynamically allocated identity
+        // tracked into a later cell) is a producing position, even when
+        // another load over the same identity preserves it — the exclusion
+        // admits only identities every publishing load of which republishes
+        // a cell's already-allocated identity. The alias declaration's
+        // re-publication (a BINDING_INIT storing the seeded identity into
+        // another binding's cell) makes the alias load read the seeded
+        // identity, so the seed's alias loads stay identity-preserving
+        // (J1's alias-load refinement) while the allocating load of a
+        // dynamically allocated identity stays a producing position. The
+        // loaded cell is recorded per identity when it is the identity's
+        // candidate seed cell (the seed write's cell): a later BINDING_INIT
+        // storing the same identity into another binding's cell is the
+        // alias declaration's re-publication of the seed write, not a
+        // second seed write.
+        Map<BindingSite, Set<Long>> initOperandsByCell = new LinkedHashMap<>();
+        for (SemanticOp op : model.unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init) {
+                initOperandsByCell
+                    .computeIfAbsent(new BindingSite(init.binding(), init.generation()),
+                        cell -> new LinkedHashSet<>())
+                    .add(init.value().id());
+            }
+        }
         Set<Long> producingValues = new LinkedHashSet<>(nonLoadProducedValues);
+        Map<Long, BindingSite> preservedCells = new LinkedHashMap<>();
         for (SemanticOp op : loads) {
             if (!(op.result() instanceof ValueId produced)
                     || !(op.payload() instanceof KindPayload.BindingLoadPayload load)) {
                 continue;
             }
-            BindingSite seed = seedInitsOf.get(produced.id());
-            boolean preserved = seed != null
-                && seed.binding().equals(load.binding())
-                && seed.generation() == load.generation();
-            if (!preserved) {
+            Set<Long> carried = initOperandsByCell.get(
+                new BindingSite(load.binding(), load.generation()));
+            if (carried == null || !carried.contains(produced.id())) {
+                // The load allocates its own identity: the named cell's
+                // init does not carry it (the producing position).
                 producingValues.add(produced.id());
+                continue;
+            }
+            BindingSite seed = seedInitsOf.get(produced.id());
+            if (seed != null && seed.binding().equals(load.binding())
+                    && seed.generation() == load.generation()) {
+                preservedCells.putIfAbsent(produced.id(), seed);
             }
         }
         // The seed writes per producer-less init operand: one BINDING_INIT
         // per admitted seeded key, counted for the admission/converse
-        // clauses below.
+        // clauses below. The preserved inits are the writes landing on the
+        // cell an identity-preserving load reads (the seeded binding's own
+        // cell): the seed write of an identity a preserved load publishes
+        // is exactly one of those, while a later BINDING_INIT storing the
+        // same identity into another binding's cell is the alias
+        // declaration's re-publication of the seed write, not a second
+        // seed write.
         Map<Long, Integer> seedInits = new LinkedHashMap<>();
+        Map<Long, Integer> preservedInits = new LinkedHashMap<>();
         for (SemanticOp op : model.unit.ops()) {
             if (op.kind() == SemanticOpKind.BINDING_INIT
                     && op.payload() instanceof KindPayload.BindingInitPayload init
                     && !producingValues.contains(init.value().id())) {
                 seedInits.merge(init.value().id(), 1, Integer::sum);
+                BindingSite seededCell = preservedCells.get(init.value().id());
+                if (seededCell != null
+                        && seededCell.binding().equals(init.binding())
+                        && seededCell.generation() == init.generation()) {
+                    preservedInits.merge(init.value().id(), 1, Integer::sum);
+                }
             }
         }
         return new ProductionFacts(closureProductions, adaptProductions, groupProductions,
             memberReadProductions, exportReadProductions, boundaryInputs,
-            functionBoundaryInputs, seedInits, seedInitsOf, producingValues);
+            functionBoundaryInputs, seedInits, seedInitsOf, preservedCells,
+            preservedInits, producingValues);
     }
 
     /**
@@ -2428,10 +2487,19 @@ public final class BindingsProductionValidator {
                 // unit carries exactly one seed BINDING_INIT whose init
                 // operand is that key and the key contributes no other
                 // producing position (no closure/adapt/group/read
-                // production and no host crossing).
+                // production and no host crossing). The seed write is the
+                // BINDING_INIT of the seeded binding's own cell when an
+                // identity-preserving load of the key publishes it: a
+                // later BINDING_INIT storing the same identity into
+                // another binding's cell is the declaration's
+                // re-publication of the seed write and is not counted as
+                // a second seed write.
                 int seedCount = seedInits.getOrDefault(key, 0);
                 int boundaryCount = boundaryInputs.getOrDefault(key, 0);
-                if (count != 0 || boundaryCount != 0 || seedCount != 1) {
+                BindingSite seededCell = facts.preservedCells().get(key);
+                int seedWrites = seededCell == null ? seedCount
+                    : facts.preservedInits().getOrDefault(key, 0);
+                if (count != 0 || boundaryCount != 0 || seedWrites != 1) {
                     return fail(model, REGISTRY_ONE_TO_ONE, "the IntrinsicFunction key "
                         + entry.getKey() + " is produced by " + count + " producing op(s), "
                         + boundaryCount + " host crossing(s), and " + seedCount
@@ -2526,7 +2594,9 @@ public final class BindingsProductionValidator {
                     + " (a producer-less init operand is admissible only under exactly one "
                     + "IntrinsicFunction registration)");
             }
-            if (entry.getValue() != 1) {
+            if (entry.getValue() != 1
+                    && (facts.preservedCells().get(entry.getKey()) == null
+                        || facts.preservedInits().getOrDefault(entry.getKey(), 0) != 1)) {
                 return fail(model, REGISTRY_ONE_TO_ONE, "the producer-less init operand "
                     + identity + " carries " + entry.getValue() + " seed BINDING_INIT "
                     + "op(s) (exactly one seed init per admitted intrinsic key)");

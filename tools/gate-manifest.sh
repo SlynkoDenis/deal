@@ -1143,4 +1143,21 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the invocation fails visibly while the published entry succeeds; the
   # generated literals and both mode emissions are byte-deterministic.
   'fg|=== Running FFI Trace Session Tests (ISSUE-0668) ===|java -ea -cp build deal.test.FfiTraceSessionTest'
+  # ISSUE-0676 registration: the intrinsic value materialization
+  # (conversion-intrinsic-function-values J1/J2; function-typed-value-
+  # materialization-and-dispatch M2 item 1/M4). The value-position
+  # program's seed incarnation carries the tracked function identity, so
+  # its typed load publishes the seeded identity unchanged, every alias
+  # load and declaration republishes it, no DynamicFunctionValue is
+  # registered for it, and the unit passes the closed bindings and schema
+  # gates while a doctored unit whose seeded identity is also produced by
+  # another op still fails the seed clause. Both targets publish the
+  # memoized real carrier at the seed's BINDING_INIT, the adapter's
+  # producer-less VALUE operand and the residual export-read kind arm
+  # (declared signature texts, no marker, no slot read of the seeded
+  # identity), the oracle keys the seeded value to its IntrinsicFunction
+  # registration with the declared-signature function views, and the
+  # oracle and both artifacts observe one object per intrinsic through the
+  # landed function row.
+  'fg|=== Running Intrinsic Value Materialization Tests (ISSUE-0676) ===|java -ea -cp build deal.semantic.IntrinsicValueMaterializationTest'
 )

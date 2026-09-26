@@ -450,8 +450,8 @@ public class StdlibExportReadRealizationTest {
                 checkEq(1, countOccurrences(productionLua, expected),
                     "the production read operation is the identical catalog accessor: "
                         + expected);
-                check(!traceLua.contains("S.v" + id + " = __intrinsicFn()"),
-                    "the stdlib read is never the landed placeholder arm");
+                check(!traceLua.contains("S.v" + id + " = __intrinsicFn("),
+                    "the stdlib read is never the landed residual carrier arm");
             }
             checkEq(traceLua, LuaSemanticEmitter.emitProject(project, tables, registries),
                 "the repeated trace-mode project emission is byte-identical");
@@ -525,8 +525,8 @@ public class StdlibExportReadRealizationTest {
                     "the production JVM read operation is the identical carrier accessor: "
                         + expected);
                 check(!traceJvm.source().contains("v" + id
-                        + " = new JvmRuntime.Intrinsic();"),
-                    "the stdlib read is never the landed JVM placeholder arm");
+                        + " = JvmRuntime.intrinsic("),
+                    "the stdlib read is never the landed JVM residual carrier arm");
             }
             for (StdlibFunctionCatalog.Entry row : importedRows) {
                 String expected = "exportSurface(\"" + row.modulePath() + "\").write(\""
@@ -1225,8 +1225,8 @@ public class StdlibExportReadRealizationTest {
                 checkEq(1, countOccurrences(productionLua, "S.v" + id
                         + " = __stdlibEntry(\""),
                     "the production LuaJIT read is the identical accessor");
-                check(!traceLua.contains("S.v" + id + " = __intrinsicFn()"),
-                    "the compared read is never the placeholder arm");
+                check(!traceLua.contains("S.v" + id + " = __intrinsicFn("),
+                    "the compared read is never the residual carrier arm");
                 checkEq(1, countOccurrences(traceJvm.source(),
                         "v" + id + " = JvmRuntime.stdlibCallable(\""),
                     "the trace-mode JVM read is the memoized catalog carrier");
@@ -1266,8 +1266,8 @@ public class StdlibExportReadRealizationTest {
             String lua = Files.readString(luaArtifact);
             for (SemanticOp read : comparedReads) {
                 check(!lua.contains("S.v" + ((ValueId) read.result()).id()
-                        + " = __intrinsicFn()"),
-                    "the LuaJIT artifact carries no placeholder read");
+                        + " = __intrinsicFn("),
+                    "the LuaJIT artifact carries no residual carrier read");
             }
             Path luaProbe = fixture.root().resolve("comparison-lua-probe.lua");
             Files.writeString(luaProbe, comparisonLuaProbe(luaArtifact),
@@ -1303,8 +1303,8 @@ public class StdlibExportReadRealizationTest {
             String jvmText = Files.readString(jvmSource);
             for (SemanticOp read : comparedReads) {
                 check(!jvmText.contains("v" + ((ValueId) read.result()).id()
-                        + " = new JvmRuntime.Intrinsic();"),
-                    "the JVM artifact carries no placeholder read");
+                        + " = JvmRuntime.intrinsic("),
+                    "the JVM artifact carries no residual carrier read");
             }
             String driver = "StdlibComparisonProductionProbe";
             Files.writeString(jvmOut.resolve(driver + ".java"),
@@ -1512,8 +1512,8 @@ public class StdlibExportReadRealizationTest {
             String lua = Files.readString(luaArtifact);
             for (SemanticOp read : reads) {
                 check(!lua.contains("S.v" + ((ValueId) read.result()).id()
-                        + " = __intrinsicFn()"),
-                    "the production LuaJIT artifact carries no placeholder read");
+                        + " = __intrinsicFn("),
+                    "the production LuaJIT artifact carries no residual carrier read");
             }
             check(!lua.contains("export:std.console"),
                 "the production LuaJIT artifact carries no placeholder token");
@@ -1552,8 +1552,8 @@ public class StdlibExportReadRealizationTest {
             String jvmText = Files.readString(jvmSource);
             for (SemanticOp read : reads) {
                 check(!jvmText.contains("v" + ((ValueId) read.result()).id()
-                        + " = new JvmRuntime.Intrinsic();"),
-                    "the production JVM artifact carries no placeholder read");
+                        + " = JvmRuntime.intrinsic("),
+                    "the production JVM artifact carries no residual carrier read");
             }
             check(!jvmText.contains("export:std.console"),
                 "the production JVM artifact carries no placeholder token");

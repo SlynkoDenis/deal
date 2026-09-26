@@ -5335,10 +5335,15 @@ public final class SemanticLowerer {
          * seed entry point, so the key is registered exactly once and
          * the bindings production validator's closed admission admits
          * exactly the seed's {@code BINDING_INIT} as its producing
-         * position. The function-typed materialization that carries the
-         * identity as a first-class value stays the function-value
-         * child's: this walk emits neither a load of the intrinsic
-         * binding nor an intrinsic carrier.</p>
+         * position. The seed's incarnation is added to the static
+         * function-identity tracking (J1), so a function-typed load of
+         * the intrinsic binding publishes the producer-less seeded
+         * identity unchanged — the same identity-preservation rule every
+         * function-typed load follows — and every alias load republishes
+         * the same identity. No further registration exists for that
+         * load: its registration is the seed's own
+         * {@code IntrinsicFunction}, keyed by the identity the load
+         * republishes.</p>
          */
         private void seedIntrinsicBindings() {
             // The declared conversion intrinsics of the compilation
@@ -5397,16 +5402,18 @@ public final class SemanticLowerer {
                 registry.registerIntrinsic(
                     new FunctionAllocationIdentity(intrinsicValue.id()), kind,
                     (RuntimeDescriptor.Func) DescriptorService.describe(intrinsic.type()));
-                // No static function-identity tracking for intrinsics: the
-                // seeded incarnation's identity-preserving tracking and the
-                // function-typed load of the intrinsic binding's carrier are
-                // the conversion-intrinsic child's materialization (wiki
-                // conversion-intrinsic-function-values J1). Until that
-                // tracking lands, the intrinsic binding's cell value
-                // identity is not statically tracked, so a function-typed
-                // load of it takes the producer rule's typed-load arm and
-                // registers the closed DynamicFunctionValue (ISSUE-0675) —
-                // the walk never emits an unregistered function-typed load.
+                // The seed's incarnation carries the tracked
+                // function identity (J1): a function-typed load of the
+                // intrinsic binding publishes the seeded identity
+                // unchanged (identity preservation — the load's
+                // registration is the seed's own IntrinsicFunction
+                // keyed by the same identity), and every alias load
+                // republishes the same identity, so the producer
+                // rule's typed-load arm (ISSUE-0675) never allocates a
+                // second, dynamic record for the seeded value. The
+                // load's carrier emission is the function-value
+                // child's (J2).
+                functionIdentity.put(incarnation, intrinsicValue);
                 emitUserNullOp(SemanticOpKind.BINDING_INIT,
                     new KindPayload.BindingInitPayload(binding, INITIAL_LOOP_GENERATION,
                         intrinsicValue),

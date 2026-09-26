@@ -82,7 +82,7 @@ import java.util.TreeMap;
  *       targets carry the same host read operation in trace and
  *       production mode: LuaJIT {@code S.v<id> =
  *       __exportHostValue(<module>, <name>)} (the program-scoped surface
- *       entry itself — no {@code __intrinsicFn()} placeholder), JVM
+ *       entry itself — no {@code __intrinsicFn(...)} residual carrier), JVM
  *       {@code v<id> = exportSurface(<module>).read(<name>);} (the
  *       uniform read, absent key → {@code JvmRuntime.MISSING}); the
  *       per-unit sessions emit the identical operation; repeated
@@ -586,8 +586,8 @@ public class HostExportReadRealizationTest {
                 "the production LuaJIT project session emits the identical read operation");
             check(traceLua.contains("local function __exportHostValue(module, name)"),
                 "the prelude carries the host surface accessor");
-            check(!traceLua.contains("S.v" + id + " = __intrinsicFn()"),
-                "the host read is never the landed placeholder arm");
+            check(!traceLua.contains("S.v" + id + " = __intrinsicFn("),
+                "the host read is never the landed residual carrier arm");
             checkEq(traceLua, LuaSemanticEmitter.emitProject(project, result.tables(),
                     result.registries()),
                 "the repeated trace-mode emission is byte-identical");
@@ -604,8 +604,8 @@ public class HostExportReadRealizationTest {
                     + jvmRead);
             checkEq(1, countOccurrences(productionJvm, jvmRead),
                 "the production JVM project session emits the identical read operation");
-            check(!traceJvm.contains("v" + id + " = new JvmRuntime.Intrinsic()"),
-                "the host read is never the landed JVM placeholder arm");
+            check(!traceJvm.contains("v" + id + " = JvmRuntime.intrinsic("),
+                "the host read is never the landed JVM residual carrier arm");
             checkEq(productionJvm, JvmSemanticEmitter.emitProductionProject(project,
                     result.tables(), result.registries(),
                     JvmBackend.classNameFor(APP.path()), fixture.surface()).source(),

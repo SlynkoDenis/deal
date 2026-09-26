@@ -920,6 +920,7 @@ public final class LuaSemanticEmitter {
             out.append("local __traceMode = ").append(trace ? "true" : "false")
                 .append("\n");
             out.append(PRELUDE);
+            out.append(PRELUDE_ASYNC);
             out.append(JSON_PRELUDE);
             if (!trace) {
                 // Production: the event helpers are no-ops.
@@ -947,6 +948,15 @@ public final class LuaSemanticEmitter {
             // like the surface registry (a second chunk of the same
             // process resolves the same callables).
             out.append("__stdlibEntries = __stdlibEntries or {}\n");
+            // The program-scoped intrinsic carriers (J2): one memoized
+            // class-tagged carrier per intrinsic kind per program, so
+            // every materialization of one intrinsic (a seed init, a load,
+            // an adapter operand, a residual read) observes the identical
+            // object and functions compare by reference identity;
+            // chunk-global exactly like the surface and stdlib registries
+            // (a second chunk of the same process resolves the same
+            // carriers).
+            out.append("__intrinsicCarriers = __intrinsicCarriers or {}\n");
             // The host-module loader of the chunk (ISSUE-0650, extended by
             // ISSUE-0668): a project chunk whose closure carries a HOST-kind
             // import (host or extern-C) requires the deployed runtime's landed
@@ -2637,8 +2647,11 @@ public final class LuaSemanticEmitter {
             emitStart(op);
             BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
                 BindingCellKind.DIRECT);
-            String valueExpr = hasProducer(payload.value())
-                ? slot(payload.value()) : "__intrinsicFn()";
+            String valueExpr = intrinsicCarrierExpr(payload.value());
+            if (valueExpr == null) {
+                valueExpr = hasProducer(payload.value())
+                    ? slot(payload.value()) : exportPlaceholderCarrier();
+            }
             if (kind == BindingCellKind.SHARED_CELL) {
                 // In-place publication: the cell table's identity is held
                 // by captures and adapters, so the commit writes the cell
@@ -2663,6 +2676,136 @@ public final class LuaSemanticEmitter {
                 }
             }
             return false;
+        }
+
+        /**
+         * The memoized intrinsic carrier expression of one value identity
+         * (J2): the closed {@code IntrinsicFunction} registration of the
+         * closure resolves the kind — never a spelling — and every op
+         * result publishing the identity is an identity-preserving
+         * {@code BINDING_LOAD} of the seed {@code BINDING_INIT}'s own cell
+         * (or nothing publishes it, the seed's producer-less identity), so
+         * an identity-preserving load of the seeded binding never replaces
+         * the memoized carrier with a slot read. {@code null} when the
+         * identity is not a registered intrinsic: every other value keeps
+         * the landed {@code hasProducer} behavior (a closure identity has
+         * its real creation op).
+         */
+        private String intrinsicCarrierExpr(ValueId valueId) {
+            IntrinsicKind kind = intrinsicKindOf(valueId);
+            return kind == null ? null : intrinsicAccessor(kind);
+        }
+
+        /**
+         * The memoized intrinsic carrier expression of one identity whose
+         * registration — the kind's only authority — resolves an intrinsic
+         * kind (the residual export-read kind arm's rule), or {@code null}.
+         */
+        private String registeredIntrinsicCarrierExpr(ValueId valueId) {
+            IntrinsicKind kind = registeredIntrinsicKindOf(valueId);
+            return kind == null ? null : intrinsicAccessor(kind);
+        }
+
+        /** The registered intrinsic kind of one value identity, or null. */
+        private IntrinsicKind registeredIntrinsicKindOf(ValueId valueId) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
+                    new FunctionAllocationIdentity(valueId.id()));
+                if (found instanceof FunctionExecutionBinding.IntrinsicFunction
+                        intrinsic) {
+                    return intrinsic.kind();
+                }
+                if (found != null) {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * The intrinsic kind of one value identity under the strict
+         * identity-preserving-load predicate (the seed and adapter carrier
+         * sites): the registration must be an {@code IntrinsicFunction} and
+         * every op result publishing the identity must be an
+         * identity-preserving load of the seed init's own cell.
+         */
+        private IntrinsicKind intrinsicKindOf(ValueId valueId) {
+            FunctionExecutionBinding registration = null;
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
+                    new FunctionAllocationIdentity(valueId.id()));
+                if (found != null) {
+                    registration = found;
+                    break;
+                }
+            }
+            if (!(registration instanceof FunctionExecutionBinding.IntrinsicFunction
+                    intrinsic)) {
+                return null;
+            }
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (!valueId.equals(op.result())) {
+                        continue;
+                    }
+                    if (op.kind() != SemanticOpKind.BINDING_LOAD
+                            || !(op.payload() instanceof KindPayload.BindingLoadPayload
+                                load)
+                            || !isSeedInitOperand(valueId, load.binding(),
+                                load.generation())) {
+                        return null;
+                    }
+                }
+            }
+            return intrinsic.kind();
+        }
+
+        /**
+         * True iff a seed {@code BINDING_INIT} of the closure carries the
+         * given identity as its producer-less operand and names the given
+         * cell (the identity-preserving-load test's seed position).
+         */
+        private boolean isSeedInitOperand(ValueId identity, BindingId binding,
+                                          long generation) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.BINDING_INIT
+                            && op.payload() instanceof KindPayload.BindingInitPayload
+                                init
+                            && identity.equals(init.value())
+                            && init.binding().equals(binding)
+                            && init.generation() == generation) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
+         * The deterministic placeholder expression of a site whose identity
+         * resolves no intrinsic registration (the landed residual arm): a
+         * fresh, per-site value carrying the landed opaque export view — the
+         * oracle's {@code ()->number} projection — and the real carrier's
+         * interface, so the landed function row admits it exactly as the
+         * oracle's view does. Never the removed marker: the placeholder is a
+         * real carrier surface.
+         */
+        private static String exportPlaceholderCarrier() {
+            return "__intrinsicExport()";
+        }
+
+        /**
+         * The memoized carrier accessor of one intrinsic kind: the kind
+         * tag and the intrinsic's declared descriptor text and canonical
+         * spec text — the only descriptor source (never a call site's or
+         * an adapter target's).
+         */
+        private static String intrinsicAccessor(IntrinsicKind kind) {
+            RuntimeDescriptor.Func declared = kind.declaredSignature();
+            return "__intrinsicFn(" + luaString(kind.name()) + ", "
+                + luaString(descriptorText(declared)) + ", "
+                + luaString(declared.canonicalSpecText()) + ")";
         }
 
         private void emitBindingLoad(SemanticOp op) {
@@ -2751,10 +2894,14 @@ public final class LuaSemanticEmitter {
                 .append(luaString(payload.targetSignature().canonicalSpecText()))
                 .append(", __fid = nil");
             switch (payload.source()) {
-                case AdaptSourceRef.Value value ->
-                    out.append(", __value = ")
-                        .append(hasProducer(value.value()) ? slot(value.value())
-                            : "__intrinsicFn()");
+                case AdaptSourceRef.Value value -> {
+                    String sourceExpr = intrinsicCarrierExpr(value.value());
+                    if (sourceExpr == null) {
+                        sourceExpr = hasProducer(value.value())
+                            ? slot(value.value()) : exportPlaceholderCarrier();
+                    }
+                    out.append(", __value = ").append(sourceExpr);
+                }
                 case AdaptSourceRef.SharedCell cell ->
                     out.append(", __cell = ")
                         .append(cell(cell.binding(), cell.generation()));
@@ -6640,7 +6787,8 @@ public final class LuaSemanticEmitter {
             // fact (M6). A module the session records no import fact for —
             // the test-only class-core carrier sessions, whose units carry
             // no module-level import op — keeps the landed interim
-            // realization (the STDLIB placeholder); the production and
+            // realization (the residual kind arm's real carrier surface);
+            // the production and
             // conformance sessions record every resolved import, so a
             // COMPILED read is never guessed from a path.
             ModuleImportKind kind = importKinds.get(payload.module());
@@ -6670,7 +6818,17 @@ public final class LuaSemanticEmitter {
                     .append(stdlibRowArgs(stdlibRowOf(payload.module().path(),
                         payload.name()))).append(")\n");
             } else {
-                out.append(slot((ValueId) op.result())).append(" = __intrinsicFn()\n");
+                // The residual kind arm (a session whose unit records no
+                // import fact for the read's module): the placeholder
+                // publishes the memoized intrinsic carrier the identity's
+                // own registration resolves, and a fresh opaque export
+                // carrier otherwise (the landed per-read allocation, now a
+                // real carrier surface) — never the removed marker and
+                // never a re-read of the read's own slot.
+                String carrier = registeredIntrinsicCarrierExpr((ValueId) op.result());
+                out.append(slot((ValueId) op.result())).append(" = ")
+                    .append(carrier == null ? exportPlaceholderCarrier() : carrier)
+                    .append("\n");
             }
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
@@ -7790,8 +7948,42 @@ local function __allocId(v)
   end
   return id
 end
-local function __intrinsicFn()
-  return {__f = true}
+local __intrinsicInvoke
+-- The conversion intrinsics' memoized carriers (J2; published by the
+-- seed's BINDING_INIT, the adapter's producer-less VALUE operand and a
+-- residual export-read kind arm whose identity carries a seed
+-- registration): one callable, class-tagged
+-- carrier per intrinsic kind per program, carrying the intrinsic's
+-- declared descriptor text and canonical spec text and no function id,
+-- so the landed function row (__bcheck/__fncheck) admits it by its
+-- carried signature, __unfn exposes its invoker, and every
+-- materialization of one intrinsic is the identical value (functions
+-- compare by reference identity). The kind tag `it` and the declared
+-- signature texts `sig`/`csig` come from the unit's own
+-- IntrinsicFunction registration — never a spelling, never a call
+-- site's or an adapter target's signature.
+local function __intrinsicFn(it, sig, csig)
+  local c = __intrinsicCarriers[it]
+  if c == nil then
+    c = {__sig = sig, __csig = csig, __fid = nil, __it = it}
+    c.__fn = function(...) return __intrinsicInvoke(it, ...) end
+    __intrinsicCarriers[it] = c
+  end
+  return c
+end
+-- The residual export-read kind arm's placeholder carrier (a session
+-- whose unit records no import fact for the read's module — the
+-- test-only class-core carrier sessions): a fresh, per-read value
+-- carrying the landed opaque export view the oracle projects for that
+-- arm (a ()->number function) and the real carrier's interface, so the
+-- landed function row admits it exactly as the oracle's view does and
+-- the read keeps its own identity (the landed arm's per-read
+-- allocation). The memoized intrinsic carrier is published at this arm
+-- only when the read's identity carries an IntrinsicFunction
+-- registration (the only kind authority).
+local function __intrinsicExport()
+  return {__fn = function() return nil end, __sig = "function(;number)",
+    __csig = "()->number", __fid = nil}
 end
 -- The compiled export read (M2): the nil-safe accessor of the
 -- chunk-global program-scoped export-surface registry. A published
@@ -8353,6 +8545,28 @@ local function __numConv(v, kind, opKey, digest, parent, origin)
   __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
   error(e, 0)
 end
+-- The intrinsic carrier's generic invoker (J2): the conversion ladder
+-- of the carrier's kind over the caller's first argument, with the
+-- invoking call's context when one is supplied (the DEAL convention
+-- packs the static kind, the op key, the digest, the parent key, and
+-- the origin after the value) and the absent context otherwise — total
+-- and deterministic for any non-DEAL caller (the host bridge and any
+-- generic unwrap). DEAL call sites run the ladder directly with the
+-- invoking op's own context; the carrier's invoker never invents a
+-- call site's origin, and its declared-parameter kind is the default
+-- static kind (the intrinsic's declared signature is the only
+-- descriptor source).
+__intrinsicInvoke = function(it, v, kind, opKey, digest, parent, origin)
+  if kind == nil then kind = (it == "INT_CONVERT") and "number" or "int" end
+  if opKey == nil then opKey = "-" end
+  if digest == nil then digest = "-" end
+  if parent == nil then parent = "-" end
+  if origin == nil then origin = "-" end
+  if it == "INT_CONVERT" then
+    return __intConv(v, kind, opKey, digest, parent, origin)
+  end
+  return __numConv(v, kind, opKey, digest, parent, origin)
+end
 local function __arrayRead(opKey, digest, parent, bKey, bDigest, bParent, desc, inner,
                            container, slotName, nullable, wantsNumber, origin)
   local index = slotName.i
@@ -8535,6 +8749,16 @@ local function __adaptInvoke(w, origin, ...)
   if not __okA then error(__vA, 0) end
   return __vA
 end
+""";
+
+    /**
+     * The second half of the runtime prelude (the D13 async machine
+     * onward): a separate constant because a single Java string constant
+     * may not exceed the class-file's 65535-byte UTF-8 limit; both halves
+     * are appended consecutively, so the emitted chunk is byte-identical
+     * to the unsplit text.
+     */
+    private static final String PRELUDE_ASYNC = """
 -- ==== the D13 async machine (ASYNC_START/AWAIT) ====
 -- The canonical-token task registry and the deterministic FIFO queue —
 -- chunk-global (one execution state across a multi-module drive).

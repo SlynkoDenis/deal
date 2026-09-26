@@ -287,11 +287,86 @@ public final class JvmRuntime {
         }
     }
 
-    /** An intrinsic function value (int()/number() as first-class values). */
-    public static final class Intrinsic {
-        @Override public String toString() {
-            return "intrinsic";
+    /**
+     * An intrinsic function value (int()/number() as first-class values,
+     * J2): a callable {@link FunctionValue} carrier carrying the closed
+     * intrinsic kind tag, the intrinsic's declared descriptor text (the
+     * landed function row's carried signature) and the declared canonical
+     * spec text, with a null frame id. One memoized object per intrinsic
+     * kind per program ({@link #intrinsic}); its {@code fn} is the
+     * generic conversion invoker ({@link #intrinsicInvoke}), so the
+     * landed {@code bcheck}/{@code actualOf}/{@code fnCheck} and the D15
+     * adapter source resolution accept it unchanged.
+     */
+    public static final class Intrinsic extends FunctionValue {
+        /** The closed intrinsic kind tag ({@code IntrinsicKind} name). */
+        public final String kind;
+
+        Intrinsic(String kind, String signature, String spec) {
+            super(args -> intrinsicInvoke(kind, args), signature, spec, null);
+            this.kind = kind;
         }
+    }
+
+    /** The program's memoized intrinsic carriers (one per kind per program). */
+    private static final java.util.Map<String, Intrinsic> INTRINSIC_CARRIERS =
+        new java.util.LinkedHashMap<>();
+
+    /**
+     * The memoized intrinsic carrier of one kind (J2): the identical
+     * object for every materialization of one intrinsic, carrying the
+     * kind's declared signature texts (the caller's arguments are the
+     * kind's declared descriptor text and canonical spec text).
+     */
+    public static Intrinsic intrinsic(String kind, String signature, String spec) {
+        Intrinsic carrier = INTRINSIC_CARRIERS.get(kind);
+        if (carrier == null) {
+            carrier = new Intrinsic(kind, signature, spec);
+            INTRINSIC_CARRIERS.put(kind, carrier);
+        }
+        return carrier;
+    }
+
+    /**
+     * The residual export-read kind arm's placeholder carrier (a session
+     * whose unit records no import fact for the read's module): a fresh,
+     * per-read value carrying the landed opaque export view the oracle
+     * projects for that arm (a {@code ()->number} function) and the real
+     * carrier's interface, so the landed function row admits it exactly as
+     * the oracle's view does and the read keeps its own identity (the
+     * landed arm's per-read allocation). The memoized intrinsic carrier is
+     * published at that arm only when the read's identity carries an
+     * {@code IntrinsicFunction} registration.
+     */
+    public static FunctionValue intrinsicExport() {
+        return new FunctionValue(args -> null, "function(;number)", "()->number", null);
+    }
+
+    /**
+     * The intrinsic carrier's generic invoker (J2): the conversion
+     * ladder of the carrier's kind over the caller's first argument, with
+     * the invoking call's context when one is supplied (the DEAL
+     * convention packs the static kind, the op key, the digest, the
+     * parent key, and the origin after the value) and the absent context
+     * otherwise — total and deterministic for any non-DEAL caller (the
+     * host bridge and any generic unwrap). DEAL call sites run the ladder
+     * directly with the invoking op's own context; the carrier's invoker
+     * never invents a call site's origin, and its declared-parameter kind
+     * is the default static kind (the intrinsic's declared signature is
+     * the only descriptor source).
+     */
+    static Object intrinsicInvoke(String kind, Object[] args) {
+        Object value = args.length > 0 ? args[0] : null;
+        String staticKind = args.length > 1 && args[1] instanceof String text ? text
+            : ("INT_CONVERT".equals(kind) ? "number" : "int");
+        String opKey = args.length > 2 && args[2] instanceof String text ? text : "-";
+        String digest = args.length > 3 && args[3] instanceof String text ? text : "-";
+        String parent = args.length > 4 && args[4] instanceof String text ? text : "-";
+        String origin = args.length > 5 && args[5] instanceof String text ? text : "-";
+        if ("INT_CONVERT".equals(kind)) {
+            return intConv(value, staticKind, opKey, digest, parent, origin);
+        }
+        return numConv(value, staticKind, opKey, digest, parent, origin);
     }
 
     /**

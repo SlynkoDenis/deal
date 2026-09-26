@@ -422,8 +422,8 @@ public class CompiledExportReadRealizationTest {
                 checkEq(1, countOccurrences(productionLua, assignment),
                     "the production read operation is the identical surface lookup: "
                         + assignment);
-                check(!traceLua.contains("S.v" + id + " = __intrinsicFn()"),
-                    "the compiled read is never the landed placeholder arm");
+                check(!traceLua.contains("S.v" + id + " = __intrinsicFn("),
+                    "the compiled read is never the landed residual carrier arm");
             }
             checkEq(traceLua, LuaSemanticEmitter.emitProject(project, tables, registries),
                 "the repeated trace-mode project emission is byte-identical");
@@ -448,8 +448,8 @@ public class CompiledExportReadRealizationTest {
                 checkEq(1, countOccurrences(productionJvm.source(), assignment),
                     "the production JVM read operation is the identical surface read: "
                         + assignment);
-                check(!traceJvm.source().contains("v" + id + " = new JvmRuntime.Intrinsic()"),
-                    "the compiled read is never the landed JVM placeholder arm");
+                check(!traceJvm.source().contains("v" + id + " = JvmRuntime.intrinsic("),
+                    "the compiled read is never the landed JVM residual carrier arm");
             }
             checkEq(productionJvm.source(), JvmSemanticEmitter.emitProductionProject(
                     project, tables, registries, JvmBackend.classNameFor(APP.path()),
@@ -952,8 +952,8 @@ public class CompiledExportReadRealizationTest {
                 checkEq(1, countOccurrences(lua,
                         "S.v" + id + " = __exportValue(\"lib\", \"tag\")"),
                     "the production LuaJIT artifact carries the surface-resolving read");
-                check(!lua.contains("S.v" + id + " = __intrinsicFn()"),
-                    "the production LuaJIT artifact carries no placeholder read");
+                check(!lua.contains("S.v" + id + " = __intrinsicFn("),
+                    "the production LuaJIT artifact carries no residual carrier read");
             }
             check(!lua.contains("export:lib.tag"),
                 "the production LuaJIT artifact carries no placeholder token");
@@ -995,8 +995,8 @@ public class CompiledExportReadRealizationTest {
                 checkEq(1, countOccurrences(jvmText,
                         "v" + id + " = exportSurface(\"lib\").read(\"tag\");"),
                     "the production JVM artifact carries the uniform surface read");
-                check(!jvmText.contains("v" + id + " = new JvmRuntime.Intrinsic()"),
-                    "the production JVM artifact carries no placeholder read");
+                check(!jvmText.contains("v" + id + " = JvmRuntime.intrinsic("),
+                    "the production JVM artifact carries no residual carrier read");
             }
             check(!jvmText.contains("export:lib.tag"),
                 "the production JVM artifact carries no placeholder token");
