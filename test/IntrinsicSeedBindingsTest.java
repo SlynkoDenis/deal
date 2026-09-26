@@ -675,6 +675,137 @@ public class IntrinsicSeedBindingsTest {
     }
 
     // =========================================================================
+    // 4b. The identity-preserving function-typed load of the seeded binding
+    //     (ISSUE-0674 J1: the producer-less-test refinement)
+    // =========================================================================
+
+    /** One function-typed load of the named incarnation's cell. */
+    private static SemanticOp loadOp(BindingId binding, long generation, ValueId result) {
+        return op(SemanticOpKind.BINDING_LOAD,
+            new KindPayload.BindingLoadPayload(binding, generation), result,
+            IntrinsicKind.INT_CONVERT.declaredSignature(), FailurePolicyId.NO_DEAL_FAILURE);
+    }
+
+    /** One member/export read publishing the given identity (a non-load producer). */
+    private static SemanticOp exportReadOp(ValueId identity) {
+        return op(SemanticOpKind.EXPORT_READ,
+            new KindPayload.ExportReadPayload(MODULE, "f",
+                IntrinsicKind.INT_CONVERT.declaredSignature(), identity),
+            identity, IntrinsicKind.INT_CONVERT.declaredSignature(),
+            FailurePolicyId.NO_DEAL_FAILURE);
+    }
+
+    private static void testIdentityPreservingLoadAdmission() {
+        System.out.println("-- the identity-preserving function-typed load of the seeded "
+            + "binding (J1) --");
+
+        // The load-shaped positive: a function-typed load naming the seed
+        // BINDING_INIT's {binding, generation} whose result is that init's
+        // operand identity is not a producing position, so the seeded key keeps
+        // exactly one seed BINDING_INIT and the unit passes.
+        BindingId seed = nextBindingId();
+        ValueId seeded = nextValue();
+        List<SemanticOp> seedOps = List.of(allocOp(seed, INIT_BLOCK, 0),
+            initOp(seed, 0, seeded), loadOp(seed, 0, seeded));
+        Map<FunctionAllocationIdentity, FunctionExecutionBinding> seededRegistry = Map.of(
+            new FunctionAllocationIdentity(seeded.id()),
+            new FunctionExecutionBinding.IntrinsicFunction(IntrinsicKind.INT_CONVERT,
+                IntrinsicKind.INT_CONVERT.declaredSignature()));
+        LoweredModuleUnit loaded = unit(seededRegistry, seedOps);
+        check(BindingsProductionValidator.validate(loaded, tableOf(seedOps)).isEmpty(),
+            "the unit carrying the function-typed load of the seeded intrinsic binding "
+                + "passes REGISTRY_ONE_TO_ONE (the load is not a producing position): "
+                + BindingsProductionValidator.validate(loaded, tableOf(seedOps))
+                    .map(CompilerDiagnostic::message).orElse("admission"));
+        check(BindingsProductionValidator.validate(loaded, tableOf(seedOps),
+                BindingsProductionValidator.PinnedWriteFacts.empty()).isEmpty(),
+            "the load-carrying unit passes the closed bindings gate");
+
+        // The load of another binding is not an identity-preserving load of the
+        // seeded binding: the seeded identity is produced and the seed clause
+        // fails closed.
+        BindingId other = nextBindingId();
+        ValueId otherValue = nextValue();
+        List<SemanticOp> foreignOps = List.of(allocOp(seed, INIT_BLOCK, 0),
+            initOp(seed, 0, seeded), constIntOp(otherValue),
+            allocOp(other, INIT_BLOCK, 0), initOp(other, 0, otherValue),
+            loadOp(other, 0, seeded));
+        LoweredModuleUnit foreignLoad = unit(seededRegistry, foreignOps);
+        Optional<CompilerDiagnostic> foreignFailure =
+            BindingsProductionValidator.validate(foreignLoad, tableOf(foreignOps));
+        assertRule(foreignFailure, "REGISTRY_ONE_TO_ONE",
+            "a load naming another binding over the seeded identity");
+        check(foreignFailure
+                .map(d -> d.message().contains("is produced by 0 producing op(s), 0 host "
+                    + "crossing(s), and 0 seed BINDING_INIT(s)")).orElse(false),
+            "the foreign-binding load turns the seeded identity into a produced one (the "
+                + "seed clause counts zero seed BINDING_INITs)");
+
+        // The load of another generation of the seeded binding does not qualify
+        // either.
+        BindingId generationSeed = nextBindingId();
+        ValueId generationSeeded = nextValue();
+        ValueId laterValue = nextValue();
+        List<SemanticOp> laterOps = List.of(allocOp(generationSeed, INIT_BLOCK, 0),
+            initOp(generationSeed, 0, generationSeeded),
+            constIntOp(laterValue), allocOp(generationSeed, INIT_BLOCK, 1),
+            initOp(generationSeed, 1, laterValue),
+            loadOp(generationSeed, 1, generationSeeded));
+        Map<FunctionAllocationIdentity, FunctionExecutionBinding> laterRegistry = Map.of(
+            new FunctionAllocationIdentity(generationSeeded.id()),
+            new FunctionExecutionBinding.IntrinsicFunction(IntrinsicKind.NUMBER_CONVERT,
+                IntrinsicKind.NUMBER_CONVERT.declaredSignature()));
+        LoweredModuleUnit laterLoad = unit(laterRegistry, laterOps);
+        Optional<CompilerDiagnostic> generationFailure =
+            BindingsProductionValidator.validate(laterLoad, tableOf(laterOps));
+        assertRule(generationFailure, "REGISTRY_ONE_TO_ONE",
+            "a load naming another generation of the seeded binding");
+        check(generationFailure
+                .map(d -> d.message().contains("is produced by 0 producing op(s), 0 host "
+                    + "crossing(s), and 0 seed BINDING_INIT(s)")).orElse(false),
+            "the other-generation load turns the seeded identity into a produced one (the "
+                + "seed clause counts zero seed BINDING_INITs)");
+
+        // Every other op result carrying the seeded identity keeps the clause
+        // rejecting: a member/export read is not an identity-preserving load.
+        List<SemanticOp> readOps = List.of(allocOp(seed, INIT_BLOCK, 0),
+            initOp(seed, 0, seeded), exportReadOp(seeded));
+        LoweredModuleUnit readProduced = unit(seededRegistry, readOps);
+        Optional<CompilerDiagnostic> readFailure =
+            BindingsProductionValidator.validate(readProduced, tableOf(readOps));
+        assertRule(readFailure, "REGISTRY_ONE_TO_ONE",
+            "an EXPORT_READ carrying the seeded identity");
+        check(readFailure
+                .map(d -> d.message().contains("is produced by 1 producing op(s), 0 host "
+                    + "crossing(s), and 0 seed BINDING_INIT(s)")).orElse(false),
+            "the export-read production makes the seeded identity produced (the seed clause "
+                + "counts zero seed BINDING_INITs)");
+
+        // A producer-less init operand is admissible only under exactly one
+        // IntrinsicFunction registration: the load-shaped unit without its
+        // registration fails the converse clause.
+        List<SemanticOp> noRegistrationOps = List.of(allocOp(seed, INIT_BLOCK, 0),
+            initOp(seed, 0, seeded), loadOp(seed, 0, seeded));
+        LoweredModuleUnit noRegistration = unit(Map.of(), noRegistrationOps);
+        assertRule(BindingsProductionValidator.validate(noRegistration,
+                tableOf(noRegistrationOps)), "REGISTRY_ONE_TO_ONE",
+            "a producer-less init operand with no IntrinsicFunction registration");
+
+        // The load itself is not a registration trigger: the seeded identity
+        // keeps exactly one IntrinsicFunction registration (a
+        // DynamicFunctionValue key for it stays rejected).
+        LoweredModuleUnit dynamicOnSeed = unit(Map.of(
+            new FunctionAllocationIdentity(seeded.id()),
+            new FunctionExecutionBinding.DynamicFunctionValue(
+                new OpId(MODULE, 4242),
+                IntrinsicKind.INT_CONVERT.declaredSignature())),
+            seedOps);
+        assertRule(BindingsProductionValidator.validate(dynamicOnSeed, tableOf(seedOps)),
+            "REGISTRY_ONE_TO_ONE",
+            "a DynamicFunctionValue registration for the seeded identity");
+    }
+
+    // =========================================================================
     // 5. The registry entry point
     // =========================================================================
 
@@ -836,6 +967,7 @@ public class IntrinsicSeedBindingsTest {
         testCodecRoundTrip();
         testClosedGatePositive();
         testNegativeSeeds();
+        testIdentityPreservingLoadAdmission();
         testOpenPositionNegatives();
         testRegistryEntryPoint();
         testCombinedCorpus();

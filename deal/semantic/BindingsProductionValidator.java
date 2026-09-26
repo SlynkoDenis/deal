@@ -144,14 +144,35 @@ public final class BindingsProductionValidator {
     /** The adapter-pair rule (B9/B6): the pair re-derives as assignable-but-not-exact. */
     public static final String ADAPTER_PAIR = "ADAPTER_PAIR";
 
-    /** The adapter-source-shape rule (B9/B8): mode↔source shape, proof iff VALUE-over-binding. */
+    /**
+     * The adapter-source-shape rule (B9/B8): mode↔source shape, proof iff
+     * VALUE-over-binding — with the closed VALUE-over-intrinsic exemption
+     * (ISSUE-0674): the seeded conversion intrinsic's identity is the
+     * intrinsic function value itself, so a VALUE operand that is a
+     * seed-admitted {@code IntrinsicFunction} key published only by
+     * identity-preserving loads of the seeded binding is admissible with
+     * or without its proof (a present proof must name the seeded
+     * binding/generation).
+     */
     public static final String ADAPTER_SOURCE_SHAPE = "ADAPTER_SOURCE_SHAPE";
 
     /**
      * The registry one-to-one rule (B9/B5): one registration per producing
      * allocation, plus the producer-less intrinsic-seed clause set
      * (admission, converse, and the pinned declared signature of the two
-     * conversion intrinsics).
+     * conversion intrinsics) and the dynamic-materialization clause set
+     * (ISSUE-0674): a {@code DynamicFunctionValue} key is admissible
+     * exactly when the op its record names produces that key identity and
+     * the key carries no static producing position (no closure, group,
+     * adapt, or export-read production, no function-typed
+     * {@code HOST_TO_DEAL} crossing input, and no producer-less seed
+     * {@code BINDING_INIT} operand; a member read with a function-typed
+     * result is one of the dynamic producer arms, so it is not a static
+     * position). The producer-less test
+     * carries the identity-preserving-load exclusion: a load naming the
+     * seed {@code BINDING_INIT}'s {@code {binding, generation}} that
+     * publishes that init's operand identity is not a producing position,
+     * while a load naming any other binding or generation is.
      */
     public static final String REGISTRY_ONE_TO_ONE = "REGISTRY_ONE_TO_ONE";
 
@@ -2019,6 +2040,7 @@ public final class BindingsProductionValidator {
     // =========================================================================
 
     private static Optional<CompilerDiagnostic> checkAdapterSourceShape(Model model) {
+        ProductionFacts facts = null;
         for (SemanticOp op : model.unit.ops()) {
             if (!(op.payload() instanceof KindPayload.FunctionAdaptPayload adapt)) {
                 continue;
@@ -2044,6 +2066,35 @@ public final class BindingsProductionValidator {
                         + " operands (VALUE carries exactly one operand)");
                 }
                 ValueId operand = op.operands().get(0);
+                if (facts == null) {
+                    facts = productionFacts(model);
+                }
+                // The VALUE-over-intrinsic exemption (the intrinsic-load
+                // refinement): the adapted declaration's operand is the
+                // seeded intrinsic identity itself — the shape map's
+                // intrinsic arm wires the identity, never a load of a user
+                // binding — so a value-position load of the same intrinsic
+                // elsewhere in the unit (an identity-preserving load of the
+                // seeded binding) does not turn it into a load operand. The
+                // exemption is closed to that operand shape: a proof
+                // recorded for it must name the seeded binding/generation,
+                // and every other VALUE operand keeps the landed proof
+                // rule.
+                if (seedAdmittedIntrinsicKey(model, facts, operand.id())) {
+                    BindingSite seeded = facts.seedInitsOf().get(operand.id());
+                    if (adapt.proof() != null
+                            && (seeded == null
+                                || !adapt.proof().binding().equals(seeded.binding())
+                                || adapt.proof().generation() != seeded.generation())) {
+                        return fail(model, ADAPTER_SOURCE_SHAPE, "the VALUE adapter op "
+                            + op.opId() + " over the seeded intrinsic identity " + operand
+                            + " carries proof {" + adapt.proof().binding() + ", "
+                            + adapt.proof().generation() + "} naming no seeded binding/"
+                            + "generation (a proof over the intrinsic function value must "
+                            + "name the seeded binding/generation)");
+                    }
+                    continue;
+                }
                 List<SemanticOp> producingLoads = new ArrayList<>();
                 List<SemanticOp> producingOthers = new ArrayList<>();
                 for (SemanticOp other : model.unit.ops()) {
@@ -2119,24 +2170,92 @@ public final class BindingsProductionValidator {
     // REGISTRY_ONE_TO_ONE
     // =========================================================================
 
-    private static Optional<CompilerDiagnostic> checkRegistryOneToOne(Model model) {
+    /**
+     * The producing-position facts of one unit: the shared input of the
+     * {@code REGISTRY_ONE_TO_ONE} clauses and of the
+     * {@code ADAPTER_SOURCE_SHAPE} VALUE-over-intrinsic exemption.
+     *
+     * @param closureProductions    CLOSURE_NEW results per key
+     * @param adaptProductions      FUNCTION_ADAPT results per key
+     * @param groupProductions      RECURSIVE_GROUP_INIT member identities per key
+     * @param memberReadProductions member-read result identities per key
+     * @param exportReadProductions EXPORT_READ value identities per key
+     * @param boundaryInputs        every HOST_TO_DEAL crossing input per key
+     * @param functionBoundaryInputs the function-typed HOST_TO_DEAL crossing inputs per key
+     * @param seedInits             the producer-less seed BINDING_INITs per operand identity
+     * @param seedInitsOf           the {@code {binding, generation}} of the seed init of an
+     *                              init operand identity (the first, diagnostic-order entry)
+     * @param producingValues       every identity produced by an op of the unit under the
+     *                              identity-preserving-load exclusion
+     */
+    private record ProductionFacts(
+            Map<Long, Integer> closureProductions,
+            Map<Long, Integer> adaptProductions,
+            Map<Long, Integer> groupProductions,
+            Map<Long, Integer> memberReadProductions,
+            Map<Long, Integer> exportReadProductions,
+            Map<Long, Integer> boundaryInputs,
+            Map<Long, Integer> functionBoundaryInputs,
+            Map<Long, Integer> seedInits,
+            Map<Long, BindingSite> seedInitsOf,
+            Set<Long> producingValues) {
+
+        /** The DEAL-op production count of one key (closure, adapt, group, and read positions). */
+        int dealProductions(long key) {
+            return closureProductions.getOrDefault(key, 0)
+                + adaptProductions.getOrDefault(key, 0)
+                + groupProductions.getOrDefault(key, 0)
+                + memberReadProductions.getOrDefault(key, 0)
+                + exportReadProductions.getOrDefault(key, 0);
+        }
+
+        /**
+         * The static producing positions of a key whose registration is
+         * {@code DynamicFunctionValue}: a closure, group, or adapt
+         * production or an {@code EXPORT_READ} value. A member read with a
+         * function-typed result is one of the dynamic producer arms (the
+         * read allocates the identity the dynamic record keys), so it is
+         * not a static producing position.
+         */
+        int staticProductions(long key) {
+            return closureProductions.getOrDefault(key, 0)
+                + adaptProductions.getOrDefault(key, 0)
+                + groupProductions.getOrDefault(key, 0)
+                + exportReadProductions.getOrDefault(key, 0);
+        }
+    }
+
+    /**
+     * The producing positions of the unit's identities. The producer-less
+     * test of the intrinsic-seed clauses carries the identity-preserving
+     * load exclusion (the intrinsic-load refinement): a
+     * {@code BINDING_LOAD} whose payload names a seed {@code BINDING_INIT}'s
+     * {@code {binding, generation}} and whose result identity is that
+     * init's operand identity is not a producing position — the load
+     * republishes the allocation identity the seed init created. The
+     * exclusion is closed: every other op result stays a producing
+     * position, including a {@code BINDING_LOAD} naming any other binding
+     * or generation (a closure, adapt, group, read, or call production of
+     * the seeded identity also stays one), so the seeded operand's seed
+     * clause fails closed for them.
+     */
+    private static ProductionFacts productionFacts(Model model) {
         // Production counts per key: CLOSURE_NEW results, FUNCTION_ADAPT
         // results, group members, member/export reads, and HOST_TO_DEAL
         // boundary inputs (the producing host crossing).
         Map<Long, Integer> closureProductions = new LinkedHashMap<>();
         Map<Long, Integer> adaptProductions = new LinkedHashMap<>();
         Map<Long, Integer> groupProductions = new LinkedHashMap<>();
-        Map<Long, Integer> readProductions = new LinkedHashMap<>();
+        Map<Long, Integer> memberReadProductions = new LinkedHashMap<>();
+        Map<Long, Integer> exportReadProductions = new LinkedHashMap<>();
         Map<Long, Integer> boundaryInputs = new LinkedHashMap<>();
-        // Every value identity produced by an op of the unit: the
-        // producer-less test of the intrinsic-seed clauses (a seed
-        // init's operand is the result of no op — the seeded identity is
-        // allocated without a producing op).
-        Set<Long> producedValues = new LinkedHashSet<>();
-        // The seed writes per producer-less init operand: one BINDING_INIT
-        // per admitted seeded key, counted for the admission/converse
-        // clauses below.
-        Map<Long, Integer> seedInits = new LinkedHashMap<>();
+        Map<Long, Integer> functionBoundaryInputs = new LinkedHashMap<>();
+        // Every value identity produced by an op that is not a
+        // BINDING_LOAD: the seed init candidates' operand test (a seed
+        // init's operand is the result of no op other than an
+        // identity-preserving load of that init's own cell).
+        Set<Long> nonLoadProducedValues = new LinkedHashSet<>();
+        List<SemanticOp> loads = new ArrayList<>();
         for (SemanticOp op : model.unit.ops()) {
             switch (op.kind()) {
                 case CLOSURE_NEW -> {
@@ -2151,12 +2270,12 @@ public final class BindingsProductionValidator {
                 }
                 case MEMBER_READ -> {
                     if (op.result() instanceof ValueId value) {
-                        readProductions.merge(value.id(), 1, Integer::sum);
+                        memberReadProductions.merge(value.id(), 1, Integer::sum);
                     }
                 }
                 case EXPORT_READ -> {
                     if (op.payload() instanceof KindPayload.ExportReadPayload export) {
-                        readProductions.merge(export.value().id(), 1, Integer::sum);
+                        exportReadProductions.merge(export.value().id(), 1, Integer::sum);
                     }
                 }
                 case BOUNDARY -> {
@@ -2170,6 +2289,10 @@ public final class BindingsProductionValidator {
                     if (op.payload() instanceof KindPayload.BoundaryPayload boundary
                             && boundary.kind() == BoundaryKind.HOST_TO_DEAL) {
                         boundaryInputs.merge(boundary.input().id(), 1, Integer::sum);
+                        if (boundary.descriptor() instanceof RuntimeDescriptor.Func) {
+                            functionBoundaryInputs.merge(boundary.input().id(), 1,
+                                Integer::sum);
+                        }
                     }
                 }
                 default -> {
@@ -2177,7 +2300,11 @@ public final class BindingsProductionValidator {
                 }
             }
             if (op.result() instanceof ValueId produced) {
-                producedValues.add(produced.id());
+                if (op.kind() == SemanticOpKind.BINDING_LOAD) {
+                    loads.add(op);
+                } else {
+                    nonLoadProducedValues.add(produced.id());
+                }
             }
         }
         for (SemanticOp op : model.unit.ops()) {
@@ -2191,24 +2318,94 @@ public final class BindingsProductionValidator {
                 }
             }
         }
+        // The seed init candidates: a BINDING_INIT whose operand identity is
+        // the result of no op other than an identity-preserving load of that
+        // init's own cell.
+        Map<Long, BindingSite> seedInitsOf = new LinkedHashMap<>();
         for (SemanticOp op : model.unit.ops()) {
             if (op.kind() == SemanticOpKind.BINDING_INIT
                     && op.payload() instanceof KindPayload.BindingInitPayload init
-                    && !producedValues.contains(init.value().id())) {
+                    && !nonLoadProducedValues.contains(init.value().id())) {
+                seedInitsOf.putIfAbsent(init.value().id(),
+                    new BindingSite(init.binding(), init.generation()));
+            }
+        }
+        // The identity-preserving loads: a BINDING_LOAD naming a seed init's
+        // {binding, generation} whose result identity is that init's operand
+        // identity.
+        Set<Long> preservedValues = new LinkedHashSet<>();
+        for (SemanticOp op : loads) {
+            if (!(op.result() instanceof ValueId produced)
+                    || !(op.payload() instanceof KindPayload.BindingLoadPayload load)) {
+                continue;
+            }
+            BindingSite seed = seedInitsOf.get(produced.id());
+            if (seed != null && seed.binding().equals(load.binding())
+                    && seed.generation() == load.generation()) {
+                preservedValues.add(produced.id());
+            }
+        }
+        Set<Long> producingValues = new LinkedHashSet<>(nonLoadProducedValues);
+        for (SemanticOp op : loads) {
+            if (op.result() instanceof ValueId produced
+                    && !preservedValues.contains(produced.id())) {
+                producingValues.add(produced.id());
+            }
+        }
+        // The seed writes per producer-less init operand: one BINDING_INIT
+        // per admitted seeded key, counted for the admission/converse
+        // clauses below.
+        Map<Long, Integer> seedInits = new LinkedHashMap<>();
+        for (SemanticOp op : model.unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && !producingValues.contains(init.value().id())) {
                 seedInits.merge(init.value().id(), 1, Integer::sum);
             }
         }
+        return new ProductionFacts(closureProductions, adaptProductions, groupProductions,
+            memberReadProductions, exportReadProductions, boundaryInputs,
+            functionBoundaryInputs, seedInits, seedInitsOf, producingValues);
+    }
+
+    /**
+     * True iff the identity is a seed-admitted intrinsic key: the unit's
+     * registration is an {@code IntrinsicFunction} carrying the kind's
+     * pinned declared signature, exactly one seed {@code BINDING_INIT}
+     * carries the identity as its operand, the identity contributes no
+     * other producing position (no closure/adapt/group/read production and
+     * no function-typed host crossing), and every op publishing it is an
+     * identity-preserving load of the seeded binding (or no op publishes
+     * it at all). The operand of such a key is the intrinsic function
+     * value itself, never a load of a user binding.
+     */
+    private static boolean seedAdmittedIntrinsicKey(Model model, ProductionFacts facts,
+                                                    long key) {
+        if (facts.dealProductions(key) != 0
+                || facts.functionBoundaryInputs().getOrDefault(key, 0) != 0
+                || facts.seedInits().getOrDefault(key, 0) != 1
+                || facts.producingValues().contains(key)) {
+            return false;
+        }
+        return model.unit.functionBindings()
+                .get(new FunctionAllocationIdentity(key))
+                instanceof FunctionExecutionBinding.IntrinsicFunction intrinsic
+            && intrinsic.descriptor().equals(intrinsic.kind().declaredSignature());
+    }
+
+    private static Optional<CompilerDiagnostic> checkRegistryOneToOne(Model model) {
+        ProductionFacts facts = productionFacts(model);
+        Map<Long, Integer> boundaryInputs = facts.boundaryInputs();
+        Map<Long, Integer> seedInits = facts.seedInits();
         // Every registry key is produced by exactly one producing
         // allocation (or one host crossing), or — for the producer-less
         // intrinsic seed — by exactly one seed BINDING_INIT and no other
-        // producing position.
+        // producing position; a dynamic registration names its single
+        // producing op and carries no static producing position.
         for (Map.Entry<FunctionAllocationIdentity, FunctionExecutionBinding> entry
                 : model.unit.functionBindings().entrySet()) {
             long key = entry.getKey().id();
-            int count = closureProductions.getOrDefault(key, 0)
-                + adaptProductions.getOrDefault(key, 0)
-                + groupProductions.getOrDefault(key, 0)
-                + readProductions.getOrDefault(key, 0);
+            int count = facts.dealProductions(key);
             if (entry.getValue() instanceof FunctionExecutionBinding.HostFunctionValue) {
                 int boundaryCount = boundaryInputs.getOrDefault(key, 0);
                 if (count != 0 || boundaryCount != 1) {
@@ -2244,6 +2441,51 @@ public final class BindingsProductionValidator {
                         + ") which is not the kind's pinned declared signature ("
                         + intrinsic.kind().declaredSignature().canonicalSpecText() + ")");
                 }
+            } else if (entry.getValue() instanceof FunctionExecutionBinding.DynamicFunctionValue
+                    dynamic) {
+                // The dynamic-materialization admission: a key whose
+                // binding is DynamicFunctionValue is admissible exactly
+                // when the op its record names produces that key identity
+                // and the key carries no static producing position (no
+                // closure/group/adapt/export-read production, no
+                // function-typed HOST_TO_DEAL crossing input, and no
+                // producer-less seed BINDING_INIT operand). A member read
+                // with a function-typed result is one of the dynamic
+                // producer arms, not a static position.
+                int staticCount = facts.staticProductions(key);
+                int boundaryCount = facts.functionBoundaryInputs().getOrDefault(key, 0);
+                int seedCount = seedInits.getOrDefault(key, 0);
+                if (staticCount != 0 || boundaryCount != 0 || seedCount != 0) {
+                    return fail(model, REGISTRY_ONE_TO_ONE, "the DynamicFunctionValue key "
+                        + entry.getKey() + " is produced by " + staticCount + " static "
+                        + "producing op(s) (a closure, group, adapt, or export-read "
+                        + "production), " + boundaryCount + " function-typed host "
+                        + "crossing(s), and " + seedCount + " seed BINDING_INIT(s) (a "
+                        + "dynamic registration resolves its execution class from the "
+                        + "materialized carrier at execution, so its key carries no static "
+                        + "producing position)");
+                }
+                SemanticOp producing = null;
+                for (SemanticOp op : model.unit.ops()) {
+                    if (op.opId().equals(dynamic.materializingOpId())) {
+                        producing = op;
+                        break;
+                    }
+                }
+                if (producing == null) {
+                    return fail(model, REGISTRY_ONE_TO_ONE, "the DynamicFunctionValue key "
+                        + entry.getKey() + " names materializing op "
+                        + dynamic.materializingOpId() + ", which is no op of the unit (the "
+                        + "recorded op is the registration's producing position)");
+                }
+                ValueId identity = producing.result() instanceof ValueId value ? value : null;
+                if (identity == null || identity.id() != key) {
+                    return fail(model, REGISTRY_ONE_TO_ONE, "the DynamicFunctionValue key "
+                        + entry.getKey() + " names materializing op "
+                        + dynamic.materializingOpId() + " whose result identity is not "
+                        + "that key (the recorded op is the registration's producing "
+                        + "position)");
+                }
             } else {
                 if (count != 1) {
                     return fail(model, REGISTRY_ONE_TO_ONE, "the key " + entry.getKey()
@@ -2253,10 +2495,11 @@ public final class BindingsProductionValidator {
             }
         }
         // The converse clause: every BINDING_INIT whose init operand
-        // identity is the result of no op of the unit must be keyed by
-        // exactly one IntrinsicFunction registration in the same unit
-        // and must not be any HOST_TO_DEAL crossing input — the seed
-        // surface is the only admitted producer-less key.
+        // identity is the result of no op of the unit (the
+        // identity-preserving loads of the seeded binding excluded) must
+        // be keyed by exactly one IntrinsicFunction registration in the
+        // same unit and must not be any HOST_TO_DEAL crossing input — the
+        // seed surface is the only admitted producer-less key.
         for (Map.Entry<Long, Integer> entry : seedInits.entrySet()) {
             FunctionAllocationIdentity identity =
                 new FunctionAllocationIdentity(entry.getKey());

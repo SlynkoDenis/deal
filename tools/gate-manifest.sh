@@ -69,6 +69,14 @@ TEST_MAINS=(
   # (function-typed-value-materialization-and-dispatch M1/M3 items 1-2;
   # semantic-ir-construct-coverage-cutover K9 item 4).
   'fg|=== Running Dynamic Function Value Binding / Closed Shapes Tests (ISSUE-0673) ===|java -ea -cp build deal.test.DynamicFunctionValueBindingTest'
+  # ISSUE-0674 registration: the closed gate of the function-typed
+  # materialization (the producing-position clause, the callee-position
+  # exclusivity, and the dynamic cell family) plus the intrinsic-load and
+  # VALUE-over-intrinsic refinements the identity-preserving function-typed
+  # load of the seeded intrinsic binding requires
+  # (function-typed-value-materialization-and-dispatch M2 item 4, M3 items 3-6;
+  # conversion-intrinsic-function-values J1).
+  'fg|=== Running Dynamic Function Value Gate / Identity-Preserving Intrinsic Load Tests (ISSUE-0674) ===|java -ea -cp build deal.semantic.DynamicFunctionValueGateTest'
   'fg|=== Running Protected Path Ops Tests (ISSUE-0262) ===|java -ea -cp build deal.test.ProtectedPathOpsTest'
   'fg|=== Running Identity Carrier Package Tests (ISSUE-0309) ===|java -ea -cp build deal.test.CanonicalIdentityTest'
   'fg|=== Running Sidecar Schema Validator Tests (ISSUE-0348) ===|java -ea -cp build deal.test.conformance.SidecarSchemaValidatorTest'

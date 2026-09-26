@@ -130,10 +130,16 @@ public final class SemanticIrValidator {
      * correlation (ISSUE-0531): the materializing crossing op id must
      * name exactly the producing host crossing whose input identity keys
      * the registration and whose checked descriptor the registration
-     * carries — and the closed {@code DynamicFunctionValue} correlation
+     * carries — the closed {@code DynamicFunctionValue} correlation
      * (ISSUE-0673): the registered producing op id must name an op of
      * the unit whose result identity is the registration key and whose
-     * result descriptor is the registered descriptor.
+     * result descriptor is the registered descriptor — and the closed
+     * {@code DynamicFunctionValue} callee-position exclusivity
+     * (ISSUE-0674): such a registration is admissible exactly as a
+     * {@code Dynamic} call/await callee, so an {@code Indirect} callee
+     * identity resolving to it (or an inline {@code Static} naming it,
+     * already rejected by the closed nested shape enumeration) is a
+     * producer defect.
      */
     public static final String R_FUNCTION_BINDING = "R-FUNCTION-BINDING";
 
@@ -3018,6 +3024,38 @@ public final class SemanticIrValidator {
                     origin(R_FUNCTION_BINDING, "the DynamicFunctionValue registration key "
                         + binding.allocationId() + " descriptor does not equal its "
                         + "producing op's result descriptor"));
+            }
+        }
+        // Direction (iv): the DynamicFunctionValue callee-position
+        // exclusivity. A registration whose execution class is resolved
+        // from the materialized carrier at execution names no statically
+        // known class, so it is a Dynamic-arm callee only: a CALL or
+        // ASYNC_START whose callee resolves to it through a static or
+        // indirect callee position is a producer defect (the lowering
+        // produces the Dynamic callee for exactly these values, and the
+        // runtime dispatch would otherwise have to invent a class for a
+        // callee the lowering never classified). The static callee
+        // spelling is rejected earlier by the closed nested shape
+        // enumeration (R-ENUM); this clause closes the indirect
+        // identity-resolution route and keeps the dynamic return-cell arm
+        // the registration's only cell family.
+        for (RawOp op : unit.ops()) {
+            SemanticOpKind kind = enumByName(SemanticOpKind.class, op.kind());
+            if (kind != SemanticOpKind.CALL && kind != SemanticOpKind.ASYNC_START) {
+                continue;
+            }
+            if (isDynamicCallee(op)) {
+                continue;
+            }
+            BindingInfo callee = resolveCalleeBinding(unit, op, Map.of());
+            if (callee != null && "dynamicFunctionValue".equals(callee.shape())) {
+                return fail(unit, facts, R_FUNCTION_BINDING,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_FUNCTION_BINDING, "the " + kind + " op " + op.opId()
+                        + " resolves its callee to a DynamicFunctionValue registration "
+                        + "(a dynamic registration is admissible exactly as a Dynamic "
+                        + "call/await callee; a callee whose static execution class is "
+                        + "not known takes CallCallee.Dynamic)"));
             }
         }
         return Optional.empty();
