@@ -21,6 +21,8 @@ import deal.lexer.LexResult;
 import deal.lexer.Lexer;
 import deal.parser.ParseResult;
 import deal.parser.Parser;
+import deal.semantic.ir.BindingId;
+import deal.semantic.ir.BindingImmutabilityProof;
 import deal.semantic.ir.BlockId;
 import deal.semantic.ir.BoundaryKind;
 import deal.semantic.ir.ClassFactoryRegistry;
@@ -169,6 +171,25 @@ public class IntrinsicValueMaterializationTest {
         let wide: (x: number, y: number) => int = int;
         let x: int = 1;
         let r: int = x;
+
+        export function main(): null {
+          return null;
+        }
+        """;
+
+    /**
+     * The combined drive (J6 item 4): one unit carrying both a
+     * value-position use of the {@code int} intrinsic (the typed binding
+     * whose load republishes the seeded identity, its declaration's
+     * re-publication of the seed write, and the reference-identity drives)
+     * and the adapted declaration over the same intrinsic (the
+     * producer-less {@code AdaptSourceRef.Value} operand naming the seeded
+     * identity).
+     */
+    private static final String COMBINED_SOURCE = """
+        let f: (x: number) => int = int;
+        let wide: (x: number, y: number) => int = int;
+        let same: boolean = f === f;
 
         export function main(): null {
           return null;
@@ -387,6 +408,10 @@ public class IntrinsicValueMaterializationTest {
         return "b" + bindingId + "g" + generation;
     }
 
+    /** One binding cell (a binding plus its generation). */
+    private record CellRef(BindingId binding, long generation) {
+    }
+
     // =========================================================================
     // 1. The seeded identity's function-typed load (J1)
     // =========================================================================
@@ -580,6 +605,192 @@ public class IntrinsicValueMaterializationTest {
         checkEq(2, comparisons, "the program carries the two reference comparisons");
     }
 
+    /**
+     * The combined value-position + adapted-declaration drive (J6 item 4):
+     * the unit that carries the seed write, the identity-preserving load of
+     * the seeded binding and the adapted declaration over the same seeded
+     * identity still passes {@code ADAPTER_SOURCE_SHAPE} under the
+     * VALUE-over-intrinsic exemption — the declaration's re-publication of
+     * the seed write is not a second seed write — and the seed-write
+     * predicate stays closed: a proof over the seeded operand naming
+     * another intrinsic's seed binding refuses the exemption, and another
+     * producing op over the seeded identity still fails the seed clause.
+     * The landed mis-named-load negative (a unit carrying no
+     * identity-preserving load of the seeded cell) is pinned by
+     * {@code DynamicFunctionValueGateTest.testAdapterValueOverIntrinsicExemption}.
+     */
+    private static void testCombinedValueAndAdapterAdmission() {
+        System.out.println("-- J6.4: the combined value-position + adapted-declaration "
+            + "unit, and the closed seed-write predicate --");
+        Fixture fixture = fixture(COMBINED_SOURCE, "combined value and adapter");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "combined value and adapter");
+        if (raw == null) {
+            return;
+        }
+        LoweredModuleUnit unit = raw.unit();
+
+        long seed = seedIdentity(unit, IntrinsicKind.INT_CONVERT);
+        check(seed > 0, "the combined unit carries the int seed registration");
+        if (seed < 0) {
+            return;
+        }
+        int intrinsicRegistrations = 0;
+        int dynamicRegistrations = 0;
+        for (FunctionExecutionBinding binding : unit.functionBindings().values()) {
+            if (binding instanceof FunctionExecutionBinding.IntrinsicFunction) {
+                intrinsicRegistrations++;
+            }
+            if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue) {
+                dynamicRegistrations++;
+            }
+        }
+        checkEq(2, intrinsicRegistrations,
+            "the combined unit carries exactly the two seed IntrinsicFunction "
+                + "registrations (one per conversion intrinsic)");
+        checkEq(0, dynamicRegistrations,
+            "no DynamicFunctionValue is registered for the intrinsic load");
+
+        // The trigger of the refined predicate: the seeded identity carries
+        // two BINDING_INITs (the seed write and the value-position
+        // declaration's re-publication) while exactly one of them lands on
+        // the seeded cell the identity-preserving load reads.
+        SemanticOp seedInit = seedInit(unit, seed);
+        check(seedInit != null, "the combined unit carries the seed BINDING_INIT");
+        if (seedInit == null) {
+            return;
+        }
+        KindPayload.BindingInitPayload seedWrite =
+            (KindPayload.BindingInitPayload) seedInit.payload();
+        int initsOverSeed = 0;
+        int initOnSeedCell = 0;
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && init.value().id() == seed) {
+                initsOverSeed++;
+                if (init.binding().equals(seedWrite.binding())
+                        && init.generation() == seedWrite.generation()) {
+                    initOnSeedCell++;
+                }
+            }
+        }
+        checkEq(2, initsOverSeed, "the value-position declaration re-publishes the "
+            + "seed write (the combined unit carries the seed BINDING_INIT plus the "
+            + "declaration's BINDING_INIT over the seeded identity)");
+        checkEq(1, initOnSeedCell, "exactly one of those writes lands on the seeded "
+            + "cell the identity-preserving load reads (the seed write)");
+        boolean seedCellLoad = false;
+        for (SemanticOp producer : producersOf(unit, seed)) {
+            check(producer.kind() == SemanticOpKind.BINDING_LOAD,
+                "the only producer of the seeded identity is an identity-preserving "
+                    + "load (got " + producer.kind() + " at " + producer.opId() + ")");
+            KindPayload.BindingLoadPayload load =
+                (KindPayload.BindingLoadPayload) producer.payload();
+            if (load.binding().equals(seedWrite.binding())
+                    && load.generation() == seedWrite.generation()) {
+                seedCellLoad = true;
+            }
+        }
+        check(seedCellLoad, "the value-position binding's typed load reads the seed "
+            + "BINDING_INIT's own cell");
+
+        // The adapted declaration's producer-less VALUE operand is the
+        // seeded identity itself, with no proof (the B7/B8 creation shape).
+        SemanticOp adaptOp = null;
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.FUNCTION_ADAPT) {
+                adaptOp = op;
+            }
+        }
+        check(adaptOp != null, "the combined unit produces its FUNCTION_ADAPT");
+        if (adaptOp == null) {
+            return;
+        }
+        KindPayload.FunctionAdaptPayload adapt =
+            (KindPayload.FunctionAdaptPayload) adaptOp.payload();
+        check(adapt.source() instanceof deal.semantic.ir.AdaptSourceRef.Value value
+                && value.value().id() == seed && adapt.proof() == null,
+            "the adapter's operand is the seeded identity itself with no proof");
+
+        // The combined unit passes both closed gates: REGISTRY_ONE_TO_ONE
+        // (the seed write is counted on the seeded cell) and
+        // ADAPTER_SOURCE_SHAPE (the VALUE-over-intrinsic exemption).
+        Optional<CompilerDiagnostic> bindings = BindingsProductionValidator.validate(
+            unit, raw.table(), raw.lowerer().pinnedWriteFacts());
+        check(bindings.isEmpty(), "the combined unit passes the closed bindings gate "
+            + "(REGISTRY_ONE_TO_ONE and ADAPTER_SOURCE_SHAPE): "
+            + bindings.map(CompilerDiagnostic::message).orElse("admission"));
+        Optional<CompilerDiagnostic> schema =
+            SemanticIrValidator.validate(unit, facts(unit));
+        check(schema.isEmpty(), "the combined unit passes the closed schema gate: "
+            + schema.map(CompilerDiagnostic::message).orElse("admission"));
+
+        // Both targets publish the memoized carrier at the adapter's
+        // producer-less VALUE operand (never a slot read of the seeded
+        // identity, which the value-position load fills).
+        String lua = LuaSemanticEmitter.emitProject(projectOf(unit),
+            Map.of(MODULE, raw.table()),
+            Map.of(MODULE, new ClassFactoryRegistry(Map.of())));
+        String jvm = JvmSemanticEmitter.emitProject(projectOf(unit),
+            Map.of(MODULE, raw.table()),
+            Map.of(MODULE, new ClassFactoryRegistry(Map.of()))).source();
+        check(lua.contains("__value = __intrinsicFn(\"INT_CONVERT\", "
+                + "\"function(number;int)\", \"(number)->int\")"),
+            "the LuaJIT combined artifact's adapter VALUE operand publishes the "
+                + "memoized carrier");
+        check(!lua.contains("__value = S.v" + seed),
+            "the LuaJIT combined artifact's adapter VALUE operand is never a slot "
+                + "read of the seeded identity");
+        check(jvm.contains("JvmRuntime.intrinsic(\"INT_CONVERT\", "
+                + "\"function(number;int)\", \"(number)->int\"), null, null"),
+            "the JVM combined artifact's adapter VALUE operand publishes the "
+                + "memoized carrier");
+        check(!jvm.contains("v" + seed + ", null, null"),
+            "the JVM combined artifact's adapter VALUE operand is never a slot read "
+                + "of the seeded identity");
+
+        // The exemption's proof arm stays closed: a proof recorded over the
+        // seeded intrinsic operand must name the seeded binding/generation.
+        CellRef seedCell = seedCellOf(unit, seed);
+        check(seedCell != null && seedCell.binding().equals(seedWrite.binding())
+                && seedCell.generation() == seedWrite.generation(),
+            "the seed write is the first BINDING_INIT over the seeded identity");
+        long otherSeed = seedIdentity(unit, IntrinsicKind.NUMBER_CONVERT);
+        CellRef otherSeedCell = otherSeed > 0 ? seedCellOf(unit, otherSeed) : null;
+        check(otherSeedCell != null,
+            "the combined unit carries the other intrinsic seed binding");
+        if (seedCell == null || otherSeedCell == null) {
+            return;
+        }
+        SemanticOp misProved = adaptWithProof(adaptOp, adapt,
+            new BindingImmutabilityProof(otherSeedCell.binding(),
+                otherSeedCell.generation()));
+        LoweredModuleUnit misProvedUnit = replaceOp(unit, adaptOp, misProved);
+        Optional<CompilerDiagnostic> misProvedFailure = BindingsProductionValidator
+            .validate(misProvedUnit, raw.table(), raw.lowerer().pinnedWriteFacts());
+        check(misProvedFailure.isPresent()
+                && "E6005".equals(misProvedFailure.get().code())
+                && misProvedFailure.get().message().contains("ADAPTER_SOURCE_SHAPE"),
+            "a proof over the seeded intrinsic operand naming another intrinsic's "
+                + "seed binding fails the exemption's proof arm: "
+                + misProvedFailure.map(CompilerDiagnostic::message).orElse("admission"));
+
+        // The seed clause is load-bearing for the combined unit: another op
+        // producing the seeded identity still fails REGISTRY_ONE_TO_ONE.
+        LoweredModuleUnit doctored = withOp(unit, exportReadOf(seed, unit));
+        Optional<CompilerDiagnostic> doctoredFailure = BindingsProductionValidator
+            .validate(doctored, raw.table(), raw.lowerer().pinnedWriteFacts());
+        check(doctoredFailure.isPresent()
+                && "E6005".equals(doctoredFailure.get().code())
+                && doctoredFailure.get().message().contains("REGISTRY_ONE_TO_ONE"),
+            "the combined unit whose seeded identity is also produced by an "
+                + "EXPORT_READ still fails the seed clause: "
+                + doctoredFailure.map(CompilerDiagnostic::message).orElse("admission"));
+    }
+
     /** A doctored EXPORT_READ op publishing the seeded identity (the T2 negative). */
     private static SemanticOp exportReadOf(long identity, LoweredModuleUnit unit) {
         SemanticOp template = unit.ops().get(0);
@@ -614,6 +825,53 @@ public class IntrinsicValueMaterializationTest {
             max = Math.max(max, op.opId().id());
         }
         return max + 1;
+    }
+
+    /**
+     * The seed write's cell: the first {@code BINDING_INIT} over the seeded
+     * identity.
+     */
+    private static CellRef seedCellOf(LoweredModuleUnit unit, long seed) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && init.value().id() == seed) {
+                return new CellRef(init.binding(), init.generation());
+            }
+        }
+        return null;
+    }
+
+    /** The adapter op with its recorded proof replaced (the doctor). */
+    private static SemanticOp adaptWithProof(SemanticOp adaptOp,
+            KindPayload.FunctionAdaptPayload adapt, BindingImmutabilityProof proof) {
+        KindPayload.FunctionAdaptPayload replaced = new KindPayload.FunctionAdaptPayload(
+            adapt.sourceSignature(), adapt.targetSignature(), adapt.mode(), adapt.source(),
+            proof);
+        return rebuild(adaptOp, replaced, adaptOp.resultType());
+    }
+
+    /** One op rebuilt over a new payload (the contract digest recomputed). */
+    private static SemanticOp rebuild(SemanticOp op, KindPayload payload,
+            OpResultType resultType) {
+        OperationContractSnapshot contract = contractFor(op.kind(), payload, resultType,
+            op.operandTypes(), op.failurePolicy());
+        return new SemanticOp(op.opId(), op.kind(), op.origin(), op.result(), resultType,
+            op.operands(), op.operandTypes(), payload, op.failurePolicy(), contract);
+    }
+
+    /** The unit with one op replaced in place (the doctor). */
+    private static LoweredModuleUnit replaceOp(LoweredModuleUnit unit, SemanticOp target,
+            SemanticOp replacement) {
+        List<SemanticOp> ops = new ArrayList<>();
+        for (SemanticOp op : unit.ops()) {
+            ops.add(op == target ? replacement : op);
+        }
+        return new LoweredModuleUnit(unit.formatVersion(), unit.semanticProfile(),
+            unit.moduleId(), unit.interfaceHash(), unit.loweringContextHash(),
+            unit.requiredCapabilities(), unit.constructCoverage(), unit.classLayouts(),
+            unit.functions(), unit.moduleInit(), unit.exportPlan(),
+            unit.functionBindings(), ops);
     }
 
     /** The unit with one extra op appended (the doctor). */
@@ -1230,6 +1488,7 @@ public class IntrinsicValueMaterializationTest {
     public static void main(String[] args) throws Exception {
         testSeededIdentityPreservation();
         testCarrierSites();
+        testCombinedValueAndAdapterAdmission();
         testConsumerDrives();
         testCarriedSignatureIsDeclared();
         System.out.println();

@@ -1158,6 +1158,11 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # identity), the oracle keys the seeded value to its IntrinsicFunction
   # registration with the declared-signature function views, and the
   # oracle and both artifacts observe one object per intrinsic through the
-  # landed function row.
+  # landed function row. The combined value-position + adapted-declaration
+  # unit also passes both closed gates under J1's VALUE-over-intrinsic
+  # exemption, through the one seed-write predicate both clauses consume
+  # (the value-position declaration's re-publication of the seed write is
+  # not a second seed write), while the exemption's proof arm and the seed
+  # clause stay closed for the doctored units.
   'fg|=== Running Intrinsic Value Materialization Tests (ISSUE-0676) ===|java -ea -cp build deal.semantic.IntrinsicValueMaterializationTest'
 )

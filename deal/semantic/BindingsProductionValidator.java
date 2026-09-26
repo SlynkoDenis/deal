@@ -2198,7 +2198,8 @@ public final class BindingsProductionValidator {
      *                              reads (that identity's seeded binding/generation)
      * @param preservedInits        the BINDING_INITs landing on a preserved cell per identity
      *                              (the seed write; the other inits over the identity are the
-     *                              declaration's re-publications of it)
+     *                              declaration's re-publications of it; consumed through
+     *                              {@link ProductionFacts#seedWrites(long)})
      * @param producingValues       every identity produced by an op of the unit under the
      *                              identity-preserving-load exclusion
      */
@@ -2223,6 +2224,26 @@ public final class BindingsProductionValidator {
                 + groupProductions.getOrDefault(key, 0)
                 + memberReadProductions.getOrDefault(key, 0)
                 + exportReadProductions.getOrDefault(key, 0);
+        }
+
+        /**
+         * The seed writes of one key — the one seed-write notion of the
+         * {@code IntrinsicFunction}-key admission clauses. An
+         * identity-preserving load of the seeded identity reads the seeded
+         * binding's own cell, so the identity's seed write is the init
+         * landing on that cell; a later {@code BINDING_INIT} storing the
+         * same identity into another binding's cell is the alias
+         * declaration's re-publication of that one seed write, not a second
+         * seed write. An identity no preserved load publishes counts every
+         * producer-less init over it (the landed {@code seedInits}
+         * counting). A key whose identity a non-preserved load also
+         * publishes is inside {@code producingValues}, so it is the
+         * {@code producingValues} clause — not this count — that refuses it.
+         */
+        int seedWrites(long key) {
+            BindingSite seededCell = preservedCells.get(key);
+            return seededCell == null ? seedInits.getOrDefault(key, 0)
+                : preservedInits.getOrDefault(key, 0);
         }
 
         /**
@@ -2437,19 +2458,25 @@ public final class BindingsProductionValidator {
     /**
      * True iff the identity is a seed-admitted intrinsic key: the unit's
      * registration is an {@code IntrinsicFunction} carrying the kind's
-     * pinned declared signature, exactly one seed {@code BINDING_INIT}
-     * carries the identity as its operand, the identity contributes no
-     * other producing position (no closure/adapt/group/read production and
-     * no function-typed host crossing), and every op publishing it is an
-     * identity-preserving load of the seeded binding (or no op publishes
-     * it at all). The operand of such a key is the intrinsic function
-     * value itself, never a load of a user binding.
+     * pinned declared signature, exactly one seed write
+     * ({@link ProductionFacts#seedWrites(long)} — the seed
+     * {@code BINDING_INIT} of the seeded binding's own cell, so an alias
+     * declaration's re-publication of the identity is not a second seed
+     * write) carries the identity as its operand, the identity contributes
+     * no other producing position (no closure/adapt/group/read production
+     * and no function-typed host crossing), and every op publishing it is
+     * an identity-preserving load of the seeded binding (or no op publishes
+     * it at all). The operand of such a key is the intrinsic function value
+     * itself, never a load of a user binding. This is the same seed-write
+     * notion {@code REGISTRY_ONE_TO_ONE} admits the key by, so the two
+     * clauses cannot disagree on a unit carrying the identity-preserving
+     * load and the adapted declaration at once.
      */
     private static boolean seedAdmittedIntrinsicKey(Model model, ProductionFacts facts,
                                                     long key) {
         if (facts.dealProductions(key) != 0
                 || facts.functionBoundaryInputs().getOrDefault(key, 0) != 0
-                || facts.seedInits().getOrDefault(key, 0) != 1
+                || facts.seedWrites(key) != 1
                 || facts.producingValues().contains(key)) {
             return false;
         }
@@ -2484,21 +2511,22 @@ public final class BindingsProductionValidator {
                     intrinsic) {
                 // The intrinsic-seed admission (D13): a key whose binding
                 // is IntrinsicFunction is admissible exactly when the
-                // unit carries exactly one seed BINDING_INIT whose init
-                // operand is that key and the key contributes no other
-                // producing position (no closure/adapt/group/read
+                // unit carries exactly one seed write over that key (the
+                // seed BINDING_INIT of the seeded binding's own cell, per
+                // ProductionFacts.seedWrites) and the key contributes no
+                // other producing position (no closure/adapt/group/read
                 // production and no host crossing). The seed write is the
                 // BINDING_INIT of the seeded binding's own cell when an
                 // identity-preserving load of the key publishes it: a
                 // later BINDING_INIT storing the same identity into
                 // another binding's cell is the declaration's
                 // re-publication of the seed write and is not counted as
-                // a second seed write.
+                // a second seed write (the same predicate the
+                // ADAPTER_SOURCE_SHAPE VALUE-over-intrinsic exemption
+                // consumes).
                 int seedCount = seedInits.getOrDefault(key, 0);
                 int boundaryCount = boundaryInputs.getOrDefault(key, 0);
-                BindingSite seededCell = facts.preservedCells().get(key);
-                int seedWrites = seededCell == null ? seedCount
-                    : facts.preservedInits().getOrDefault(key, 0);
+                int seedWrites = facts.seedWrites(key);
                 if (count != 0 || boundaryCount != 0 || seedWrites != 1) {
                     return fail(model, REGISTRY_ONE_TO_ONE, "the IntrinsicFunction key "
                         + entry.getKey() + " is produced by " + count + " producing op(s), "
