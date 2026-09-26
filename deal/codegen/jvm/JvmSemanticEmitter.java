@@ -2632,8 +2632,11 @@ public final class JvmSemanticEmitter {
          * The intrinsic kind of one value identity under the strict
          * identity-preserving-load predicate (the seed and adapter carrier
          * sites): the registration must be an {@code IntrinsicFunction} and
-         * every op result publishing the identity must be an
-         * identity-preserving load of the seed init's own cell.
+         * every op result publishing the identity must be a
+         * {@code BINDING_LOAD} whose named cell's {@code BINDING_INIT}
+         * carries the identity — the seed init's own cell, or an alias
+         * cell whose init is the alias declaration's re-publication of the
+         * same identity.
          */
         private IntrinsicKind intrinsicKindOf(ValueId valueId) {
             FunctionExecutionBinding registration = null;
@@ -2693,9 +2696,10 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * True iff a seed {@code BINDING_INIT} of the closure carries the
-         * given identity as its producer-less operand and names the given
-         * cell (the identity-preserving-load test's seed position).
+         * True iff one {@code BINDING_INIT} of the cell carries the given
+         * identity: the load republishes an identity the cell already
+         * holds — the seed init's own write, or an alias declaration's
+         * re-publication of it (the identity-preserving-load test).
          */
         private boolean isSeedInitOperand(ValueId identity, BindingId binding,
                                           long generation) {
