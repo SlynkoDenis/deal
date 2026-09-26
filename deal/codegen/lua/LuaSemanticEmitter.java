@@ -947,11 +947,18 @@ public final class LuaSemanticEmitter {
             // like the surface registry (a second chunk of the same
             // process resolves the same callables).
             out.append("__stdlibEntries = __stdlibEntries or {}\n");
-            // The host-module loader of the production chunk (ISSUE-0650): a
-            // chunk with a HOST-kind import requires the deployed runtime's
-            // landed loader (__rt.load_host); the binding is emitted exactly
-            // then, so a host-free chunk keeps its self-contained prelude.
-            if (hasHostImports()) {
+            // The host-module loader of the chunk (ISSUE-0650, extended by
+            // ISSUE-0668): a project chunk whose closure carries a HOST-kind
+            // import (host or extern-C) requires the deployed runtime's landed
+            // loaders and the host-boundary cells in both modes, independent
+            // of whether the session carries the compile's declaration surface
+            // — the trace project entry's loaded surface is the scenario
+            // seam's, and its FFI arms (__hostParamCell/__hostProjectArg/
+            // __hostReturnCell, __rt.class_plan_) reference only bound
+            // helpers. A per-unit session keeps the landed gate (it carries
+            // no closure and no declaration surface), and a host-free chunk
+            // keeps its self-contained prelude.
+            if (bindsHostRuntime()) {
                 out.append("local __rt = require(\"deal.runtime\")\n");
                 out.append(HOST_BOUNDARY_PRELUDE);
             }
@@ -1200,14 +1207,23 @@ public final class LuaSemanticEmitter {
         }
 
         /**
-         * Whether the production chunk carries at least one realized host
-         * import (a HOST-kind import with the declaration surface the
-         * declared map reads).
+         * Whether the chunk carries the runtime binding and the host-boundary
+         * prelude (ISSUE-0650, extended by ISSUE-0668): a project session
+         * whose closure's op walk carries a HOST-kind import (host or
+         * extern-C), read from the closure's own {@code MODULE_IMPORT} ops —
+         * never from the session's declaration surface, so the trace project
+         * entry without the compile's declaration surface binds the runtime
+         * for its FFI arms exactly like the production project session does.
+         */
+        private boolean bindsHostRuntime() {
+            return projectSession && hasHostImports();
+        }
+
+        /**
+         * Whether the session's op walk carries at least one HOST-kind
+         * import (host or extern-C).
          */
         private boolean hasHostImports() {
-            if (hostSurface == null) {
-                return false;
-            }
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (SemanticOp op : moduleUnit.ops()) {
                     if (op.kind() == SemanticOpKind.MODULE_IMPORT
