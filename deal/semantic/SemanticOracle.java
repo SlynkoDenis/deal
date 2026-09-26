@@ -3813,7 +3813,8 @@ public final class SemanticOracle {
             FunctionExecutionBinding binding = switch (payload.callee()) {
                 case KindPayload.CallCallee.Static staticCallee -> staticCallee.binding();
                 case KindPayload.CallCallee.Indirect indirect -> resolveBindingOf(indirect.callee());
-                case KindPayload.CallCallee.Dynamic dynamic -> resolveBindingOf(dynamic.callee());
+                case KindPayload.CallCallee.Dynamic dynamic ->
+                    resolveDynamicCalleeBinding(dynamic.callee());
             };
             Value returned = payload.callee() instanceof KindPayload.CallCallee.Dynamic
                 ? executeDynamicCall(op, payload, binding, checkedArgs)
@@ -3963,9 +3964,12 @@ public final class SemanticOracle {
             ReturnBoundarySelection selection = DynamicReturnBoundaryProtocol.select(
                 payload.dynamicReturnBoundary(), kind);
             return switch (selection) {
-                case ReturnBoundarySelection.CalleeReturn ignored ->
-                    invokeLoweredBody(op, payload,
+                case ReturnBoundarySelection.CalleeReturn ignored -> {
+                    Value returned = invokeLoweredBody(op, payload,
                         (FunctionExecutionBinding.LoweredBody) binding, checkedArgs);
+                    yield runRecordedDealBodyCell(op,
+                        payload.dynamicReturnBoundary().dealBodyBoundaryOpId(), returned);
+                }
                 case ReturnBoundarySelection.CallTerminal terminal -> {
                     Value value = invokeResolvedHostRequest(op, binding, checkedArgs);
                     yield runBoundaryChild(opOf(terminal.boundaryOpId()), value,
@@ -4009,12 +4013,15 @@ public final class SemanticOracle {
                     UnitState state = stateOf(op.opId());
                     bindParamCells(state, body.blockId(), m, leading);
                     frames.add(0, body.functionId());
+                    Value returned;
                     try {
-                        yield runBodyBlock(body.blockId(), m, state);
+                        returned = runBodyBlock(body.blockId(), m, state);
                     } finally {
                         frames.remove(0);
                         popParamCells();
                     }
+                    yield runRecordedDealBodyCell(op,
+                        payload.dynamicReturnBoundary().dealBodyBoundaryOpId(), returned);
                 }
                 case ReturnBoundarySelection.CallTerminal terminal -> {
                     Value value = invokeResolvedHostRequest(op, sourceBinding, leading);
@@ -4268,6 +4275,77 @@ public final class SemanticOracle {
             return binding;
         }
 
+        /**
+         * The execution binding of one dynamic callee (ISSUE-0677; design
+         * source {@code function-typed-value-materialization-and-dispatch}
+         * M5's value channel and the dynamic call contract): the callee
+         * value's own static registration decides only whether the class is
+         * statically identified — a same-walk {@code LoweredBody} (or any
+         * other statically classified registration) is used as it stands,
+         * while the producer rule's {@code DynamicFunctionValue} registration
+         * (or an unregistered callee value) defers to the runtime heap
+         * value's own producing registration through the value-keyed channel,
+         * so the class of the materialized carrier — not of the read that
+         * published it — is dispatched. A heap value with no producing
+         * registration fails closed as a producer defect, never a silent
+         * projection.
+         *
+         * @param callee the callee value identity of the dynamic invocation; non-null
+         * @return the resolved execution binding
+         */
+        private FunctionExecutionBinding resolveDynamicCalleeBinding(ValueId callee) {
+            FunctionExecutionBinding registration = bindingOf(callee);
+            if (registration != null
+                    && !(registration
+                        instanceof FunctionExecutionBinding.DynamicFunctionValue)) {
+                return registration;
+            }
+            return resolveBindingOfValue(valueOf(callee));
+        }
+
+        /**
+         * Runs the recorded DEAL-body cell of one dynamic invocation when the
+         * recorded form is the call-owned one (ISSUE-0677; design source
+         * {@code function-typed-value-materialization-and-dispatch} M6 and the
+         * dynamic DEAL-body cell contract): the invocation site executes the
+         * call-owned record on the value the resolved body returned, after
+         * the body's own {@code RETURN} ran the body's own cell and before the
+         * invocation publishes; a callee-owned record is the body's own cell
+         * and has already executed exactly once, so it runs nothing here.
+         * The cell is total on the admitted value (identical declared
+         * descriptor), so its check passes and only its boundary events are
+         * observable.
+         *
+         * @param invocation the dynamic invocation op; non-null
+         * @param cellOpId   the recorded DEAL-body cell; non-null
+         * @param returned   the value the resolved body returned; non-null
+         * @return the admitted value (the cell's checked projection)
+         */
+        private Value runRecordedDealBodyCell(SemanticOp invocation, OpId cellOpId,
+                                              Value returned) {
+            SemanticOp cell = stateOf(invocation.opId()).opsById.get(cellOpId);
+            if (cell == null || !callOwnedCell(invocation, cell)) {
+                return returned;
+            }
+            return runBoundaryChild(cell, returned, BoundaryContext.none());
+        }
+
+        /**
+         * Whether one recorded DEAL-body cell is the call-owned form: its
+         * parent {@code RETURN} names no lowered body of the invocation's
+         * unit (the landing record shape). The callee-owned form's parent
+         * {@code RETURN} names the callee body in the unit's function set.
+         */
+        private boolean callOwnedCell(SemanticOp invocation, SemanticOp cell) {
+            UnitState state = stateOf(invocation.opId());
+            OpId parentId = cell.origin() == null ? null : cell.origin().parentOpId();
+            SemanticOp parent = parentId == null ? null : state.opsById.get(parentId);
+            return parent == null
+                || parent.kind() != SemanticOpKind.RETURN
+                || !(parent.payload() instanceof KindPayload.ReturnPayload returned)
+                || !state.unit.functions().containsKey(returned.function());
+        }
+
         /** The heap function value's resolved execution binding (fail closed). */
         private FunctionExecutionBinding resolveBindingOfValue(Value value) {
             FunctionExecutionBinding binding = bindingsByValue.get(value);
@@ -4397,7 +4475,8 @@ public final class SemanticOracle {
             FunctionExecutionBinding binding = switch (payload.callee()) {
                 case KindPayload.CallCallee.Static staticCallee -> staticCallee.binding();
                 case KindPayload.CallCallee.Indirect indirect -> resolveBindingOf(indirect.callee());
-                case KindPayload.CallCallee.Dynamic dynamic -> resolveBindingOf(dynamic.callee());
+                case KindPayload.CallCallee.Dynamic dynamic ->
+                    resolveDynamicCalleeBinding(dynamic.callee());
             };
             AsyncTokenId token = (AsyncTokenId) op.result();
             if (payload.callee() instanceof KindPayload.CallCallee.Dynamic) {
@@ -4487,7 +4566,7 @@ public final class SemanticOracle {
                     FunctionExecutionBinding.LoweredBody body =
                         (FunctionExecutionBinding.LoweredBody) binding;
                     tasks.put(token.tokenId(), new Task(token,
-                        () -> runTaskBody(op, body, checkedArgs)));
+                        () -> runTaskBodyWithRecordedCell(op, body, checkedArgs)));
                     readyQueue.add(token.tokenId());
                 }
                 case HOST -> {
@@ -4560,12 +4639,15 @@ public final class SemanticOracle {
                         UnitState state = stateOf(op.opId());
                         bindParamCells(state, body.blockId(), m, leading);
                         frames.add(0, body.functionId());
+                        Value returned;
                         try {
-                            return runBodyBlock(body.blockId(), m, state);
+                            returned = runBodyBlock(body.blockId(), m, state);
                         } finally {
                             frames.remove(0);
                             popParamCells();
                         }
+                        return runRecordedDealBodyCell(op, recordedTaskCellOf(op),
+                            returned);
                     }));
                     readyQueue.add(token.tokenId());
                 }
@@ -4630,6 +4712,33 @@ public final class SemanticOracle {
                 frames.remove(0);
                 popParamCells();
             }
+        }
+
+        /**
+         * One dynamically resolved DEAL-body task's completion value: the
+         * body task runs as landed (its {@code RETURN} runs the body's own
+         * cell), and a call-owned recorded task cell then executes in the
+         * caller-side task wrapper before the token completes (ISSUE-0677;
+         * design source
+         * {@code function-typed-value-materialization-and-dispatch} M6 and
+         * the dynamic async start contract). A callee-owned record is the
+         * body's own cell and runs nothing here.
+         */
+        private Value runTaskBodyWithRecordedCell(SemanticOp op,
+                FunctionExecutionBinding.LoweredBody body, List<Value> args) {
+            Value returned = runTaskBody(op, body, args);
+            return runRecordedDealBodyCell(op, recordedTaskCellOf(op), returned);
+        }
+
+        /** The recorded task cell of one dynamic ASYNC_START (fail closed when absent). */
+        private static OpId recordedTaskCellOf(SemanticOp op) {
+            if (op.payload() instanceof KindPayload.AsyncStartPayload start
+                    && start.returnBoundaryOpId() != null) {
+                return start.returnBoundaryOpId();
+            }
+            throw new IllegalStateException("ASYNC_START " + op.opId()
+                + " records no task return cell (the closed gate requires the single"
+                + " recorded cell of a dynamic resolution)");
         }
 
         /**

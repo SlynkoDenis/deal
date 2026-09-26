@@ -1007,6 +1007,7 @@ public final class LuaSemanticEmitter {
             // scope; every check/return temp is a top-level assignment).
             out.append("local __chk, __rvT, __rvcT, __okT, __resT, __terrT, "
                 + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
+                + "__okD, __chkD, "
                 + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT, "
                 + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE\n");
 
@@ -3722,6 +3723,15 @@ public final class LuaSemanticEmitter {
                     + " (producer defect)");
             }
             String origin = luaString(originOf(op));
+            // The recorded DEAL-body cell's closed form (ISSUE-0677; design
+            // source {@code function-typed-value-materialization-and-dispatch}
+            // M6): a call-owned record is executed by the invocation site on
+            // the value the resolved body returned, after the body's own
+            // RETURN ran the body's own cell; a callee-owned record is that
+            // body's own cell and runs nothing here.
+            SemanticOp recordedDealCell = opsById.get(cells.dealBodyBoundaryOpId());
+            boolean callOwnedDealCell = recordedDealCell != null
+                && callOwnedCell(recordedDealCell);
             StringBuilder argList = new StringBuilder();
             StringBuilder argTable = new StringBuilder();
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
@@ -3756,9 +3766,13 @@ public final class LuaSemanticEmitter {
             emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
             out.append("    error(__resT, 0)\n");
             out.append("  end\n");
+            if (callOwnedDealCell) {
+                emitRecordedCellRun(op, recordedDealCell, "__resT", "  ");
+            }
             // ADAPTER: the landed D15 sequence; the source class selects
             // the return cell (a DEAL-body source runs its own body's
-            // RETURN cell).
+            // RETURN cell, and a call-owned recorded cell then runs at the
+            // invocation site).
             out.append("elseif __dynK == \"ADAPTER\" then\n");
             out.append("  __dynS = __adaptSource(__dynC)\n");
             out.append("  __okB, __chkB = pcall(__fncheck, __dynS, __dynC.__csrc, ")
@@ -3792,6 +3806,9 @@ public final class LuaSemanticEmitter {
             emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
             out.append("    error(__resT, 0)\n");
             out.append("  end\n");
+            if (callOwnedDealCell) {
+                emitRecordedCellRun(op, recordedDealCell, "__resT", "  ");
+            }
             // HOST: the loaded surface entry (the carrier itself) and the
             // recorded HOST_TO_DEAL + HOST_SYNC_RETURN cell.
             out.append("elseif __dynK == \"HOST\" then\n");
@@ -3827,6 +3844,81 @@ public final class LuaSemanticEmitter {
                 index++;
             }
             emitHostInvocationTail(op, "__dynC", index - 1, returnBoundary);
+        }
+
+        /**
+         * Whether one recorded DEAL-body cell is the call-owned form
+         * (ISSUE-0677; design source
+         * {@code function-typed-value-materialization-and-dispatch} M6): its
+         * parent {@code RETURN} names no lowered body of the emitted closure
+         * (the landing record shape). The callee-owned form's parent
+         * {@code RETURN} names the callee body in the closure's function set,
+         * and that body's own {@code RETURN} runs the cell.
+         */
+        private boolean callOwnedCell(SemanticOp cell) {
+            OpId parentId = cell.origin() == null ? null : cell.origin().parentOpId();
+            SemanticOp parent = parentId == null ? null : opsById.get(parentId);
+            if (parent == null || parent.kind() != SemanticOpKind.RETURN
+                    || !(parent.payload()
+                        instanceof KindPayload.ReturnPayload returned)) {
+                return false;
+            }
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                if (moduleUnit.functions().containsKey(returned.function())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * The invocation site's execution of one call-owned recorded
+         * DEAL-body cell (ISSUE-0677; the oracle's
+         * {@code runBoundaryChild} over the recorded cell): the cell's START
+         * event carries the input atom, the boundary check runs under the
+         * cell's own origin, the SUCCESS terminal publishes the admitted
+         * value, and a failure emits the cell's and the invocation op's
+         * FAILURE events and raises. The cell is total on the admitted value
+         * (an identical declared descriptor), so its check passes and only
+         * its boundary events are observable.
+         *
+         * @param invocation the dynamic invocation op; non-null
+         * @param cell       the recorded call-owned cell; non-null
+         * @param valueSlot  the Lua slot holding the returned value; non-null
+         * @param indent     the emitted block's indentation prefix; non-null
+         */
+        private void emitRecordedCellRun(SemanticOp invocation, SemanticOp cell,
+                                         String valueSlot, String indent) {
+            KindPayload.BoundaryPayload payload =
+                (KindPayload.BoundaryPayload) cell.payload();
+            // The START carries the input's atom (the oracle's
+            // runBoundaryChild START), the check runs under the cell's own
+            // origin, and the SUCCESS terminal publishes the admitted value.
+            out.append(indent).append("__ev(").append(luaString(opKey(cell.opId())))
+                .append(", \"START\", \"BOUNDARY\", ")
+                .append(luaString(cell.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(cell.origin().parentOpId())))
+                .append(", {__atom(")
+                .append(luaString(staticKind(payload.descriptor()))).append(", ")
+                .append(valueSlot).append(")}, nil, nil)\n");
+            out.append(indent).append("__okD, __chkD = pcall(__bcheck, ")
+                .append(bcheckArgs(payload.descriptor(), valueSlot)).append(")\n");
+            out.append(indent).append("if not __okD then\n");
+            out.append(indent).append("  __chkD.o = ")
+                .append(luaString(originOf(cell))).append("\n");
+            emitFailureEvent(cell.opId(), "BOUNDARY", cell, "__errtext(__chkD)");
+            emitFailureEvent(invocation.opId(), invocation.kind().name(), invocation,
+                "__errtext(__chkD)");
+            out.append(indent).append("  error(__chkD, 0)\n");
+            out.append(indent).append("end\n");
+            out.append(indent).append(valueSlot).append(" = __chkD\n");
+            out.append(indent).append("__ev(").append(luaString(opKey(cell.opId())))
+                .append(", \"SUCCESS\", \"BOUNDARY\", ")
+                .append(luaString(cell.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(cell.origin().parentOpId())))
+                .append(", {}, __atom(")
+                .append(luaString(staticKind(payload.descriptor()))).append(", ")
+                .append(valueSlot).append("), nil)\n");
         }
 
         /**
@@ -3870,6 +3962,15 @@ public final class LuaSemanticEmitter {
                                            AsyncTokenId token) {
             String origin = luaString(originOf(op));
             String carrierArgs = "S.__sa" + op.opId().id();
+            // The recorded task cell's closed form (ISSUE-0677; design
+            // source {@code function-typed-value-materialization-and-dispatch}
+            // M6): a call-owned record executes in this caller-side task
+            // wrapper before the token completes; a callee-owned record is
+            // the resolved body's own cell and runs inside the body.
+            SemanticOp recordedTaskCell = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            boolean callOwnedTaskCell = recordedTaskCell != null
+                && callOwnedCell(recordedTaskCell);
             out.append("__dynC = ").append(slot(callee.callee())).append("\n");
             out.append("__dynK = __dynClass(__dynC)\n");
             // DEAL_BODY: the carrier's function id resolves its owning
@@ -3892,6 +3993,9 @@ public final class LuaSemanticEmitter {
             out.append("    __module = __modStack[#__modStack]\n");
             out.append("    __modStack[#__modStack] = nil\n");
             out.append("    if not __okA then error(__resA, 0) end\n");
+            if (callOwnedTaskCell) {
+                emitRecordedCellRun(op, recordedTaskCell, "__resA", "    ");
+            }
             out.append("    return __resA\n");
             out.append("  end), ").append(carrierArgs).append(")\n");
             // ADAPTER: the landed D15 sequence resolves the source value
@@ -3929,6 +4033,9 @@ public final class LuaSemanticEmitter {
             out.append("    __module = __modStack[#__modStack]\n");
             out.append("    __modStack[#__modStack] = nil\n");
             out.append("    if not __okA then error(__resA, 0) end\n");
+            if (callOwnedTaskCell) {
+                emitRecordedCellRun(op, recordedTaskCell, "__resA", "    ");
+            }
             out.append("    return __resA\n");
             out.append("  end), ").append(carrierArgs).append(")\n");
             // The fail-closed residue: no class is resolvable.
