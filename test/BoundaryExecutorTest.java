@@ -547,16 +547,19 @@ public class BoundaryExecutorTest {
             "(int)->string", "async(int)->string", new LinkedHashMap<>(), null,
             "async marker mismatch");
 
-        // Non-function values are E8001 with the canonical actual token.
+        // Non-function values are E8001 with the pinned function row: the
+        // fixed "function" expected token both target runtimes project and
+        // the shared actual-kind classification (never the descriptor
+        // text; ISSUE-0681).
         expectFail(checkCell(FailurePolicyId.FUNCTION_SIGNATURE, SYNC_INT_TO_STRING,
                 BoundaryValueView.ofNumber(1)),
             FailurePolicyId.TYPE_DESCRIPTOR, DiagnosticCode.E8001,
-            "expected (int)->string, got number", "(int)->string", "number",
+            "expected function, got number", "function", "number",
             new LinkedHashMap<>(), null, "non-function view vs function descriptor");
         expectFail(checkCell(FailurePolicyId.FUNCTION_SIGNATURE, SYNC_INT_TO_STRING,
                 BoundaryValueView.of(ActualKind.MISSING)),
             FailurePolicyId.TYPE_DESCRIPTOR, DiagnosticCode.E8001,
-            "expected (int)->string, got missing", "(int)->string", "missing",
+            "expected function, got missing", "function", "missing",
             new LinkedHashMap<>(), null, "missing view vs function descriptor");
 
         // The descriptor/policy pairing is a validator cell: broken pairings fail closed.
@@ -1002,7 +1005,7 @@ public class BoundaryExecutorTest {
         // The same classification serves every other cell of the closed table.
         expectFail(checkCell(FailurePolicyId.FUNCTION_SIGNATURE, SYNC_INT_TO_STRING, missing),
             FailurePolicyId.TYPE_DESCRIPTOR, DiagnosticCode.E8001,
-            "expected (int)->string, got missing", "(int)->string", "missing",
+            "expected function, got missing", "function", "missing",
             new LinkedHashMap<>(), null, "function boundary vs missing");
         expectFail(checkCell(FailurePolicyId.ASYNC_COMPLETION, STRING, missing),
             FailurePolicyId.ASYNC_COMPLETION, DiagnosticCode.E8001,

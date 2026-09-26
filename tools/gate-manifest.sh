@@ -1003,4 +1003,31 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # disposition (the production project entry rejects the extern-C closure
   # and the direct unit assertion keeps the owner defect).
   'fg|=== Running FFI Struct Construction Tests (ISSUE-0666) ===|java -ea -cp build deal.test.FfiStructConstructionTest'
+  # ISSUE-0681 registration: the materialization-site origin and the
+  # function-row projection on the shared route (function-typed-value-
+  # materialization-and-dispatch M8 items 1-5, the materialization
+  # contract's visible errors, and the task's origin drives;
+  # semantic-ir-construct-coverage-cutover K11): the annotated-declaration
+  # VARIABLE_DECLARATION boundary of the direct and the adapted arm
+  # carries the declared type annotation's own span as its origin (never
+  # the declaration's let span) with the descriptor-kind policy; the
+  # function-typed declaration crossing with a non-function value fails
+  # the pinned function row (E8001, expected function, actual the shared
+  # actual-kind classification) at the annotation span in the oracle and
+  # on both production artifacts with exactly one boundary FAILURE
+  # terminal per consumer and the three-consumer differential verdict
+  # passing; a non-function-typed declared crossing over a deferred
+  # composite read fails the descriptor-kind row at the annotation span
+  # while the contextual read child keeps its own span and passes; a
+  # differing carried signature keeps the pinned E8010 with the two
+  # canonical signature texts on the materialization site; and a
+  # doctored free boundary outside the declaration arms carries its own
+  # origin and its single FAILURE terminal in all three consumers (the
+  # origin is compared). The function-typed drives register the
+  # materialized value's allocation identity with the runtime carrier's
+  # own binding at the unit level — the pending DynamicFunctionValue
+  # producer rule of ISSUE-0622; the end-to-end fixture drive belongs to
+  # the joint fixture battery. The class lives in package deal.semantic
+  # to reach the package-internal project walk.
+  'fg|=== Running Materialization-Site Origin / Function-Row Projection Tests (ISSUE-0681) ===|java -ea -cp build deal.semantic.MaterializationSiteOriginTest'
 )

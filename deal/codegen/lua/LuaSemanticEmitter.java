@@ -801,12 +801,23 @@ public final class LuaSemanticEmitter {
          * every non-function check is emitted unchanged.
          */
         static String bcheckExpr(RuntimeDescriptor descriptor, String value) {
-            String check = "__bcheck(" + luaString(descriptorText(descriptor)) + ", "
+            return "__bcheck(" + bcheckArgs(descriptor, value) + ")";
+        }
+
+        /**
+         * The argument list of one prelude boundary check: the descriptor
+         * text, the static kind, the value, and — when the descriptor
+         * carries a function position — the descriptor's canonical spec
+         * text as the trailing argument. The text of every non-function
+         * check is emitted unchanged.
+         */
+        static String bcheckArgs(RuntimeDescriptor descriptor, String value) {
+            String args = luaString(descriptorText(descriptor)) + ", "
                 + luaString(staticKind(descriptor)) + ", " + value;
             if (containsFunction(descriptor)) {
-                check += ", " + luaString(descriptor.canonicalSpecText());
+                args += ", " + luaString(descriptor.canonicalSpecText());
             }
-            return check + ")";
+            return args;
         }
 
         /** Whether one descriptor carries a function position (recursively). */
@@ -2534,7 +2545,13 @@ public final class LuaSemanticEmitter {
             emitPlainSuccess(op);
         }
 
-        /** A free BOUNDARY op: the prelude check over the payload input. */
+        /**
+         * A free BOUNDARY op: the prelude check over the payload input,
+         * run under the boundary's own origin with the boundary's own
+         * single FAILURE terminal — the parented arms' contract (no owner
+         * terminal exists for an unparented boundary); the success
+         * terminal is unchanged.
+         */
         private void emitFreeBoundary(SemanticOp op) {
             KindPayload.BoundaryPayload payload = (KindPayload.BoundaryPayload) op.payload();
             out.append("__ev(").append(luaString(opKey(op.opId())))
@@ -2542,9 +2559,14 @@ public final class LuaSemanticEmitter {
                 .append(luaString(op.contract().canonicalDigest())).append(", ")
                 .append(luaString(parentKey(op.origin().parentOpId())))
                 .append(", {}, nil, nil)\n");
-            out.append("__chk = ")
-                .append(bcheckExpr(payload.descriptor(), slot(payload.input())))
-                .append("\n");
+            out.append("__okB, __chk = pcall(__bcheck, ")
+                .append(bcheckArgs(payload.descriptor(), slot(payload.input())))
+                .append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  __chk.o = ").append(luaString(originOf(op))).append("\n");
+            emitFailureEvent(op.opId(), "BOUNDARY", op, "__errtext(__chk)");
+            out.append("  error(__chk, 0)\n");
+            out.append("end\n");
             if (op.result() instanceof ValueId valueId) {
                 out.append(slot(valueId)).append(" = __chk\n");
                 emitBoundarySuccess(op, slot(valueId), payload.descriptor());

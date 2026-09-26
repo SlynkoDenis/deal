@@ -2487,7 +2487,13 @@ public final class JvmSemanticEmitter {
             emitPlainSuccess(op, indent);
         }
 
-        /** A free BOUNDARY op: the runtime check over the payload input. */
+        /**
+         * A free BOUNDARY op: the runtime check over the payload input,
+         * run under the boundary's own origin with the boundary's own
+         * single FAILURE terminal — the parented arms' contract (no owner
+         * terminal exists for an unparented boundary); the success
+         * terminal is unchanged.
+         */
         private void emitFreeBoundary(SemanticOp op, int indent) {
             KindPayload.BoundaryPayload payload = (KindPayload.BoundaryPayload) op.payload();
             if (trace) {
@@ -2498,18 +2504,32 @@ public final class JvmSemanticEmitter {
                 .append(javaString(parentKey(op.origin().parentOpId())))
                 .append(", List.of(), null, null);\n");
             }
-            out.append(indent(indent)).append("Object __fb_").append(op.opId().id())
+            String target = "__fb_" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(target).append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent)).append("  ").append(target)
                 .append(" = JvmRuntime.bcheck(")
                 .append(javaString(descriptorText(payload.descriptor()))).append(", ")
                 .append(javaString(staticKind(payload.descriptor()))).append(", ")
                 .append(slot(payload.input())).append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+            out.append(indent(indent))
+                .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                    + "__be.code, __be.msg, ")
+                .append(javaString(originOf(op)))
+                .append(", __be.expected, __be.actual, __be.frames, null);\n");
+            if (trace) {
+                emitFailureEvent(op.opId(), "BOUNDARY", op,
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+            }
+            out.append(indent(indent)).append("  throw __bre;\n");
+            out.append(indent(indent)).append("}\n");
             if (op.result() instanceof ValueId valueId) {
-                out.append(indent(indent)).append(slot(valueId)).append(" = __fb_")
-                    .append(op.opId().id()).append(";\n");
+                out.append(indent(indent)).append(slot(valueId)).append(" = ")
+                    .append(target).append(";\n");
                 emitBoundarySuccess(op, slot(valueId), payload.descriptor(), indent);
             } else {
-                emitBoundarySuccess(op, "__fb_" + op.opId().id(), payload.descriptor(),
-                    indent);
+                emitBoundarySuccess(op, target, payload.descriptor(), indent);
             }
         }
 
