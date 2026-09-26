@@ -1098,4 +1098,31 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # generator's literals are byte-deterministic) with no
   # ffi.C/cdef/dlopen/dlsym text in any artifact.
   'fg|=== Running FFI Production-Corpus Integration Tests (ISSUE-0670) ===|java -ea -cp build deal.test.FfiProductionCorpusTest'
+
+  # ISSUE-0668 registration: the trace-mode FFI session and the both-mode
+  # runtime binding (luajit-ffi-load-emission-and-typed-crossings F6;
+  # luajit-ffi-shared-emission-and-jvm-rejection F2;
+  # luajit-ffi-struct-plan-construction-and-oracle-projection F4;
+  # sequencing step 7): a project session over an extern-C closure binds
+  # __rt and the host-boundary prelude in both modes and both trace
+  # entries (with and without the compile's declaration surface, exactly
+  # once), while a host-free chunk keeps its self-contained prelude and
+  # the trace entries keep their signatures with a no-op extern-C
+  # MODULE_IMPORT (its op events run; no load_ffi/load_host is emitted);
+  # the three-input trace entry over ffi/020 and the four-input entry
+  # over ffi/019 pre-publish the scenario surface (one function wrapper
+  # per declared function plus the real generated <C>_plan entry from the
+  # plan literal) and run the crossings and the construction under
+  # luajit, comparing the decoded stream with the oracle event-for-event
+  # and asserting one heap value per class-typed crossing, the
+  # pre-published surface surviving the chunk's or-guards, and the seam's
+  # own wrappers serving the calls; the focused counting fixture shows
+  # the trace construction running the real generated plan evaluators
+  # (zero at load, once per omitted field per attempt in class source
+  # order) with the oracle's projection suppliers matching; an absent
+  # surface or entry stays the fail-visible missing projection on the
+  # value-position read (the oracle publishes the same missing atom) and
+  # the invocation fails visibly while the published entry succeeds; the
+  # generated literals and both mode emissions are byte-deterministic.
+  'fg|=== Running FFI Trace Session Tests (ISSUE-0668) ===|java -ea -cp build deal.test.FfiTraceSessionTest'
 )
