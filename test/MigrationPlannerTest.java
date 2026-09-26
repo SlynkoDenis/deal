@@ -1272,12 +1272,15 @@ public class MigrationPlannerTest {
                     .equals(second.checkedProject().index().interfaceIndexDigest()),
                 "the interface index digest is stable across compiles");
 
-            // ISSUE-0643 P4: the release-owned production invocation runs
-            // the production arm — it computes and consults no route plan
-            // (phase 3.7 stays skipped, the route-plan view stays null) and
-            // fails the wrapper fixture closed at lowering (a later-slice
-            // construct); the harness plan above is the retained route
-            // subject.
+            // ISSUE-0643 P4 (retargeted by ISSUE-0675): the release-owned
+            // production invocation runs the production arm — it computes
+            // and consults no route plan (phase 3.7 stays skipped, the
+            // route-plan view stays null). The wrapper fixture's
+            // function-typed values are realized by the producer rule's
+            // materialization arms (the imported call result and the
+            // dynamic call over its carrier), so the production arm lowers
+            // and emits the fixture through the shared route; the harness
+            // plan above stays the retained route subject.
             CompilationOrchestrator production = new CompilationOrchestrator(
                 src.resolve("main.deal").toAbsolutePath(),
                 tmp.resolve("build-production"), false, false, false, false,
@@ -1288,15 +1291,15 @@ public class MigrationPlannerTest {
                     ReleaseConfiguration.CURRENT_RELEASE_STATE,
                     ReleaseConfiguration.releaseCapabilityRegistry()));
             boolean productionOk = production.compile();
-            check(!productionOk,
-                "the release-owned production invocation fails the "
-                    + "later-slice fixture closed");
+            check(productionOk,
+                "the release-owned production invocation lowers the wrapper "
+                    + "fixture through the producer rule's materialization arms: "
+                    + production.diagnostics());
             check(production.routePlan() == null,
                 "the production arm computes and consults no route plan");
             check(production.diagnostics().stream()
-                    .anyMatch(d -> "E6005".equals(d.code())
-                        && d.message().contains("CONSTRUCT_UNLOWERED")),
-                "the production failure names the construct rule: "
+                    .noneMatch(d -> "E6005".equals(d.code())),
+                "the production compile reports no lowering defect: "
                     + production.diagnostics());
         } finally {
             deleteRecursively(tmp);

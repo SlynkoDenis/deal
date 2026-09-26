@@ -511,10 +511,14 @@ import java.util.Set;
  * cell-kind literal outside that derivation, and the thunk/adapter arms
  * are registered by the shape-map child, T7), the {@code LoweredBody}
  * {@code functionBindings} registrations through the registry child's
- * registration seam (B5), and static function-identity preservation on
- * function-typed loads ({@code R-FUNCTION-BINDING} holds by construction;
- * dynamic function values — parameters, catch bindings, iteration
- * bindings — fail closed as the registry child's resolution). Adapter
+ * registration seam (B5), static function-identity preservation on
+ * function-typed loads where the cell's value identity is tracked, and the
+ * producer rule's dynamic arm for a function-typed load whose cell value
+ * identity is not statically tracked (a parameter, a catch binding, an
+ * iteration binding, or a class-field/namespace-held value — the load
+ * allocates its own carrier identity and registers exactly one
+ * {@code DynamicFunctionValue}, ISSUE-0675, so {@code R-FUNCTION-BINDING}
+ * holds by construction). Adapter
  * creation and invocation stay out of this child's window.</p>
  *
  * <p><b>The recursive-group child (ISSUE-0446).</b> {@link
@@ -3983,10 +3987,10 @@ public final class SemanticLowerer {
          * intrinsic bindings' INIT operands commit at module-init top):
          * the VALUE-over-intrinsic operand of the shape-map child (B7
          * arm (a) — an intrinsic function value is a materialized
-         * function-value operand; the adapter retains that identity, and
-         * no function-typed load of the intrinsic binding is emitted —
-         * a first-class intrinsic value has no closed
-         * {@code FunctionExecutionBinding} shape, B5).
+         * function-value operand; the adapter retains that identity and
+         * the adapter creation site emits no function-typed load of the
+         * intrinsic binding, because the intrinsic arm selects VALUE over
+         * the seeded identity itself).
          */
         private final Map<String, ValueId> intrinsicIdentities = new LinkedHashMap<>();
         /**
@@ -5394,9 +5398,15 @@ public final class SemanticLowerer {
                     new FunctionAllocationIdentity(intrinsicValue.id()), kind,
                     (RuntimeDescriptor.Func) DescriptorService.describe(intrinsic.type()));
                 // No static function-identity tracking for intrinsics: the
-                // function-typed load of the intrinsic binding is the
-                // function-value child's materialization; this walk never
-                // emits an unvalidatable function-typed load.
+                // seeded incarnation's identity-preserving tracking and the
+                // function-typed load of the intrinsic binding's carrier are
+                // the conversion-intrinsic child's materialization (wiki
+                // conversion-intrinsic-function-values J1). Until that
+                // tracking lands, the intrinsic binding's cell value
+                // identity is not statically tracked, so a function-typed
+                // load of it takes the producer rule's typed-load arm and
+                // registers the closed DynamicFunctionValue (ISSUE-0675) —
+                // the walk never emits an unregistered function-typed load.
                 emitUserNullOp(SemanticOpKind.BINDING_INIT,
                     new KindPayload.BindingInitPayload(binding, INITIAL_LOOP_GENERATION,
                         intrinsicValue),
@@ -10019,6 +10029,10 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
+            // The producer rule's call arm: a direct call result with a
+            // function-typed result registers exactly one dynamic
+            // materialization keyed by the call's result identity.
+            registerDynamicMaterialization(result, callOpId, resultType);
             return result;
         }
 
@@ -10061,6 +10075,14 @@ public final class SemanticLowerer {
                     + "' identity " + calleeValue
                     + " has no registered FunctionExecutionBinding (producer defect)");
             }
+            if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue) {
+                // The producer rule's callee: a dynamic registration is
+                // admissible exactly as a Dynamic call callee (the landed
+                // callee-position exclusivity), so the tracked identity
+                // carrying it takes the closed dynamic arm over the same
+                // carrier read.
+                return lowerDynamicCall(call, slot, identifier.name(), calleeValue);
+            }
             return lowerIndirectCall(call, slot, binding, calleeValue, identifier.name());
         }
 
@@ -10081,7 +10103,7 @@ public final class SemanticLowerer {
             }
             maybeRegisterCapture(identifier.name(), resolution);
             return emitResolvedLoad(identifier, checkedType(identifier),
-                resolution.entry(), null, true);
+                resolution.entry(), null);
         }
 
         /**
@@ -10157,6 +10179,10 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
+            // The producer rule's call arm: a dynamically resolved call
+            // result with a function-typed result registers exactly one
+            // dynamic materialization keyed by the call's result identity.
+            registerDynamicMaterialization(result, callOpId, resultType);
             return result;
         }
 
@@ -10569,6 +10595,11 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
+            // The producer rule's call arm: a call result with a
+            // function-typed result registers exactly one dynamic
+            // materialization keyed by the call's result identity
+            // (whatever call arm allocated it).
+            registerDynamicMaterialization(result, callOpId, resultType);
             return result;
         }
 
@@ -10862,6 +10893,10 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
+            // The producer rule's call arm: an imported call result with a
+            // function-typed result registers exactly one dynamic
+            // materialization keyed by the call's result identity.
+            registerDynamicMaterialization(result, callOpId, resultType);
             return result;
         }
 
@@ -10912,6 +10947,14 @@ public final class SemanticLowerer {
                     throw new ConstructUnlowered("await callee '" + identifier.name()
                         + "' identity " + calleeValue
                         + " has no registered FunctionExecutionBinding (producer defect)");
+                }
+                if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue) {
+                    // The producer rule's callee in await position: the
+                    // dynamic registration takes the closed dynamic async
+                    // arm over the same carrier read (the callee-position
+                    // exclusivity admits it exactly there).
+                    return lowerDynamicAwait(call, slot, awaitSpan, identifier.name(),
+                        calleeValue);
                 }
                 if (binding instanceof FunctionExecutionBinding.AdapterBinding adapter) {
                     return lowerAdapterOverAsync(call, slot, awaitSpan, adapter,
@@ -11345,6 +11388,12 @@ public final class SemanticLowerer {
                 result, completion, List.of(), List.of(),
                 FailurePolicyId.NO_DEAL_FAILURE, awaitOrigin));
             emit(completionBoundary);
+            // The producer rule's awaited-completion arm: the AWAIT op is
+            // the op that allocates and publishes the completion value
+            // identity (the ASYNC_START result is the token), so a
+            // function-typed completion descriptor registers exactly one
+            // dynamic materialization keyed by the AWAIT result identity.
+            registerDynamicMaterialization(result, awaitOpId, completion);
             return result;
         }
 
@@ -12535,8 +12584,9 @@ public final class SemanticLowerer {
          * tracked function identity (loads preserve allocation identity);
          * a function-typed load whose identity is not statically known
          * (parameters, catch bindings, iteration bindings — dynamic
-         * function values) fails closed as the registry child's
-         * resolution (B5).</p>
+         * function values) allocates its own carrier identity and
+         * registers exactly one {@code DynamicFunctionValue} keyed by it
+         * (the producer rule's typed-load arm, M2 item 2).</p>
          */
         private ValueId lowerBindingLoad(IdentifierExpr identifier) {
             return lowerBindingLoad(identifier, null);
@@ -12546,19 +12596,20 @@ public final class SemanticLowerer {
             Type type = checkedType(identifier);
             for (ForEachFrame frame : frames) {
                 if (frame.name().equals(identifier.name())) {
-                    return emitValueOp(SemanticOpKind.BINDING_LOAD,
-                        new KindPayload.BindingLoadPayload(frame.binding(), frame.generation()),
-                        identifier.span(), ContainerPayloadDescriptors.resultDescriptorOf(type),
-                        FailurePolicyId.NO_DEAL_FAILURE, slot);
+                    return emitDynamicAwareLoad(
+                        new KindPayload.BindingLoadPayload(frame.binding(),
+                            frame.generation()),
+                        identifier.span(),
+                        ContainerPayloadDescriptors.resultDescriptorOf(type), slot);
                 }
             }
             for (CatchFrame frame : catchFrames) {
                 if (frame.name().equals(identifier.name())) {
-                    return emitValueOp(SemanticOpKind.BINDING_LOAD,
+                    return emitDynamicAwareLoad(
                         new KindPayload.BindingLoadPayload(frame.binding(),
                             INITIAL_LOOP_GENERATION),
-                        identifier.span(), ContainerPayloadDescriptors.resultDescriptorOf(type),
-                        FailurePolicyId.NO_DEAL_FAILURE, slot);
+                        identifier.span(),
+                        ContainerPayloadDescriptors.resultDescriptorOf(type), slot);
                 }
             }
             if (!defaultContexts.isEmpty()) {
@@ -12622,10 +12673,10 @@ public final class SemanticLowerer {
             if (bindingSiteResolver != null) {
                 BindingSite site = bindingSiteResolver.resolve(identifier.name());
                 if (site != null) {
-                    return emitValueOp(SemanticOpKind.BINDING_LOAD,
+                    return emitDynamicAwareLoad(
                         new KindPayload.BindingLoadPayload(site.binding(), site.generation()),
-                        identifier.span(), ContainerPayloadDescriptors.resultDescriptorOf(type),
-                        FailurePolicyId.NO_DEAL_FAILURE);
+                        identifier.span(),
+                        ContainerPayloadDescriptors.resultDescriptorOf(type), null);
                 }
             }
             throw new ConstructUnlowered("identifier '" + identifier.name()
@@ -12647,40 +12698,29 @@ public final class SemanticLowerer {
          * slot ({@code slot} non-null) publishes the slot instead of
          * allocating one — the slot-threaded production of the default
          * walk's direct identifier reference (the {@code CLASS_DEFAULT}
-         * op's result identity, K-D3). The dynamic-callee carrier
-         * admission admits the one function-typed load whose caller is
-         * the dynamic call arm's callee site: the carrier read whose
-         * runtime execution class the dispatch resolves, registered by
-         * the function-typed-value child's op-based materialization
-         * producer rule; every value-position function-typed load keeps
-         * the fail-closed resolution.
+         * op's result identity, K-D3). A function-typed load whose cell
+         * value identity is not statically tracked (parameters, catch
+         * bindings, iteration bindings, and class-field or namespace-held
+         * values) allocates its own carrier identity and registers exactly
+         * one {@code DynamicFunctionValue} keyed by the load's result
+         * identity with the load's checked descriptor — the closed
+         * producer rule's typed-load arm (M2 item 2), reached by the
+         * value-position load and by the dynamic call/await arm's callee
+         * carrier read alike (one arm, no admission flag).
          */
         private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
                                          FrameEntry entry) {
-            return emitResolvedLoad(identifier, type, entry, null, false);
+            return emitResolvedLoad(identifier, type, entry, null);
         }
 
         private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
                                          FrameEntry entry, ValueId slot) {
-            return emitResolvedLoad(identifier, type, entry, slot, false);
-        }
-
-        private ValueId emitResolvedLoad(IdentifierExpr identifier, Type type,
-                                         FrameEntry entry, ValueId slot,
-                                         boolean dynamicCalleeCarrier) {
             RuntimeDescriptor descriptor = ContainerPayloadDescriptors.resultDescriptorOf(type);
             ValueId result = null;
             if (descriptor instanceof RuntimeDescriptor.Func) {
                 result = functionIdentity.get(entry.incarnation());
-                if (result == null && !dynamicCalleeCarrier) {
-                    throw new ConstructUnlowered("function-typed load of '"
-                        + identifier.name() + "' whose cell value identity is not "
-                        + "statically tracked (dynamic function values — parameters, "
-                        + "catch bindings, iteration bindings, and first-class "
-                        + "intrinsics, whose closed binding shape is the registry "
-                        + "child's — are the registry child's resolution, B5)");
-                }
             }
+            boolean trackedIdentity = result != null;
             if (result == null) {
                 result = slot != null ? slot : ids.nextValueId(module, nextOrdinal++, 0);
             }
@@ -12692,6 +12732,59 @@ public final class SemanticLowerer {
                 new KindPayload.BindingLoadPayload(entry.cell().id,
                     entry.incarnation().generation()),
                 result, descriptor, FailurePolicyId.NO_DEAL_FAILURE, origin));
+            if (!trackedIdentity) {
+                registerDynamicMaterialization(result, opId, descriptor);
+            }
+            return result;
+        }
+
+        /**
+         * Registers one function-typed materialization whose execution
+         * class is not statically known (the closed producer rule's
+         * dynamic arms, M2 item 2): exactly one
+         * {@code FunctionExecutionBinding.DynamicFunctionValue} keyed by
+         * the producing op's result allocation identity, correlated to
+         * that op — the validator's correlation clause resolves the named
+         * op, its result identity, and its result descriptor. The
+         * registration is the producing arm's own; a non-function
+         * descriptor is not a function-typed materialization and registers
+         * nothing, and a duplicate key is rejected at registration time
+         * (the producing arm is reached exactly once per allocated
+         * identity). No static producer is re-registered: a load/read that
+         * republishes an already-allocated identity never reaches this
+         * seam.
+         *
+         * @param result          the producing op's result identity; non-null
+         * @param materializingOpId the producing op's identity (the correlation id); non-null
+         * @param descriptor      the producing op's result descriptor; non-null
+         */
+        private void registerDynamicMaterialization(ValueId result, OpId materializingOpId,
+                                                    RuntimeDescriptor descriptor) {
+            if (!(descriptor instanceof RuntimeDescriptor.Func funcDescriptor)) {
+                return;
+            }
+            registry.registerDynamicFunctionValue(new FunctionAllocationIdentity(result.id()),
+                materializingOpId, funcDescriptor);
+        }
+
+        /**
+         * Emits one {@code BINDING_LOAD} of a frame-resolved binding (a
+         * for-of iteration binding, a catch binding, or the binding-core
+         * window's dominant-incarnation site) and registers the producer
+         * rule's dynamic materialization when the load's result descriptor
+         * is a function type: these cells' value identities are never
+         * statically tracked, so the load allocates its own carrier
+         * identity and registers exactly one
+         * {@code DynamicFunctionValue} keyed by it (M2 item 2's iteration
+         * and catch-binding families).
+         */
+        private ValueId emitDynamicAwareLoad(KindPayload payload, Span span,
+                                             RuntimeDescriptor descriptor, ValueId slot) {
+            ValueId result = emitValueOp(SemanticOpKind.BINDING_LOAD, payload, span,
+                descriptor, FailurePolicyId.NO_DEAL_FAILURE, slot);
+            if (descriptor instanceof RuntimeDescriptor.Func) {
+                registerDynamicMaterialization(result, producerOpId(result), descriptor);
+            }
             return result;
         }
 
@@ -12956,6 +13049,11 @@ public final class SemanticLowerer {
                         CANONICAL_RUNTIME_VALIDATION_ID)),
                 null, null, FailurePolicyId.ARRAY_READ_INDEX_THEN_DESCRIPTOR,
                 boundaryOrigin));
+            // The producer rule's index-read arm: an element read whose
+            // checked result descriptor is a function type registers
+            // exactly one dynamic materialization keyed by the read's
+            // result identity (the read allocates it).
+            registerDynamicMaterialization(result, opId, resultType);
             return result;
         }
 
@@ -13092,6 +13190,10 @@ public final class SemanticLowerer {
                 result, resultDescriptor, FailurePolicyId.NO_DEAL_FAILURE, origin));
             emit(receiverBoundary);
             emit(fieldBoundary);
+            // The producer rule's field-read arm: a function-typed field
+            // read registers exactly one dynamic materialization keyed by
+            // the read's result identity (the read allocates it).
+            registerDynamicMaterialization(result, opId, resultDescriptor);
             return result;
         }
 
@@ -13225,6 +13327,16 @@ public final class SemanticLowerer {
                 recordBoundaryClassification(BoundaryKind.CONTEXTUAL_TABLE_READ,
                     contextualType, contextualType);
             }
+            // The producer rule's member-read arm: a function-typed member
+            // read registers exactly one dynamic materialization keyed by
+            // the read's result identity with the read's checked
+            // descriptor (the read allocates it). A nullable contextual
+            // type takes the OPTIONAL_READ envelope above and publishes a
+            // nullable descriptor — not a function-typed result, so no
+            // dynamic record is keyed by it (the guarded value
+            // materializes at the value-position load that reads the
+            // narrowed cell).
+            registerDynamicMaterialization(readResult, opId, resultType);
             return readResult;
         }
 

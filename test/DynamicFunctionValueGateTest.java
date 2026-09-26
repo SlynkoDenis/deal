@@ -651,14 +651,33 @@ public class DynamicFunctionValueGateTest {
             return;
         }
         for (SemanticOp load : loads) {
+            FunctionExecutionBinding registration = unit.functionBindings().get(
+                new FunctionAllocationIdentity(((ValueId) load.result()).id()));
             check(load.resultType() instanceof RuntimeDescriptor.Func
-                    && !unit.functionBindings().containsKey(
-                        new FunctionAllocationIdentity(((ValueId) load.result()).id())),
-                "the callee carrier read " + load.opId() + " publishes an unregistered "
-                    + "function-typed identity (the dynamic producer arm's materialization)");
+                    && registration instanceof FunctionExecutionBinding.DynamicFunctionValue
+                        dynamic
+                    && dynamic.materializingOpId().equals(load.opId())
+                    && dynamic.descriptor().equals(load.resultType()),
+                "the callee carrier read " + load.opId() + " carries exactly one realized "
+                    + "DynamicFunctionValue keyed by its result identity, naming the load "
+                    + "and the load's descriptor (the producer rule's typed-load arm)");
         }
 
-        // The positive: the two registrations of the dynamic callee values.
+        // The realized unit's own registrations pass both closed gates in
+        // one pass (the producer rule's arms plus every gate clause).
+        assertBindingsPass(BindingsProductionValidator.validate(unit, raw.table(),
+            raw.lowerer().pinnedWriteFacts()),
+            "the produced unit's own DynamicFunctionValue registrations (the producer "
+                + "rule's typed-load arm) satisfy REGISTRY_ONE_TO_ONE");
+        assertSchemaPass(SemanticIrValidator.validate(unit, facts(unit)),
+            "the produced unit on the typed schema surface");
+        assertSchemaPass(SemanticIrValidator.validateText(
+                SemanticIrValidator.toUnitText(unit), facts(unit)),
+            "the produced unit on the canonical text surface");
+
+        // The positive: the two registrations of the dynamic callee values
+        // (the registry map rebuilt from the unit is identical to the
+        // unit's own — the doctoring below starts from the realized state).
         Map<FunctionAllocationIdentity, FunctionExecutionBinding> registry =
             registerDynamicCallees(unit);
         LoweredModuleUnit registered = withRegistry(unit, registry);

@@ -25,6 +25,7 @@ import deal.semantic.ir.ExportInterface;
 import deal.semantic.ir.ExternalModuleInterface;
 import deal.semantic.ir.FailurePolicyId;
 import deal.semantic.ir.FunctionAllocationIdentity;
+import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.IntrinsicKind;
 import deal.semantic.ir.KindPayload;
 import deal.semantic.ir.LoweredModuleUnit;
@@ -88,20 +89,21 @@ import java.util.Set;
  *       admits the call-owned return record outside the block tree, the
  *       bindings production validator passes, and repeated lowerings
  *       produce byte-identical dumps;</li>
- *   <li>a callee value whose materialization registration is the
- *       function-typed-value child's (K11's {@code DynamicFunctionValue})
- *       produces the same shape and stops the closed gate exactly at that
- *       pending clause (R-FUNCTION-BINDING), never at a dynamic-cell or
- *       parent-rule clause — the identifier-callee arm is reached through
- *       the package-internal project walk, because the project entry
- *       discards a unit that a later rule rejects;</li>
+ *   <li>a callee value whose materialization registration is the producer
+ *       rule's (K11's {@code DynamicFunctionValue}) produces the same shape
+ *       and passes the closed gate: the typed-load arm registers exactly
+ *       one {@code DynamicFunctionValue} keyed by the carrier read's result
+ *       identity, so R-FUNCTION-BINDING resolves through the registration
+ *       and the identifier-callee arm is reached through the
+ *       package-internal project walk and through the project entry
+ *       alike;</li>
  *   <li>the callee-expression arm (a callee that is neither an identifier
  *       nor an import-member access — a call result, an index/member
  *       read): the callee expression evaluates to its own value first and
  *       the call lowers the same dynamic shape; a class-field member read
  *       on a non-module base never reaches the import-member read
- *       production (no {@code EXPORT_READ} for it) and stops the closed
- *       gate at the same pending materialization clause;</li>
+ *       production (no {@code EXPORT_READ} for it) and registers the
+ *       field-read {@code DynamicFunctionValue} the call dispatches on;</li>
  *   <li>the static call and async arms are unchanged: a statically
  *       resolvable callee keeps {@code CallCallee.Static} and its single
  *       recorded return boundary, and no dynamic shape appears;</li>
@@ -614,7 +616,7 @@ public class DynamicCallLoweringTest {
     }
 
     // =========================================================================
-    // 3. The identifier-callee arm and its pending materialization clause
+    // 3. The identifier-callee arm and its realized materialization
     // =========================================================================
 
     private static void testIdentifierCalleeArm() {
@@ -686,43 +688,50 @@ public class DynamicCallLoweringTest {
             + "parameter-callee unit: " + bindings.map(CompilerDiagnostic::message)
                 .orElse(""));
 
-        // Exactly one function-typed result carries no registration at this
-        // boundary: the callee's carrier read (the function-typed-value child's
-        // DynamicFunctionValue producer rule registers it).
-        List<Long> pending = new ArrayList<>();
+        // The producer rule's typed-load arm realizes the callee carrier
+        // reads: every function-typed result of the unit carries exactly one
+        // registration, and the two runtime-resolved callee reads are keyed
+        // by {@code DynamicFunctionValue} records naming the load and the
+        // load's checked descriptor (ISSUE-0675).
+        List<Long> unregistered = new ArrayList<>();
+        int dynamicRegistrations = 0;
         for (SemanticOp op : unit.ops()) {
             if (!(op.result() instanceof ValueId value)
                     || !(op.resultType() instanceof RuntimeDescriptor.Func)) {
                 continue;
             }
-            boolean registered = false;
-            for (FunctionAllocationIdentity identity : unit.functionBindings().keySet()) {
-                if (identity.id() == value.id()) {
-                    registered = true;
-                    break;
-                }
+            FunctionExecutionBinding binding = unit.functionBindings().get(
+                new FunctionAllocationIdentity(value.id()));
+            if (binding == null) {
+                unregistered.add(value.id());
+                continue;
             }
-            if (!registered) {
-                pending.add(value.id());
+            if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue dynamic) {
+                dynamicRegistrations++;
+                check(dynamic.materializingOpId().equals(op.opId())
+                        && dynamic.descriptor().equals(op.resultType()),
+                    "the dynamic registration of the function-typed result of " + op.kind()
+                        + " " + op.opId() + " names the producing op and its result "
+                        + "descriptor");
             }
         }
-        check(pending.size() == 2,
-            "exactly the two carrier reads (the sync and the awaited callee) carry no "
-                + "registration at this boundary (the function-typed-value child's "
-                + "DynamicFunctionValue producer rule), got " + pending);
+        check(unregistered.isEmpty(),
+            "every function-typed result of the parameter-callee unit carries exactly "
+                + "one registration (the producer rule's typed-load arm realizes both "
+                + "callee carrier reads), got " + unregistered);
+        check(dynamicRegistrations == 2,
+            "exactly the two carrier reads (the sync and the awaited callee) register "
+                + "DynamicFunctionValue, got " + dynamicRegistrations);
 
-        // The project entry's verdict: the shape itself passes every dynamic
-        // cell clause; the gate stops at the pending materialization rule.
+        // The project entry's verdict: the realized registrations satisfy the
+        // closed gate and the project entry produces a project for the
+        // producer-rule fixture.
         SemanticLowerer.ProjectLoweringResult result = lower(fixture);
-        check(result.project() == null, "the project entry returns no project while the "
-            + "materialization registration is pending");
-        check(result.diagnostics().size() == 1
-                && result.diagnostics().stream().anyMatch(diagnostic ->
-                    "E6005".equals(diagnostic.code())
-                        && diagnostic.message().contains("R-FUNCTION-BINDING")),
-            "the project entry's first failure is R-FUNCTION-BINDING (the pending "
-                + "materialization registration), so R-BOUNDARY-TRIPLE and the DEAL-body "
-                + "cell's parent rule passed: " + result.diagnostics());
+        check(result.project() != null && result.diagnostics().isEmpty(),
+            "the project entry produces a project for the parameter-callee fixture "
+                + "(R-FUNCTION-BINDING is satisfied by the producer rule's own "
+                + "registrations and every dynamic-cell and parent-rule clause "
+                + "passed): " + result.diagnostics());
     }
 
     // =========================================================================
@@ -775,22 +784,30 @@ public class DynamicCallLoweringTest {
                 "the callee value is the class member read (FIELD_READ) the call "
                     + "expression evaluated first, got "
                     + (calleeValue == null ? "null" : calleeValue.kind()));
+            if (calleeValue != null) {
+                FunctionExecutionBinding binding = unit.functionBindings().get(
+                    new FunctionAllocationIdentity(
+                        ((ValueId) calleeValue.result()).id()));
+                check(binding instanceof FunctionExecutionBinding.DynamicFunctionValue dynamic
+                        && dynamic.materializingOpId().equals(calleeValue.opId())
+                        && dynamic.descriptor().equals(calleeValue.resultType()),
+                    "the field-read carrier registers exactly one DynamicFunctionValue "
+                        + "keyed by the read's result identity and naming the read");
+            }
         }
         check(ofKind(unit, SemanticOpKind.EXPORT_READ).isEmpty(),
             "the non-module base produces no EXPORT_READ: the import-member read "
                 + "production is never reached");
 
-        // The project entry's verdict: the dynamic shape is produced and the
-        // gate stops at the pending materialization registration (the
-        // function-typed-value child's clause).
+        // The project entry's verdict: the producer rule's field-read
+        // registration satisfies the closed gate and the project entry
+        // produces a project for the fixture.
         SemanticLowerer.ProjectLoweringResult result = lower(fixture);
-        check(result.project() == null && !result.diagnostics().isEmpty()
-                && "E6005".equals(result.diagnostics().get(0).code())
-                && result.diagnostics().get(0).message()
-                    .contains("R-FUNCTION-BINDING"),
-            "the project entry stops at the pending materialization registration "
-                + "(R-FUNCTION-BINDING), so the dynamic-cell and parent rules passed: "
-                + result.diagnostics());
+        check(result.project() != null && result.diagnostics().isEmpty(),
+            "the project entry produces a project for the member-read-callee "
+                + "fixture (the field read's DynamicFunctionValue registration "
+                + "satisfies R-FUNCTION-BINDING, so the dynamic-cell and parent "
+                + "rules passed): " + result.diagnostics());
     }
 
     // =========================================================================

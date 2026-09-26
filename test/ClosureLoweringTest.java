@@ -103,8 +103,9 @@ import java.util.Map;
  *       unit dumps byte-identical across repeated lowering;</li>
  *   <li>fail-closed negatives: function expressions stay foreign in the
  *       binding-core child's window; a function-typed load of a dynamic
- *       value (a parameter) fails closed as the registry child's
- *       resolution (B5); foreign body statements and the legacy profile
+ *       value (a parameter) is the producer rule's typed-load arm (it
+ *       registers exactly one {@code DynamicFunctionValue}, ISSUE-0675);
+ *       foreign body statements and the legacy profile
  *       guard convert to the pinned E6005.</li>
  * </ul>
  */
@@ -1132,10 +1133,11 @@ public class ClosureLoweringTest {
     }
 
     /**
-     * Fail-closed negatives: a function expression stays foreign in the
+     * Fail-closed negatives and the producer rule's realized load arm: a
+     * function expression stays foreign in the
      * binding-core child's window; a function-typed load of a dynamic
-     * value (a parameter) fails closed as the registry child's
-     * resolution (B5); foreign body statements and the legacy profile
+     * value (a parameter) registers exactly one {@code DynamicFunctionValue}
+     * (ISSUE-0675); foreign body statements and the legacy profile
      * guard convert to the pinned E6005.
      */
     static void testFailClosedNegatives() {
@@ -1160,9 +1162,13 @@ public class ClosureLoweringTest {
             }
         }
 
-        // (b) A function-typed load of a parameter inside a closure body
-        // fails closed: the parameter's cell value identity is dynamic
-        // (the registry child's resolution, B5).
+        // (b) A function-typed load of a parameter inside a closure body is
+        // the producer rule's typed-load arm (ISSUE-0675): the parameter's
+        // cell value identity is not statically tracked, so the load
+        // allocates its own carrier identity and registers exactly one
+        // DynamicFunctionValue keyed by that identity with the load's
+        // checked descriptor — the closure window shares the one producer
+        // rule.
         SemanticLowerer.ClosureCoreResult parameterLoad = lowerSlice("""
             function outer(g: () => null): null {
               let h: () => null = function(): null {
@@ -1171,15 +1177,34 @@ public class ClosureLoweringTest {
             }
             """);
         if (parameterLoad != null) {
-            check(parameterLoad.lowering().hasErrors() && parameterLoad.lowering().unit() == null,
-                "the dynamic function-value load fails hard with no unit");
-            if (parameterLoad.lowering().hasErrors()) {
-                check(parameterLoad.lowering().diagnostics().get(0).message()
-                        .contains(SemanticLowerer.CONSTRUCT_UNLOWERED)
-                        && parameterLoad.lowering().diagnostics().get(0).message()
-                            .contains("registry child"),
-                    "the parameter load names the registry child's resolution (B5): "
-                        + parameterLoad.lowering().diagnostics().get(0).message());
+            check(!parameterLoad.lowering().hasErrors()
+                    && parameterLoad.lowering().unit() != null,
+                "the dynamic function-value load is realized by the producer rule "
+                    + "with a unit");
+            if (!parameterLoad.lowering().hasErrors()
+                    && parameterLoad.lowering().unit() != null) {
+                LoweredModuleUnit unit = parameterLoad.lowering().unit();
+                int dynamic = 0;
+                boolean correlated = true;
+                for (SemanticOp op : unit.ops()) {
+                    if (op.kind() != SemanticOpKind.BINDING_LOAD
+                            || !(op.result() instanceof ValueId value)
+                            || !(op.resultType() instanceof RuntimeDescriptor.Func)) {
+                        continue;
+                    }
+                    FunctionExecutionBinding binding = unit.functionBindings().get(
+                        new FunctionAllocationIdentity(value.id()));
+                    if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue
+                            dynamicBinding) {
+                        dynamic++;
+                        correlated &= dynamicBinding.materializingOpId().equals(op.opId())
+                            && dynamicBinding.descriptor().equals(op.resultType());
+                    }
+                }
+                check(dynamic == 1 && correlated,
+                    "exactly the parameter's carrier read registers one "
+                        + "DynamicFunctionValue keyed by the load's result identity "
+                        + "and naming the load; got " + dynamic);
             }
         }
 

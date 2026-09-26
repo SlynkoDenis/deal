@@ -77,6 +77,16 @@ TEST_MAINS=(
   # (function-typed-value-materialization-and-dispatch M2 item 4, M3 items 3-6;
   # conversion-intrinsic-function-values J1).
   'fg|=== Running Dynamic Function Value Gate / Identity-Preserving Intrinsic Load Tests (ISSUE-0674) ===|java -ea -cp build deal.semantic.DynamicFunctionValueGateTest'
+  # ISSUE-0675 registration: the closed producer rule's lowering arms —
+  # the typed binding load, the member/index/field reads, the
+  # optional-read envelope, the call result (direct, dynamic, and
+  # imported) and the AWAIT completion result register exactly one
+  # DynamicFunctionValue keyed by their producing op, the imported export
+  # read and the tracked alias keep their landed static class, and every
+  # produced unit passes the schema and bindings gates in one pass
+  # (function-typed-value-materialization-and-dispatch M2 items 1-3 and 5;
+  # semantic-ir-construct-coverage-cutover K11/K12).
+  'fg|=== Running Dynamic Producer Rule / Materialization Arms Tests (ISSUE-0675) ===|java -ea -cp build deal.semantic.DynamicProducerRuleTest'
   'fg|=== Running Protected Path Ops Tests (ISSUE-0262) ===|java -ea -cp build deal.test.ProtectedPathOpsTest'
   'fg|=== Running Identity Carrier Package Tests (ISSUE-0309) ===|java -ea -cp build deal.test.CanonicalIdentityTest'
   'fg|=== Running Sidecar Schema Validator Tests (ISSUE-0348) ===|java -ea -cp build deal.test.conformance.SidecarSchemaValidatorTest'

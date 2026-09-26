@@ -2710,25 +2710,23 @@ public class SemanticProductionGateTest {
             Map<String, String> prior = fingerprint(project.resolve("out"));
 
             // A failing recompile through the same real pipeline: the
-            // residual public shared-lowering E6005 shape — a
-            // function-typed table member read (the MEMBER_READ result
-            // resolves no FunctionExecutionBinding, R-FUNCTION-BINDING)
-            // — routes SHARED and fails the compile inside the shared
-            // lowering; nothing stages, nothing publishes, and the prior
-            // artifact set stays byte-for-byte with no staging/retired
-            // residue. The cycle-2 named reroute shapes (stored/embedded
-            // function expressions, adapters, bytes, recursion, class
-            // literals) reroute LEGACY at plan time — pinned by
-            // testAdapterShapeReroutesLegacy — so this residual shape is
-            // the public E6005 the atomicity contract is pinned against;
-            // the stager-level discard paths stay pinned in
-            // PublicationStagerTest.
+            // durable public shared-lowering E6005 shape — an imported
+            // class used as a value (the read arm's class-descriptor guard:
+            // a class used as a value is outside the closed runtime value
+            // domain) — fails the compile inside the shared lowering;
+            // nothing stages, nothing publishes, and the prior artifact set
+            // stays byte-for-byte with no staging/retired residue. The
+            // producer rule's function-typed table member read (the
+            // previous subject of this pin) is realized since ISSUE-0675,
+            // so the atomicity contract is pinned against the still
+            // fail-closed guard; the stager-level discard paths stay pinned
+            // in PublicationStagerTest.
+            write(project, "src/lib.deal",
+                "export class Point {\n  x: int = 0\n}\n");
             write(project, "src/main.deal",
-                "function one2(): int {\n  return 1\n}\n\n"
+                "import * as lib from \"./lib\"\n\n"
                     + "export function main(): null {\n"
-                    + "  let t: table = { f: one2 }\n"
-                    + "  let g: () => int = t.f\n"
-                    + "  one2()\n"
+                    + "  let p: lib.Point = lib.Point\n"
                     + "  return null\n"
                     + "}\n");
             Path entryFile = project.resolve("src/main.deal").toAbsolutePath()

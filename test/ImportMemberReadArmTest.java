@@ -173,12 +173,12 @@ import java.util.Set;
  *       alias — the current checker scope's symbol decides, never a
  *       root-table-only fact) is a dynamic callee, never an import-member
  *       read, so the read production is not reached and the call lowers
- *       the landed dynamic shape; the closed gate then stops at the
- *       pending function-typed materialization registration with E6005
- *       {@code R-FUNCTION-BINDING} (the function-typed-value child's
- *       clause) and no {@code EXPORT_READ} is produced for the base. The
- *       G1 seed's project is also driven through the production arm: the
- *       exact E6005, nothing staged, and the prior artifact set
+ *       the landed dynamic shape; the field-read carrier registers the
+ *       producer rule's {@code DynamicFunctionValue} (ISSUE-0675), so the
+ *       project entry produces a project and no {@code EXPORT_READ} is
+ *       produced for the base. The G1 seed's project is also driven
+ *       through the production arm: the realized compile emits the shared
+ *       artifact and the discarded staging leaves the prior artifact set
  *       byte-identical. The combination positive control (the
  *       {@code std.console} read plus its typed-binding invocation) still
  *       lowers and validates with exactly one {@code EXPORT_READ} and
@@ -1144,9 +1144,11 @@ public class ImportMemberReadArmTest {
     /**
      * The G1 project seed: a class-field call — the member callee's base is
      * a local class-typed binding, never a module alias. ISSUE-0657
-     * retargets the seed: the callee takes the dynamic arm, so the read
-     * production's G1 guard is not reached and the gate stops at the
-     * pending function-typed materialization registration instead.
+     * retargets the seed and ISSUE-0675 realizes it: the callee takes the
+     * dynamic arm, so the read
+     * production's G1 guard is not reached; the field-read carrier
+     * registers the producer rule's {@code DynamicFunctionValue} and the
+     * project entry produces a project.
      */
     private static final String GUARD_G1_APP_SOURCE = """
         class Holder {
@@ -1169,8 +1171,8 @@ public class ImportMemberReadArmTest {
      * name but a non-module type. The current checker scope's symbol decides
      * — a root-table-only fact would wrongly produce a read. ISSUE-0657: the
      * callee takes the dynamic arm (the class-field read), so no read is
-     * produced and the gate stops at the pending materialization
-     * registration.
+     * produced; ISSUE-0675: the field-read carrier registers the producer
+     * rule's dynamic materialization.
      */
     private static final String GUARD_G1_SHADOW_APP_SOURCE = """
         import * as probe from "host/probe"
@@ -1256,33 +1258,40 @@ public class ImportMemberReadArmTest {
     }
 
     /**
-     * The retargeted G1 project-seed assertion (ISSUE-0657): a member callee
+     * The G1 project-seed assertion (ISSUE-0675 retarget): a member callee
      * whose base is not a module alias is a dynamic callee, never an
      * import-member read, so the read production is not reached and no
-     * {@code EXPORT_READ} is produced for the base. The call lowers the
-     * landed dynamic shape and the closed gate stops at the pending
-     * function-typed materialization registration ({@code R-FUNCTION-BINDING}
-     * — the function-typed-value child's {@code DynamicFunctionValue}
-     * producer rule).
+     * {@code EXPORT_READ} is produced for the base. The callee's carrier
+     * read is the producer rule's field-read arm: it registers exactly one
+     * {@code DynamicFunctionValue} keyed by the read's result identity, so
+     * the project entry produces a project where it previously stopped at
+     * R-FUNCTION-BINDING.
      */
-    private static void assertProjectFailsClosedOnPendingMaterialization(
+    private static void assertProjectRealizedOnProducedMaterialization(
             SemanticLowerer.ProjectLoweringResult lowered, String what) {
         if (lowered == null) {
             fail(what + ": the project lowering returns a result");
             return;
         }
-        check(lowered.hasErrors() && lowered.project() == null,
-            what + " fails closed with no project (no unit, no registration); got "
-                + (lowered.hasErrors() ? "diagnostics" : "a project"));
-        if (!lowered.hasErrors()) {
+        check(!lowered.hasErrors() && lowered.project() != null,
+            what + " produces a project (the producer rule's own registration "
+                + "satisfies R-FUNCTION-BINDING); got "
+                + (lowered.hasErrors() ? lowered.diagnostics() : "a project"));
+        if (lowered.hasErrors() || lowered.project() == null) {
             return;
         }
-        CompilerDiagnostic diagnostic = lowered.diagnostics().get(0);
-        check("E6005".equals(diagnostic.code())
-                && diagnostic.message().contains("R-FUNCTION-BINDING"),
-            what + " stops at the pending function-typed materialization "
-                + "registration (R-FUNCTION-BINDING, the function-typed-value "
-                + "child's clause): " + diagnostic);
+        // The realized registration: exactly one DynamicFunctionValue per
+        // function-typed result of the project's units.
+        int dynamic = 0;
+        for (LoweredModuleUnit unit : lowered.project().modules().values()) {
+            for (FunctionExecutionBinding binding : unit.functionBindings().values()) {
+                if (binding instanceof FunctionExecutionBinding.DynamicFunctionValue) {
+                    dynamic++;
+                }
+            }
+        }
+        check(dynamic >= 1, what + " carries the producer rule's dynamic "
+            + "materialization registration; got " + dynamic);
     }
 
     /** One production-arm run of one fixture (the P9 pattern). */
@@ -1321,18 +1330,22 @@ public class ImportMemberReadArmTest {
         System.out.println("-- the project guard seeds: G1 on the callee path, the "
             + "fact-channel seed, and the production-arm staging assertion --");
 
-        // G1a (retargeted by ISSUE-0657): a local class-typed receiver's
+        // G1a (retargeted by ISSUE-0675): a local class-typed receiver's
         // function-typed field call is not an import-member read — the base
         // is not a module alias — so the dynamic callee arm owns the shape
-        // and the read production is never reached.
+        // and the read production is never reached. The field-read carrier
+        // registers the producer rule's DynamicFunctionValue and the
+        // project entry now produces a project.
         Fixture call = compileProject(Map.of("src/app.deal", GUARD_G1_APP_SOURCE),
             Map.of());
         try {
-            assertProjectFailsClosedOnPendingMaterialization(lower(call),
+            assertProjectRealizedOnProducedMaterialization(lower(call),
                 "G1a the non-module class-field callee");
 
-            // The same seed through the production arm: the exact E6005, no
-            // staged artifact, and the prior artifact set byte-identical.
+            // The same seed through the production arm: the realized shape
+            // emits the shared artifact set, and nothing publishes while
+            // the run's stager is discarded (the previous artifact set
+            // stays byte-identical).
             Path out = call.root().resolve("out-arm");
             writeFileIn(out, "app.lua", "-- previous artifact\n");
             writeFileIn(out, "lib.lua", "-- previous sibling\n");
@@ -1340,40 +1353,38 @@ public class ImportMemberReadArmTest {
             Map<String, String> before = snapshotTree(out);
             PublicationStager stager = PublicationStager.forRoot(out);
             ProductionProjectEmission.Result result;
+            int stagedArtifacts;
             try {
                 result = emit(call, Backend.LUAJIT, stager, false);
+                stagedArtifacts = stager.stagedSet().relativePaths().size();
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the guard-seed project fails closed");
-            check(result.firstDiagnostic() != null
-                    && "E6005".equals(result.firstDiagnostic().code())
-                    && result.firstDiagnostic().message()
-                        .contains("R-FUNCTION-BINDING"),
-                "the guard-seed project reports E6005 R-FUNCTION-BINDING (the "
-                    + "pending materialization registration): "
+            check(result.emitted(),
+                "the realized guard-seed project emits the shared artifact: "
                     + result.diagnostics());
-            check(stager.stagedSet().relativePaths().isEmpty(),
-                "the guarded compile stages nothing");
+            check(stagedArtifacts >= 1,
+                "the realized compile stages its artifact set; got "
+                    + stagedArtifacts);
             check(before.equals(snapshotTree(out)),
-                "the guard-seed project leaves the previous artifact set "
+                "the discarded staging leaves the previous artifact set "
                     + "byte-identical");
         } finally {
             deleteRecursively(call.root());
         }
 
-        // G1b (retargeted by ISSUE-0657): the local binding carries the
+        // G1b (retargeted by ISSUE-0675): the local binding carries the
         // import alias's name and a non-module type; the current checker
         // scope's symbol decides (never a root-table-only fact), so the
         // callee takes the dynamic arm — the class-field read, no
-        // EXPORT_READ for the base — and the gate stops at the pending
-        // materialization registration.
+        // EXPORT_READ for the base — and the field-read carrier registers
+        // the producer rule's dynamic materialization.
         Fixture shadow = compileProject(Map.of(
                 "src/probe.d.deal", "export function ping(): string;\n",
                 "src/app.deal", GUARD_G1_SHADOW_APP_SOURCE),
             Map.of("host/probe", "src/probe.d.deal"));
         try {
-            assertProjectFailsClosedOnPendingMaterialization(lower(shadow),
+            assertProjectRealizedOnProducedMaterialization(lower(shadow),
                 "G1b the shadowed non-module callee base");
         } finally {
             deleteRecursively(shadow.root());

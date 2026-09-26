@@ -138,10 +138,12 @@ import java.util.Set;
  * <p>The drives register the callee carrier read's allocation identity
  * with the runtime carrier's own binding: the closed gate's
  * {@code R-FUNCTION-BINDING} one-registration rule is satisfied exactly
- * as the function-typed-value child's {@code DynamicFunctionValue}
- * producer rule will satisfy it (ISSUE-0622; the design page's pending
- * materialization clause), and the oracle then resolves the same class
- * the emitted artifact reads from the carrier's own tag. Nothing else in
+ * as the producer rule's dynamic arm satisfies it (ISSUE-0675: the arm
+ * registers a {@code DynamicFunctionValue} for the carrier read, and the
+ * drives replace that record with the carrier's own class so the oracle
+ * and the emitted artifact both resolve a statically named class), and the
+ * oracle then resolves the same class the emitted artifact reads from the
+ * carrier's own tag. Nothing else in
  * the produced unit is changed — every op, cell, boundary, and origin is
  * the one lowering's own output.</p>
  */
@@ -404,7 +406,7 @@ public class DynamicDispatchEmissionTest {
     }
 
     // =========================================================================
-    // The doctored drive (the pending materialization registration)
+    // The doctored drive (the carrier-class registration)
     // =========================================================================
 
     /** One drive: the unit, its membership table, and the validated project. */
@@ -541,9 +543,9 @@ public class DynamicDispatchEmissionTest {
 
     /**
      * Registers the callee carrier read with the runtime carrier's own
-     * binding (the pending {@code DynamicFunctionValue} materialization
-     * registration of the function-typed-value child, ISSUE-0622) and runs
-     * the closed gate over the resulting project.
+     * binding (replacing the producer rule's {@code DynamicFunctionValue}
+     * materialization record with the statically named runtime class,
+     * ISSUE-0675) and runs the closed gate over the resulting project.
      */
     private static Drive doctorAndValidate(LoweredModuleUnit unit, RawLowering raw,
             ValueId callee, FunctionExecutionBinding carrier, String what) {

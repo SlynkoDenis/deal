@@ -811,8 +811,8 @@ public class MaterializationSiteOriginTest {
             .input();
         // The registration supplied at the unit level: the materialized
         // value's allocation identity registered with the runtime carrier's
-        // own binding (the pending DynamicFunctionValue producer rule of
-        // ISSUE-0622 registers it; only the declaration crossing's
+        // own binding (the producer rule's dynamic record of ISSUE-0675 is
+        // replaced by the carrier's class; only the declaration crossing's
         // projection is under test here).
         FunctionExecutionBinding carrier = null;
         for (FunctionExecutionBinding binding : raw.unit().functionBindings().values()) {
@@ -1082,8 +1082,8 @@ public class MaterializationSiteOriginTest {
             .input();
         // The runtime carrier of `holder.f` is the `asString` closure; the
         // registration supplied at the unit level is that closure's own
-        // LoweredBody (the pending DynamicFunctionValue producer rule's
-        // resolution for a stored DEAL body).
+        // LoweredBody (the producer rule's dynamic record is replaced by the
+        // stored DEAL body's own class).
         FunctionExecutionBinding carrier = null;
         for (FunctionExecutionBinding binding : raw.unit().functionBindings().values()) {
             if (binding instanceof FunctionExecutionBinding.LoweredBody body) {

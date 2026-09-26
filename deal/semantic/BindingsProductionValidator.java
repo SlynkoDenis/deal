@@ -172,7 +172,13 @@ public final class BindingsProductionValidator {
      * carries the identity-preserving-load exclusion: a load naming the
      * seed {@code BINDING_INIT}'s {@code {binding, generation}} that
      * publishes that init's operand identity is not a producing position,
-     * while a load naming any other binding or generation is.
+     * while a load naming any other binding or generation is — the
+     * exclusion is per publishing op (ISSUE-0675): an identity whose
+     * candidate cell carries at least one load that does not name that
+     * cell's {@code {binding, generation}} is a producing position even
+     * when another load over the same identity preserves it, so a
+     * dynamically allocated identity tracked into a later cell is never
+     * mistaken for a producer-less seed operand.
      */
     public static final String REGISTRY_ONE_TO_ONE = "REGISTRY_ONE_TO_ONE";
 
@@ -2332,23 +2338,24 @@ public final class BindingsProductionValidator {
         }
         // The identity-preserving loads: a BINDING_LOAD naming a seed init's
         // {binding, generation} whose result identity is that init's operand
-        // identity.
-        Set<Long> preservedValues = new LinkedHashSet<>();
+        // identity. The preservation decision is per op and closed
+        // (ISSUE-0675): an identity whose candidate cell carries at least
+        // one load that does NOT name that cell's {binding, generation} is
+        // a producing position, even when another load over the same
+        // identity preserves it — the exclusion admits only identities
+        // every publishing load of which republishes the candidate init's
+        // own operand.
+        Set<Long> producingValues = new LinkedHashSet<>(nonLoadProducedValues);
         for (SemanticOp op : loads) {
             if (!(op.result() instanceof ValueId produced)
                     || !(op.payload() instanceof KindPayload.BindingLoadPayload load)) {
                 continue;
             }
             BindingSite seed = seedInitsOf.get(produced.id());
-            if (seed != null && seed.binding().equals(load.binding())
-                    && seed.generation() == load.generation()) {
-                preservedValues.add(produced.id());
-            }
-        }
-        Set<Long> producingValues = new LinkedHashSet<>(nonLoadProducedValues);
-        for (SemanticOp op : loads) {
-            if (op.result() instanceof ValueId produced
-                    && !preservedValues.contains(produced.id())) {
+            boolean preserved = seed != null
+                && seed.binding().equals(load.binding())
+                && seed.generation() == load.generation();
+            if (!preserved) {
                 producingValues.add(produced.id());
             }
         }
