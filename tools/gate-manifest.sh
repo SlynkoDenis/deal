@@ -1067,4 +1067,35 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # without building its native library at all (the oracle loads no
   # library, resolves no symbol, and runs no generated evaluator content).
   'fg|=== Running FFI Plan Projection Oracle Tests (ISSUE-0667) ===|java -ea -cp build deal.test.FfiPlanProjectionOracleTest'
+
+  # ISSUE-0670 registration: the consolidated FFI production-corpus
+  # integration drive (luajit-ffi-load-emission-and-typed-crossings
+  # Verification 1-4 and 7-8; luajit-ffi-struct-plan-construction-and-
+  # oracle-projection Verification 1; luajit-ffi-shared-emission-and-jvm-
+  # rejection Verification 1-4 and 7; the epic criteria): one drive
+  # compiles every LuaJIT-executing FFI fixture (012, 013, 014, 019, 020,
+  # 022-027, 048, 049, 050, 051) through the production pipeline with the
+  # corpus's production FFI metadata (CorpusFfi.module(...).generatedModule()
+  # and the bootstrapped loader text) and executes each published artifact
+  # under luajit — the runtime-ok fixtures compare exit code and both
+  # transcript streams with their sidecars, the runtime-error fixtures
+  # compare the artifact's exit code, the production terminal's
+  # DEAL_ERROR_CODE line (the call-expression legs), the captured
+  # code/message/sourceFile/line/column, and the reconstructed canonical
+  # DEAL_ERROR_CODE/DEAL_ERROR_SNAPSHOT transcript byte-for-byte with their
+  # sidecars; the load_ffi prelude (the metadata module key, the generated
+  # bindings literal, the import statement's span triplet, no dotted
+  # provider require) is asserted in every artifact; the six FFI_* codes
+  # keep their pinned origins (FFI_SYMBOL_MISSING and FFI_LIBRARY_LOAD at
+  # the import statement; FFI_NULL_STRING, FFI_INVALID_UTF8,
+  # FFI_NULL_POINTER, FFI_INVALID_STRING at the call expression); ffi/016
+  # stays unclaimed (the bytes child ISSUE-0626) and ffi/047 keeps its
+  # E7002 declaration negative; the corpus inventory is the pinned closed
+  # list (no fixture or sidecar deleted or reshaped, ffi/051 the only
+  # addition); and no library, no symbol, and no evaluator is touched at
+  # compile (the never-built library and the absent symbol both emit, the
+  # plan literal carries only the deferred evaluator closures, and the
+  # generator's literals are byte-deterministic) with no
+  # ffi.C/cdef/dlopen/dlsym text in any artifact.
+  'fg|=== Running FFI Production-Corpus Integration Tests (ISSUE-0670) ===|java -ea -cp build deal.test.FfiProductionCorpusTest'
 )
