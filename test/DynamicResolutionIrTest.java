@@ -372,6 +372,10 @@ public class DynamicResolutionIrTest {
                     new AdaptSourceRef.SharedCell(new BindingId(3), 0), SIG, SIG))),
             "an AdapterBinding fails closed (its class derives from the D15-resolved source "
                 + "binding)");
+        check(throwsIllegalArgument(() -> DynamicReturnBoundaryProtocol.kindOf(
+                new FunctionExecutionBinding.DynamicFunctionValue(nextOpId(), SIG))),
+            "a DynamicFunctionValue fails closed (the record names no execution class; the "
+                + "class is the runtime value's producing registration)");
 
         OpId deal = nextOpId();
         OpId host = nextOpId();

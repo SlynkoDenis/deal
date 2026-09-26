@@ -112,6 +112,10 @@ public record RawUnit(
                 new RawBinding(allocationId, "intrinsicFunction", null, null, null, null,
                     intrinsic.descriptor().canonicalSpecText(), null, null,
                     intrinsic.kind().name());
+            case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                new RawBinding(allocationId, "dynamicFunctionValue", null, null, null, null,
+                    dynamic.descriptor().canonicalSpecText(), null,
+                    dynamic.materializingOpId());
         };
     }
 

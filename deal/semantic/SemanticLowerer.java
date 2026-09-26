@@ -10234,6 +10234,9 @@ public final class SemanticLowerer {
                     external.descriptor().paramTypes().size();
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     intrinsic.descriptor().paramTypes().size();
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicCarrierDefect(dynamic, "a statically classified call "
+                        + "arity");
             };
         }
 
@@ -10295,6 +10298,24 @@ public final class SemanticLowerer {
                 + "function value resolved by " + site + " has no call execution in this "
                 + "slice (the intrinsic carrier is the function-typed-value child's — "
                 + "producer defect)");
+        }
+
+        /**
+         * The fail-closed producer defect of a dynamic function value
+         * resolved by a statically classified site: this slice registers
+         * the closed {@code DynamicFunctionValue} binding only — a call or
+         * await whose callee resolves to it takes the closed dynamic arm
+         * (its execution class is resolved from the runtime value's
+         * producing registration), so no statically classified site may
+         * resolve one (producer defect).
+         */
+        private static ConstructUnlowered dynamicCarrierDefect(
+                FunctionExecutionBinding.DynamicFunctionValue dynamic, String site) {
+            return new ConstructUnlowered("the dynamic function value produced by op "
+                + dynamic.materializingOpId() + " resolved by " + site + " has no "
+                + "statically classified execution in this slice (its execution class "
+                + "resolves from the runtime value's producing registration — the "
+                + "function-typed-value child's; producer defect)");
         }
 
         /** The adapter's statically fixed source binding, or null (thunk/call-result sources). */
@@ -10447,6 +10468,8 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
                         + "'");
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicCarrierDefect(dynamic, "the call of '" + calleeName + "'");
             }
             // The single return boundary per the closed table.
             OpId returnBoundaryOpId = null;
@@ -10500,6 +10523,9 @@ public final class SemanticLowerer {
                         case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                             throw intrinsicCarrierDefect(intrinsic, "the adapted call "
                                 + "of '" + calleeName + "'");
+                        case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                            throw dynamicCarrierDefect(dynamic, "the adapted call of '"
+                                + calleeName + "'");
                         case FunctionExecutionBinding.AdapterBinding nested ->
                             throw new ConstructUnlowered("nested adapter source of '"
                                 + calleeName + "' (adapter-of-adapter invocation is "
@@ -10523,6 +10549,8 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
                         + "'");
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicCarrierDefect(dynamic, "the call of '" + calleeName + "'");
             }
             emit(buildOp(callOpId, SemanticOpKind.CALL,
                 new KindPayload.CallPayload(CallMode.INDIRECT,
@@ -11121,6 +11149,8 @@ public final class SemanticLowerer {
                         + "lowerAdapterOverAsync (producer defect)");
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicCarrierDefect(intrinsic, "the await call");
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicCarrierDefect(dynamic, "the await call");
             }
             RuntimeDescriptor completion = signature.returnType();
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
@@ -11244,6 +11274,9 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicCarrierDefect(intrinsic, "the adapter-over-async call "
                         + "of '" + calleeName + "'");
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicCarrierDefect(dynamic, "the adapter-over-async call of '"
+                        + calleeName + "'");
             }
             AsyncTokenId outerToken = new AsyncTokenId.Alias(
                 ids.nextTokenId(module, nextOrdinal++, 0), sourceToken,

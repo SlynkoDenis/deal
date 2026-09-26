@@ -1257,6 +1257,13 @@ public class ProjectGateFaultBatteryTest {
     private static final String INTRINSIC_FUNCTION_BINDING = "IntrinsicFunction";
 
     /**
+     * The one binding shape the function-typed-value child adds
+     * (ISSUE-0673): the dynamic materialization whose execution class is
+     * resolved from the runtime value's producing registration.
+     */
+    private static final String DYNAMIC_FUNCTION_VALUE_BINDING = "DynamicFunctionValue";
+
+    /**
      * The SHA-256 of the {@link #payloadShapeBaseline()} text of the real
      * loaded payload records, with {@code ModuleImportPayload}'s recorded
      * alias-cell component excluded: the frozen pre-slice payload-record
@@ -1297,6 +1304,7 @@ public class ProjectGateFaultBatteryTest {
 
         Set<String> expectedBindings = new LinkedHashSet<>(PRE_SLICE_FUNCTION_BINDINGS);
         expectedBindings.add(INTRINSIC_FUNCTION_BINDING);
+        expectedBindings.add(DYNAMIC_FUNCTION_VALUE_BINDING);
         Class<?>[] permitted = FunctionExecutionBinding.class.getPermittedSubclasses();
         check(permitted != null,
             "FunctionExecutionBinding stays a sealed closed set");
@@ -1309,7 +1317,7 @@ public class ProjectGateFaultBatteryTest {
             }
             checkEq(expectedBindings, actual,
                 "the closed FunctionExecutionBinding set is the pre-slice five plus "
-                    + "the IntrinsicFunction shape");
+                    + "the IntrinsicFunction shape plus the DynamicFunctionValue shape");
         }
 
         // The other closed sets the seeds and the namespace registrations
@@ -1771,8 +1779,8 @@ public class ProjectGateFaultBatteryTest {
 
     /** The JavaScript sources may not reference any slice surface. */
     private static final List<String> JS_SLICE_MARKERS = List.of(
-        "aliasCells", "ntrinsicFunction", "HOST_DEFAULTS", "FFI_PLAN",
-        "BUILTIN_DEFAULTS", "lowerProject", "NamespaceRegistration",
+        "aliasCells", "ntrinsicFunction", "ynamicFunctionValue", "HOST_DEFAULTS",
+        "FFI_PLAN", "BUILTIN_DEFAULTS", "lowerProject", "NamespaceRegistration",
         "R-BOUNDARY-TRIPLE");
 
     private static List<String> sorted(List<String> values) {

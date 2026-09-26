@@ -677,16 +677,26 @@ public class SemanticIrSchemaTest {
                     .equals(IntrinsicKind.INT_CONVERT.declaredSignature()),
             "IntrinsicFunction carries kind and descriptor (ISSUE-0632)");
 
+        OpId materializing = new OpId(new ModuleId("m"), 7);
+        FunctionExecutionBinding dynamic =
+            new FunctionExecutionBinding.DynamicFunctionValue(materializing, sig);
+        check(dynamic instanceof FunctionExecutionBinding.DynamicFunctionValue value
+                && value.materializingOpId().equals(materializing)
+                && value.descriptor().equals(sig),
+            "DynamicFunctionValue carries the producing op id and the descriptor "
+                + "(ISSUE-0673)");
+
         Set<Class<?>> permitted = Set.copyOf(Arrays.asList(
             FunctionExecutionBinding.LoweredBody.class,
             FunctionExecutionBinding.AdapterBinding.class,
             FunctionExecutionBinding.HostFunction.class,
             FunctionExecutionBinding.HostFunctionValue.class,
             FunctionExecutionBinding.ExternalFunction.class,
-            FunctionExecutionBinding.IntrinsicFunction.class));
+            FunctionExecutionBinding.IntrinsicFunction.class,
+            FunctionExecutionBinding.DynamicFunctionValue.class));
         check(FunctionExecutionBinding.class.isSealed()
                 && permitted.equals(Set.copyOf(Arrays.asList(FunctionExecutionBinding.class.getPermittedSubclasses()))),
-            "FunctionExecutionBinding is sealed over exactly the 6 pinned variants");
+            "FunctionExecutionBinding is sealed over exactly the 7 pinned variants");
 
         BoundaryRealization checkOp = new BoundaryRealization.RuntimeValidation("check-1");
         BoundaryRealization proof = new BoundaryRealization.RepresentationProof("jvm-int-proof");

@@ -3587,6 +3587,8 @@ public final class SemanticOracle {
                         invokeExternalCall(op, payload, external, checkedArgs);
                     case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                         throw intrinsicExecutionDefect(intrinsic);
+                    case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                        throw dynamicFunctionValueDefect(dynamic);
                 };
             return publish(op, returned);
         }
@@ -3683,6 +3685,8 @@ public final class SemanticOracle {
                         + "outside the statically-resolved slice (ISSUE-0531)");
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicExecutionDefect(intrinsic);
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicFunctionValueDefect(dynamic);
             };
         }
 
@@ -3800,6 +3804,8 @@ public final class SemanticOracle {
                         + "source before classification (producer defect)");
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicExecutionDefect(intrinsic);
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicFunctionValueDefect(dynamic);
             };
         }
 
@@ -4042,6 +4048,23 @@ public final class SemanticOracle {
         }
 
         /**
+         * The fail-closed producer defect of a dynamic function value's
+         * execution: this slice registers the closed
+         * {@code DynamicFunctionValue} binding only — the carrier's
+         * execution class is resolved from the runtime value's producing
+         * registration, and that resolution and its class paths are the
+         * function-typed-value child's, so no produced unit may resolve
+         * one at a call site.
+         */
+        private static IllegalStateException dynamicFunctionValueDefect(
+                FunctionExecutionBinding.DynamicFunctionValue dynamic) {
+            return new IllegalStateException("the dynamic function value produced by op "
+                + dynamic.materializingOpId() + " has no execution in this slice (its "
+                + "execution class resolves from the runtime value's producing "
+                + "registration — the function-typed-value child's; producer defect)");
+        }
+
+        /**
          * Runs a callee body block, skipping the leading parameter ALLOCs
          * (already bound); a RETURN transfers the checked value out.
          */
@@ -4188,6 +4211,8 @@ public final class SemanticOracle {
                 }
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                     throw intrinsicExecutionDefect(intrinsic);
+                case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                    throw dynamicFunctionValueDefect(dynamic);
             }
             return tokenAtom(token);
         }
@@ -4676,6 +4701,8 @@ public final class SemanticOracle {
                                 throw new IllegalStateException("adapter-of-adapter "
                                     + "invocation is outside the statically-resolved "
                                     + "slice (ISSUE-0531)");
+                            case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                                throw dynamicFunctionValueDefect(dynamic);
                         };
                     }
                     case FunctionExecutionBinding.HostFunction host -> {
@@ -4699,6 +4726,8 @@ public final class SemanticOracle {
                     }
                     case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
                         throw intrinsicExecutionDefect(intrinsic);
+                    case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
+                        throw dynamicFunctionValueDefect(dynamic);
                 };
                 emitSuccess(callback, atomOf(returned));
                 return returned;

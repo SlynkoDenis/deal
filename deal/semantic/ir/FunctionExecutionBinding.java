@@ -12,7 +12,7 @@ import java.util.Objects;
  * allocation identity to its binding at execution and never infer it from
  * the call-site type.
  *
- * <p>Closed shape — exactly the six variants below; no other binding
+ * <p>Closed shape — exactly the seven variants below; no other binding
  * shape exists:</p>
  *
  * <ul>
@@ -28,6 +28,10 @@ import java.util.Objects;
  *   <li>{@link IntrinsicFunction} — a producer-less conversion intrinsic
  *       ({@code int}/{@code number}) registered by the lowering's
  *       intrinsic seed.</li>
+ *   <li>{@link DynamicFunctionValue} — a function-typed materialization
+ *       whose execution class is resolved from the materialized carrier
+ *       at execution (a typed binding load, a container/class/namespace
+ *       read, a call result, or an awaited completion).</li>
  * </ul>
  */
 public sealed interface FunctionExecutionBinding
@@ -36,7 +40,8 @@ public sealed interface FunctionExecutionBinding
             FunctionExecutionBinding.HostFunction,
             FunctionExecutionBinding.HostFunctionValue,
             FunctionExecutionBinding.ExternalFunction,
-            FunctionExecutionBinding.IntrinsicFunction {
+            FunctionExecutionBinding.IntrinsicFunction,
+            FunctionExecutionBinding.DynamicFunctionValue {
 
     /** A DEAL function body. */
     record LoweredBody(FunctionId functionId, BlockId blockId) implements FunctionExecutionBinding {
@@ -121,6 +126,27 @@ public sealed interface FunctionExecutionBinding
 
         public IntrinsicFunction {
             Objects.requireNonNull(kind, "kind must not be null");
+            Objects.requireNonNull(descriptor, "descriptor must not be null");
+        }
+    }
+
+    /**
+     * A function-typed materialization whose execution class is resolved
+     * from the materialized carrier at execution: the op that produces
+     * the value identity and the value's checked function descriptor.
+     * No execution class, owning module, or export is recorded, because
+     * none is statically known — the class is the runtime value's own
+     * producing registration at execution. The record is therefore never
+     * a resolution input of
+     * {@link DynamicReturnBoundaryProtocol#kindOf(FunctionExecutionBinding)}
+     * (it fails closed on this shape); a call or await whose callee
+     * resolves to it takes the closed dynamic arm.
+     */
+    record DynamicFunctionValue(OpId materializingOpId, RuntimeDescriptor.Func descriptor)
+        implements FunctionExecutionBinding {
+
+        public DynamicFunctionValue {
+            Objects.requireNonNull(materializingOpId, "materializingOpId must not be null");
             Objects.requireNonNull(descriptor, "descriptor must not be null");
         }
     }

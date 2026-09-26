@@ -63,6 +63,12 @@ TEST_MAINS=(
   # D7/D13, the registration-seed contract; semantic-ir-construct-coverage-cutover
   # K9 item 7 and K14's registration half).
   'fg|=== Running Intrinsic Seed Bindings / Closed Gate Admission Tests (ISSUE-0632) ===|java -ea -cp build deal.test.IntrinsicSeedBindingsTest'
+  # ISSUE-0673 registration: the closed DynamicFunctionValue member, its
+  # canonical/raw shapes, the registry entry point, and the shape-admission
+  # and producing-op correlation clauses
+  # (function-typed-value-materialization-and-dispatch M1/M3 items 1-2;
+  # semantic-ir-construct-coverage-cutover K9 item 4).
+  'fg|=== Running Dynamic Function Value Binding / Closed Shapes Tests (ISSUE-0673) ===|java -ea -cp build deal.test.DynamicFunctionValueBindingTest'
   'fg|=== Running Protected Path Ops Tests (ISSUE-0262) ===|java -ea -cp build deal.test.ProtectedPathOpsTest'
   'fg|=== Running Identity Carrier Package Tests (ISSUE-0309) ===|java -ea -cp build deal.test.CanonicalIdentityTest'
   'fg|=== Running Sidecar Schema Validator Tests (ISSUE-0348) ===|java -ea -cp build deal.test.conformance.SidecarSchemaValidatorTest'

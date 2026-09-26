@@ -61,7 +61,14 @@ import java.util.Optional;
  *   <li>{@link #registerIntrinsic} — a producer-less conversion intrinsic
  *       ({@code int}/{@code number}) seeded at module-init top,
  *       registering {@code IntrinsicFunction {kind, descriptor}} keyed by
- *       the seeded function-value identity.</li>
+ *       the seeded function-value identity;</li>
+ *   <li>{@link #registerDynamicFunctionValue} — a function-typed
+ *       materialization whose execution class is resolved from the
+ *       materialized carrier at execution (a typed binding load, a
+ *       container/class/namespace read, a call result, or an awaited
+ *       completion), registering {@code DynamicFunctionValue
+ *       {materializingOpId, descriptor}} keyed by the producing op's
+ *       result allocation identity.</li>
  * </ul>
  *
  * <p><b>Seam boundary (explicit).</b> This child does not produce the
@@ -548,6 +555,33 @@ public final class FunctionBindingRegistry {
         register(Objects.requireNonNull(identity, "identity must not be null"),
             new FunctionExecutionBinding.IntrinsicFunction(
                 Objects.requireNonNull(kind, "kind must not be null"),
+                Objects.requireNonNull(descriptor, "descriptor must not be null")));
+    }
+
+    /**
+     * Registers the {@code DynamicFunctionValue} binding of one
+     * function-typed materialization whose execution class is resolved
+     * from the materialized carrier at execution: the producing op's
+     * identity (the correlation id the schema validator's
+     * R-FUNCTION-BINDING clause resolves to the named op, its result
+     * identity, and its result descriptor) and the value's checked
+     * function descriptor, keyed by the producing op's result allocation
+     * identity. The record names no execution class (none is statically
+     * known); the class is the runtime value's own producing registration
+     * at execution. A second registration for the same identity stays
+     * rejected at registration time.
+     *
+     * @param identity          the producing op's result allocation identity; non-null
+     * @param materializingOpId the producing op's identity (the correlation id); non-null
+     * @param descriptor        the value's checked function descriptor; non-null
+     */
+    public void registerDynamicFunctionValue(FunctionAllocationIdentity identity,
+                                             OpId materializingOpId,
+                                             RuntimeDescriptor.Func descriptor) {
+        register(Objects.requireNonNull(identity, "identity must not be null"),
+            new FunctionExecutionBinding.DynamicFunctionValue(
+                Objects.requireNonNull(materializingOpId,
+                    "materializingOpId must not be null"),
                 Objects.requireNonNull(descriptor, "descriptor must not be null")));
     }
 

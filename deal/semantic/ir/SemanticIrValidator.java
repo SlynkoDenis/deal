@@ -130,7 +130,10 @@ public final class SemanticIrValidator {
      * correlation (ISSUE-0531): the materializing crossing op id must
      * name exactly the producing host crossing whose input identity keys
      * the registration and whose checked descriptor the registration
-     * carries.
+     * carries — and the closed {@code DynamicFunctionValue} correlation
+     * (ISSUE-0673): the registered producing op id must name an op of
+     * the unit whose result identity is the registration key and whose
+     * result descriptor is the registered descriptor.
      */
     public static final String R_FUNCTION_BINDING = "R-FUNCTION-BINDING";
 
@@ -539,7 +542,8 @@ public final class SemanticIrValidator {
     private static Optional<CompilerDiagnostic> checkBindingEnum(RawUnit unit, ComparisonFacts facts,
                                                                  RawBinding binding) {
         Set<String> shapes = Set.of("loweredBody", "adapter", "hostFunction",
-            "hostFunctionValue", "externalFunction", "intrinsicFunction");
+            "hostFunctionValue", "externalFunction", "intrinsicFunction",
+            "dynamicFunctionValue");
         if (!shapes.contains(binding.shape())) {
             return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
                 origin(R_ENUM, "open value \"" + binding.shape()
@@ -563,6 +567,14 @@ public final class SemanticIrValidator {
                 origin(R_ENUM, "the intrinsicFunction binding " + binding.allocationId()
                     + " carries no intrinsic kind and descriptor text (the closed shape "
                     + "position is its kind plus its declared signature)"));
+        }
+        if ("dynamicFunctionValue".equals(binding.shape())
+                && (binding.materializingBoundaryOpId() == null
+                    || binding.descriptor() == null)) {
+            return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
+                origin(R_ENUM, "the dynamicFunctionValue binding " + binding.allocationId()
+                    + " carries no producing op id and descriptor text (the closed shape "
+                    + "position is the producing op plus the materialized descriptor)"));
         }
         if (binding.executionOwner() != null
                 && enumByName(ExternalExecutionOwner.class, binding.executionOwner()) == null) {
@@ -2954,6 +2966,58 @@ public final class SemanticIrValidator {
                         + "registration keyed by the crossing input with "
                         + "materializingBoundaryOpId == the crossing op and the crossing's "
                         + "descriptor)"));
+            }
+        }
+        // Direction (iii): the dynamic-function-value materialization
+        // correlation. A DynamicFunctionValue registration names no
+        // statically known class, so its producing op is the single
+        // correlation channel: the named op must exist in the unit, its
+        // result identity must be the registration key, and its result
+        // descriptor must equal the registered descriptor. A missing
+        // correlation is invalid IR.
+        for (RawBinding binding : unit.bindings()) {
+            if (!"dynamicFunctionValue".equals(binding.shape())) {
+                continue;
+            }
+            if (binding.materializingBoundaryOpId() == null) {
+                return fail(unit, facts, R_FUNCTION_BINDING,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_FUNCTION_BINDING, "the DynamicFunctionValue registration key "
+                        + binding.allocationId() + " carries no materializingBoundaryOpId "
+                        + "(the correlation id naming its producing op)"));
+            }
+            RawOp producing = null;
+            for (RawOp op : unit.ops()) {
+                if (op.opId().equals(binding.materializingBoundaryOpId())) {
+                    producing = op;
+                    break;
+                }
+            }
+            if (producing == null) {
+                return fail(unit, facts, R_FUNCTION_BINDING,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_FUNCTION_BINDING, "the DynamicFunctionValue registration key "
+                        + binding.allocationId() + " names materializingBoundaryOpId "
+                        + binding.materializingBoundaryOpId() + ", which does not resolve "
+                        + "to an op of the unit"));
+            }
+            if (producing.resultValue() == null
+                    || producing.resultValue().id() != binding.allocationId()) {
+                return fail(unit, facts, R_FUNCTION_BINDING,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_FUNCTION_BINDING, "the DynamicFunctionValue registration key "
+                        + binding.allocationId() + " materializing op "
+                        + binding.materializingBoundaryOpId() + " does not carry the "
+                        + "registered allocation identity as its result"));
+            }
+            RuntimeDescriptor descriptor = parseDescriptorQuiet(producing.resultType());
+            if (!(descriptor instanceof RuntimeDescriptor.Func)
+                    || !descriptor.canonicalSpecText().equals(binding.descriptor())) {
+                return fail(unit, facts, R_FUNCTION_BINDING,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_FUNCTION_BINDING, "the DynamicFunctionValue registration key "
+                        + binding.allocationId() + " descriptor does not equal its "
+                        + "producing op's result descriptor"));
             }
         }
         return Optional.empty();
