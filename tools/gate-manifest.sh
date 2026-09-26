@@ -630,19 +630,26 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # ISSUE-0657 registration: the dynamic call shape production
   # (dynamic-call-shape-production-and-emission Y1/Y4 and the dynamic
   # call/async-start shape contracts;
-  # semantic-ir-construct-coverage-cutover K5 and K12's form (b)): the
+  # semantic-ir-construct-coverage-cutover K5/K12): the
   # CALL(INDIRECT) with CallCallee.Dynamic, the declared-signature
   # FUNCTION_PARAMETER children, and the three recorded
-  # DynamicReturnBoundary cells with the DEAL-body cell parented to the
-  # call-owned RETURN naming the CALL; the ASYNC_START(Dynamic, DEAL_BODY,
-  # RUN) with the single recorded task cell parented to the RETURN naming
-  # the start, consumed by exactly one AWAIT/ASYNC_COMPLETION; the
+  # DynamicReturnBoundary cells with the DEAL-body cell in its closed K12
+  # form (the callee-owned RETURN-materialized cell of a statically
+  # identified same-walk body, or the call-owned record parented to the
+  # RETURN naming the CALL for a runtime-resolved callee — ISSUE-0677);
+  # the ASYNC_START(Dynamic, DEAL_BODY,
+  # RUN) with the single recorded task cell in its closed form, consumed
+  # by exactly one AWAIT/ASYNC_COMPLETION; the
   # identifier-callee and callee-expression arms; the gate-clean closure
   # carriers (the closed gate, the address-chain protocol, the
   # control-flow validator's call-owned-record admission, and the
   # bindings production validator pass; repeated dumps are byte-identical),
-  # the pending materialization clause (R-FUNCTION-BINDING) of the
-  # function-typed-value child, the unchanged static arms, and the
+  # the realized materialization registrations of the function-typed-value
+  # child, the per-form and per-mode drives (a parameter, member-read, and
+  # call-result callee record the call-owned record; an in-place function
+  # expression records its own body's cell; a never-returning body keeps
+  # the record), the form-swap and other-static-class negatives, the
+  # unchanged static arms, and the
   # hand-built dynamic-cell/record negatives. The class lives in
   # package deal.semantic to reach the package-internal project walk.
   'fg|=== Running Dynamic Call Shape Production Tests (ISSUE-0657) ===|java -ea -cp build deal.semantic.DynamicCallLoweringTest'
@@ -668,11 +675,16 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # callee's origin, and the adapter whose D15 source value identifies no
   # class the closed protocol resolves), the factory
   # triple (descriptor text, canonical spec text, function identity) and
-  # the adapter's pinned null fid, and the unchanged closed op-kind,
-  # boundary-kind, failure-policy, and payload sets. The drives register
-  # the callee carrier read with the runtime carrier's own binding (the
-  # pending DynamicFunctionValue materialization registration of
-  # ISSUE-0622) and change nothing else of the one lowering's output. The
+  # the adapter's pinned null fid, the callee-owned cell drive (a
+  # same-walk body records its own RETURN cell, executed exactly once by
+  # that RETURN), the call-owned cell's invocation-site execution between
+  # the resolved body's own return cell and the invocation's SUCCESS
+  # terminal, the oracle's value-channel resolution of a runtime-resolved
+  # callee and its fail-closed guard, and the unchanged closed op-kind,
+  # boundary-kind, failure-policy, and payload sets. The drives lower and
+  # validate the one walk's own output — a runtime-resolved callee keeps
+  # the producer rule's DynamicFunctionValue record and no drive doctors a
+  # registration (ISSUE-0677). The
   # class lives in package deal.semantic to reach the package-internal
   # project walk.
   'fg|=== Running Dynamic Dispatch Emission Tests (ISSUE-0658) ===|java -ea -cp build deal.semantic.DynamicDispatchEmissionTest'

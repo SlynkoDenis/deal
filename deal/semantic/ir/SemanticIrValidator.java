@@ -116,8 +116,13 @@ public final class SemanticIrValidator {
     /** The R-POLICY-KIND rule: a failure policy not allowed for its selector/kind. */
     public static final String R_POLICY_KIND = "R-POLICY-KIND";
 
-    /** The R-BOUNDARY-TRIPLE rule: a boundary triple outside the closed boundary-assignment table
-     *  (including a body-local creation-op return cell that violates its closed conditions). */
+    /**
+     * The R-BOUNDARY-TRIPLE rule: a boundary triple outside the closed
+     * boundary-assignment table (including a body-local creation-op return cell
+     * that violates its closed conditions), and the closed dynamic-invocation
+     * clauses (the callee-value class set and the recorded DEAL-body cell
+     * form's correlation with the callee value's registration — ISSUE-0677).
+     */
     public static final String R_BOUNDARY_TRIPLE = "R-BOUNDARY-TRIPLE";
 
     /** The R-ELIDED-PLACEMENT rule: ELIDED_BY_ADAPTER outside an adapter-over-async task. */
@@ -230,6 +235,10 @@ public final class SemanticIrValidator {
         if (failure.isPresent()) {
             return failure;
         }
+        Optional<CompilerDiagnostic> dynamicForms = checkDynamicCellForms(unit, raw, facts);
+        if (dynamicForms.isPresent()) {
+            return dynamicForms;
+        }
         return checkClassDeclarationLayout(unit, raw, facts);
     }
 
@@ -257,6 +266,16 @@ public final class SemanticIrValidator {
             Optional<CompilerDiagnostic> failure = validateUnit(unit, facts, closure);
             if (failure.isPresent()) {
                 return failure;
+            }
+        }
+        // The typed-surface ties of the closed rules (the layout waiver and
+        // the dynamic DEAL-body cell's form correlation) run over the
+        // project's own typed units after the raw rule engine.
+        for (LoweredModuleUnit unit : project.modules().values()) {
+            RawUnit raw = closure.get(unit.moduleId().path());
+            Optional<CompilerDiagnostic> dynamicForms = checkDynamicCellForms(unit, raw, facts);
+            if (dynamicForms.isPresent()) {
+                return dynamicForms;
             }
         }
         return Optional.empty();
@@ -461,6 +480,190 @@ public final class SemanticIrValidator {
                 + " recorded in constructCoverage with no produced op of any mapped kind "
                 + "and no class layout record (a layout-only class must still have its "
                 + "layout)"));
+    }
+
+    /**
+     * The K12 dynamic DEAL-body cell's form correlation on the typed
+     * surface (ISSUE-0677; design source
+     * {@code function-typed-value-materialization-and-dispatch} M3 item 5 and
+     * the dynamic DEAL-body cell contract): a dynamic invocation records
+     * exactly one closed cell form, and the recorded structure must agree
+     * with the callee value's produced registration —
+     *
+     * <ul>
+     *   <li>a same-walk {@code loweredBody} registration whose body carries a
+     *       {@code RETURN}-materialized return cell requires the
+     *       callee-owned form: the recorded cell is that body's own return
+     *       boundary, parented to a {@code RETURN} of the body naming the
+     *       body's function and recording the cell as its
+     *       {@code returnBoundaryOpId}; a call-owned record for such a
+     *       registration (which would leave the body's own cell unexecuted
+     *       or duplicate it) is a producer defect;</li>
+     *   <li>the producer rule's {@code dynamicFunctionValue} registration (or
+     *       no registration) requires the call-owned form: the recorded cell
+     *       is parented to a {@code RETURN} of no lowered body of the unit
+     *       (the landed record shape). A callee-owned record for a
+     *       runtime-resolved callee is a producer defect (the named body is
+     *       not the callee's);</li>
+     *   <li>a never-returning same-walk body (whose walk produced no
+     *       {@code RETURN}, so its cell is materialized by its invocation op
+     *       and no {@code RETURN}-owned cell exists to record) takes the
+     *       call-owned form.</li>
+     * </ul>
+     *
+     * <p>The raw model carries no lowered-function set, so this tie is
+     * checked on the typed unit after the closed rule engine (and the
+     * callee-value class clause the raw rule runs on both surfaces) passes —
+     * exactly the typed-surface tie {@code CLASS_DECLARATION}'s layout waiver
+     * uses.</p>
+     *
+     * @param unit  the typed unit; non-null
+     * @param raw   the unit's raw model (the diagnostic's module path); non-null
+     * @param facts the comparison facts; non-null
+     * @return the first failure, or empty
+     */
+    private static Optional<CompilerDiagnostic> checkDynamicCellForms(
+            LoweredModuleUnit unit, RawUnit raw, ComparisonFacts facts) {
+        Map<OpId, SemanticOp> opsById = new LinkedHashMap<>();
+        for (SemanticOp op : unit.ops()) {
+            opsById.put(op.opId(), op);
+        }
+        for (SemanticOp op : unit.ops()) {
+            ValueId calleeValue;
+            OpId cellOpId;
+            switch (op.payload()) {
+                case KindPayload.CallPayload call
+                        when call.callee()
+                            instanceof KindPayload.CallCallee.Dynamic dynamic
+                            && call.dynamicReturnBoundary() != null -> {
+                    calleeValue = dynamic.callee();
+                    cellOpId = call.dynamicReturnBoundary().dealBodyBoundaryOpId();
+                }
+                case KindPayload.AsyncStartPayload start
+                        when start.callee()
+                            instanceof KindPayload.CallCallee.Dynamic dynamic
+                            && start.returnBoundaryOpId() != null -> {
+                    calleeValue = dynamic.callee();
+                    cellOpId = start.returnBoundaryOpId();
+                }
+                default -> {
+                    continue;
+                }
+            }
+            Optional<String> failure = dynamicCellFormFailure(unit, opsById, op, calleeValue,
+                cellOpId);
+            if (failure.isPresent()) {
+                return fail(raw, facts, R_BOUNDARY_TRIPLE,
+                    SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_BOUNDARY_TRIPLE, failure.get()));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The form correlation of one dynamic invocation's recorded cell: the
+     * recorded structure against the callee value's produced registration.
+     */
+    private static Optional<String> dynamicCellFormFailure(LoweredModuleUnit unit,
+            Map<OpId, SemanticOp> opsById, SemanticOp invocation, ValueId calleeValue,
+            OpId cellOpId) {
+        SemanticOp cell = opsById.get(cellOpId);
+        if (cell == null || cell.origin() == null || cell.origin().parentOpId() == null) {
+            return Optional.empty(); // the landed cell rules own an unresolvable cell.
+        }
+        SemanticOp parent = opsById.get(cell.origin().parentOpId());
+        KindPayload.ReturnPayload returned = parent != null
+                && parent.kind() == SemanticOpKind.RETURN
+                && parent.payload() instanceof KindPayload.ReturnPayload payload
+            ? payload : null;
+        boolean calleeOwned = returned != null
+            && returned.returnBoundaryOpId() != null
+            && returned.returnBoundaryOpId().equals(cellOpId)
+            && unit.functions().containsKey(returned.function());
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(calleeValue.id()));
+        switch (registration) {
+            case null -> {
+                return calleeOwned ? calleeOwnedFailure(invocation, cellOpId, returned,
+                    calleeValue) : Optional.empty();
+            }
+            case FunctionExecutionBinding.DynamicFunctionValue ignored -> {
+                return calleeOwned ? calleeOwnedFailure(invocation, cellOpId, returned,
+                    calleeValue) : Optional.empty();
+            }
+            case FunctionExecutionBinding.LoweredBody body -> {
+                OpId bodyReturnCell = bodyReturnCellOf(unit, opsById, body.functionId());
+                if (bodyReturnCell == null) {
+                    // A never-returning body: no RETURN-materialized cell
+                    // exists to record, so the call-owned record stands.
+                    return Optional.empty();
+                }
+                if (!calleeOwned) {
+                    return Optional.of("the " + invocation.kind() + " op "
+                        + invocation.opId() + " records a call-owned DEAL-body cell "
+                        + cellOpId + " while its callee value " + calleeValue
+                        + " carries the same-walk loweredBody registration of function "
+                        + body.functionId().id() + ", whose own RETURN-materialized return"
+                        + " cell " + bodyReturnCell + " is the callee-owned form's recorded"
+                        + " cell");
+                }
+                if (!body.functionId().equals(returned.function())) {
+                    return Optional.of("the " + invocation.kind() + " op "
+                        + invocation.opId() + " records the return cell of function "
+                        + returned.function().id() + " while its callee value " + calleeValue
+                        + " carries the same-walk loweredBody registration of function "
+                        + body.functionId().id()
+                        + " (the recorded cell must be the callee body's own cell)");
+                }
+                return Optional.empty();
+            }
+            default -> {
+                return Optional.of("the " + invocation.kind() + " op " + invocation.opId()
+                    + " resolves its callee value " + calleeValue + " to the static class "
+                    + registration.getClass().getSimpleName()
+                    + ": a Dynamic callee admits the producer rule's dynamic registration"
+                    + " or a same-walk loweredBody registration only (a statically"
+                    + " classified callee belongs to the Static/Indirect arms of the"
+                    + " closed call table)");
+            }
+        }
+    }
+
+    /**
+     * The call-owned-form failure of a runtime-resolved callee whose recorded
+     * cell is the callee-owned structure ({@code null} when the form agrees).
+     */
+    private static Optional<String> calleeOwnedFailure(SemanticOp invocation, OpId cellOpId,
+            KindPayload.ReturnPayload returned, ValueId calleeValue) {
+        return Optional.of("the " + invocation.kind() + " op " + invocation.opId()
+            + " records a callee-owned DEAL-body cell " + cellOpId
+            + " (parented to the RETURN of the lowered body " + returned.function()
+            + ") while its callee value " + calleeValue
+            + " carries no same-walk loweredBody registration: a runtime-resolved"
+            + " callee records the call-owned record cell (parented to an unattached"
+            + " RETURN naming the invocation)");
+    }
+
+    /**
+     * The {@code RETURN}-materialized return cell of one lowered body of the
+     * unit, or {@code null} for a body whose walk produced no {@code RETURN}
+     * (a never-returning body).
+     */
+    private static OpId bodyReturnCellOf(LoweredModuleUnit unit,
+                                         Map<OpId, SemanticOp> opsById, FunctionId function) {
+        if (!unit.functions().containsKey(function)) {
+            return null;
+        }
+        for (SemanticOp op : opsById.values()) {
+            if (op.kind() == SemanticOpKind.RETURN
+                    && op.payload() instanceof KindPayload.ReturnPayload returned
+                    && function.equals(returned.function())
+                    && returned.returnBoundaryOpId() != null) {
+                return returned.returnBoundaryOpId();
+            }
+        }
+        return null;
     }
 
     private static Optional<CompilerDiagnostic> checkCoverage(RawUnit unit, ComparisonFacts facts) {
@@ -2261,6 +2464,11 @@ public final class SemanticIrValidator {
                 return Optional.of("a DYNAMIC CALL records no single returnBoundaryOpId (the "
                     + "dynamic return-boundary set replaces it)");
             }
+            Optional<String> calleeClass = dynamicCalleeClassClause(unit, call,
+                "DYNAMIC CALL");
+            if (calleeClass.isPresent()) {
+                return calleeClass;
+            }
             return checkDynamicReturnCells(unit, call, dynamic, signature, closure);
         }
         if (recordsDynamicReturnBoundary(call)) {
@@ -2512,6 +2720,11 @@ public final class SemanticIrValidator {
                     return Optional.of("the DYNAMIC ASYNC_START's recorded task return "
                         + "boundary must be parented to a RETURN naming the ASYNC_START");
                 }
+                Optional<String> calleeClass = dynamicCalleeClassClause(unit, start,
+                    "DYNAMIC ASYNC_START");
+                if (calleeClass.isPresent()) {
+                    return calleeClass;
+                }
             }
             return Optional.empty();
         }
@@ -2681,6 +2894,70 @@ public final class SemanticIrValidator {
             return false;
         }
         return "dynamic".equals(optionalString(callee, "type"));
+    }
+
+    /**
+     * The callee-value class clause of a dynamic invocation (ISSUE-0677;
+     * design source {@code function-typed-value-materialization-and-dispatch}
+     * M3 item 5 and the dynamic DEAL-body cell contract): a {@code Dynamic}
+     * callee's value must carry the producer rule's dynamic registration or
+     * a same-walk {@code loweredBody} registration — the two classes whose
+     * closed DEAL-body cell form the correlation clauses below tie. Every
+     * other static class (an adapter, a host function, a host-materialized
+     * value, an external function, or a conversion intrinsic) names a
+     * statically known execution class, so such a callee belongs to the
+     * landed {@code Static}/{@code Indirect} arms of the closed table and
+     * never to the {@code Dynamic} spelling: a {@code Dynamic} callee whose
+     * value resolves one is a producer defect. The clause is closed over
+     * both surfaces: an unregistered callee value is the producer rule's
+     * admitted case (the typed-surface form correlation decides it).
+     *
+     * @param unit       the invocation's unit; non-null
+     * @param invocation the dynamic CALLEE/ASYNC_START op; non-null
+     * @param site       the site name for the diagnostic; non-null
+     * @return the failure text, or empty when the clause passes
+     */
+    private static Optional<String> dynamicCalleeClassClause(RawUnit unit, RawOp invocation,
+                                                             String site) {
+        String shape = dynamicCalleeRegistrationShape(unit, invocation);
+        if (shape == null || "loweredBody".equals(shape)
+                || "dynamicFunctionValue".equals(shape)) {
+            return Optional.empty();
+        }
+        return Optional.of("the " + site + " op " + invocation.opId()
+            + " resolves its callee value to the static class '" + shape
+            + "': a Dynamic callee admits the producer rule's dynamic registration or a"
+            + " same-walk loweredBody registration only (a statically classified callee"
+            + " belongs to the Static/Indirect arms of the closed call table)");
+    }
+
+    /**
+     * The registration shape of one dynamic invocation's callee value in
+     * its own unit, or {@code null} when the value carries no registration
+     * (the producer rule's admitted absent case) or the callee record is
+     * malformed (R-ENUM owns that).
+     */
+    private static String dynamicCalleeRegistrationShape(RawUnit unit, RawOp invocation) {
+        CanonicalJson.Value calleeValue = payloadValue(invocation.payload(), "callee");
+        if (!(calleeValue instanceof CanonicalJson.Obj callee)) {
+            return null;
+        }
+        CanonicalJson.Value idValue = payloadValue(callee, "callee");
+        if (!(idValue instanceof CanonicalJson.Obj idObj)) {
+            return null;
+        }
+        ValueId calleeId;
+        try {
+            calleeId = parseValueId(idObj);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        for (RawBinding binding : unit.bindings()) {
+            if (binding.allocationId() == calleeId.id()) {
+                return binding.shape();
+            }
+        }
+        return null;
     }
 
     /**

@@ -3681,6 +3681,15 @@ public final class JvmSemanticEmitter {
             String carrier = "__dc" + id;
             String result = "__dr" + id;
             String cls = "__dk" + id;
+            // The recorded DEAL-body cell's closed form (ISSUE-0677; design
+            // source {@code function-typed-value-materialization-and-dispatch}
+            // M6): a call-owned record is executed by the invocation site on
+            // the value the resolved body returned, after the body's own
+            // RETURN ran the body's own cell; a callee-owned record is that
+            // body's own cell and runs nothing here.
+            SemanticOp recordedDealCell = opsById.get(cells.dealBodyBoundaryOpId());
+            boolean callOwnedDealCell = recordedDealCell != null
+                && callOwnedCell(recordedDealCell);
             StringBuilder args = new StringBuilder();
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 if (args.length() > 0) {
@@ -3716,9 +3725,14 @@ public final class JvmSemanticEmitter {
                 .append(cls).append(")) {\n");
             emitDynamicBodyInvoke(op, carrier, result,
                 "new Object[]{ " + argList + " }", id, indent + 1);
+            if (callOwnedDealCell) {
+                emitRecordedCellRun(op, recordedDealCell, result, "__cr" + id,
+                    indent + 1);
+            }
             // ADAPTER: the landed D15 sequence; the source class selects
             // the return cell (a DEAL-body source runs its own body's
-            // RETURN cell).
+            // RETURN cell, and a call-owned recorded cell then runs at the
+            // invocation site).
             out.append(indent(indent)).append("} else if (\"ADAPTER\".equals(")
                 .append(cls).append(")) {\n");
             out.append(indent(indent + 1)).append("JvmRuntime.AdapterValue __ad")
@@ -3733,6 +3747,10 @@ public final class JvmSemanticEmitter {
             emitDynamicBodyInvoke(op, "__src" + id, result,
                 "java.util.Arrays.copyOfRange(new Object[]{ " + argList
                     + " }, 0, __ad" + id + ".arity)", id, indent + 2);
+            if (callOwnedDealCell) {
+                emitRecordedCellRun(op, recordedDealCell, result, "__cr" + id,
+                    indent + 2);
+            }
             out.append(indent(indent + 1)).append("} else {\n");
             emitDynamicCarrierFailure(op, "__src" + id, indent + 2);
             out.append(indent(indent + 1)).append("}\n");
@@ -3853,6 +3871,55 @@ public final class JvmSemanticEmitter {
         }
 
         /**
+         * Whether one recorded DEAL-body cell is the call-owned form
+         * (ISSUE-0677; design source
+         * {@code function-typed-value-materialization-and-dispatch} M6): its
+         * parent {@code RETURN} names no lowered body of the emitted closure
+         * (the landing record shape). The callee-owned form's parent
+         * {@code RETURN} names the callee body in the closure's function set,
+         * and that body's own {@code RETURN} runs the cell.
+         */
+        private boolean callOwnedCell(SemanticOp cell) {
+            OpId parentId = cell.origin() == null ? null : cell.origin().parentOpId();
+            SemanticOp parent = parentId == null ? null : opsById.get(parentId);
+            if (parent == null || parent.kind() != SemanticOpKind.RETURN
+                    || !(parent.payload()
+                        instanceof KindPayload.ReturnPayload returned)) {
+                return false;
+            }
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                if (moduleUnit.functions().containsKey(returned.function())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /**
+         * The invocation site's execution of one call-owned recorded
+         * DEAL-body cell (ISSUE-0677; the oracle's {@code runBoundaryChild}
+         * over the recorded cell): the same emission the parented boundary
+         * cells use — the START event with the input's raw atom, the check
+         * under the cell's own origin, the SUCCESS terminal with the admitted
+         * value, and the cell's plus the invocation op's FAILURE events on a
+         * failure. The cell is total on the admitted value (an identical
+         * declared descriptor), so its check passes and only its boundary
+         * events are observable.
+         *
+         * @param invocation  the dynamic invocation op; non-null
+         * @param cell        the recorded call-owned cell; non-null
+         * @param valueExpr   the emitted expression holding the returned value; non-null
+         * @param checkedName the emitted local receiving the admitted value; non-null
+         * @param indent      the emitted block's indentation depth; ≥0
+         */
+        private void emitRecordedCellRun(SemanticOp invocation, SemanticOp cell,
+                                         String valueExpr, String checkedName, int indent) {
+            emitFieldBoundaryCheck(invocation, cell, valueExpr, checkedName, indent);
+            out.append(indent(indent)).append(valueExpr).append(" = ")
+                .append(checkedName).append(";\n");
+        }
+
+        /**
          * The dynamic dispatch's fail-closed residue: a carrier whose
          * class is not resolvable at this boundary projects the pinned
          * E8001 {@code expected function} text with the carrier's actual
@@ -3900,6 +3967,15 @@ public final class JvmSemanticEmitter {
                                            int indent) {
             String id = String.valueOf(op.opId().id());
             String carrier = "__dc" + id;
+            // The recorded task cell's closed form (ISSUE-0677; design
+            // source {@code function-typed-value-materialization-and-dispatch}
+            // M6): a call-owned record executes in this caller-side task
+            // wrapper before the token completes; a callee-owned record is
+            // the resolved body's own cell and runs inside the body.
+            SemanticOp recordedTaskCell = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            boolean callOwnedTaskCell = recordedTaskCell != null
+                && callOwnedCell(recordedTaskCell);
             out.append(indent(indent)).append("Object ").append(carrier)
                 .append(" = ").append(slot(callee.callee())).append(";\n");
             // ADAPTER: the landed D15 sequence resolves the source value
@@ -3944,11 +4020,24 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent + 2)).append("JvmRuntime.pushFrame("
                 + "((JvmRuntime.FunctionValue) ").append(source).append(").fid);\n");
             out.append(indent(indent + 2)).append("try {\n");
-            out.append(indent(indent + 3)).append("return "
-                + "((JvmRuntime.FunctionValue) ").append(source)
-                .append(").fn.invoke(java.util.Arrays.copyOfRange(new Object[]{ ")
-                .append(String.join(", ", args)).append(" }, 0, ")
-                .append(adapter).append(".arity));\n");
+            if (callOwnedTaskCell) {
+                out.append(indent(indent + 3)).append("Object __dv").append(id)
+                    .append(" = ")
+                    .append("((JvmRuntime.FunctionValue) ").append(source)
+                    .append(").fn.invoke(java.util.Arrays.copyOfRange(new Object[]{ ")
+                    .append(String.join(", ", args)).append(" }, 0, ")
+                    .append(adapter).append(".arity));\n");
+                emitRecordedCellRun(op, recordedTaskCell, "__dv" + id, "__vc" + id,
+                    indent + 3);
+                out.append(indent(indent + 3)).append("return __dv").append(id)
+                    .append(";\n");
+            } else {
+                out.append(indent(indent + 3)).append("return "
+                    + "((JvmRuntime.FunctionValue) ").append(source)
+                    .append(").fn.invoke(java.util.Arrays.copyOfRange(new Object[]{ ")
+                    .append(String.join(", ", args)).append(" }, 0, ")
+                    .append(adapter).append(".arity));\n");
+            }
             out.append(indent(indent + 2)).append("} finally {\n");
             out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
             out.append(indent(indent + 3)).append("MODULE = __prevM;\n");
@@ -3980,10 +4069,21 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent + 2)).append("JvmRuntime.pushFrame(")
                 .append(functionValue).append(".fid);\n");
             out.append(indent(indent + 2)).append("try {\n");
-            out.append(indent(indent + 3)).append("return ")
-                .append(functionValue)
-                .append(".fn.invoke(new Object[]{ ").append(String.join(", ", args))
-                .append(" });\n");
+            if (callOwnedTaskCell) {
+                out.append(indent(indent + 3)).append("Object __dv").append(id)
+                    .append(" = ").append(functionValue)
+                    .append(".fn.invoke(new Object[]{ ").append(String.join(", ", args))
+                    .append(" });\n");
+                emitRecordedCellRun(op, recordedTaskCell, "__dv" + id, "__vc" + id,
+                    indent + 3);
+                out.append(indent(indent + 3)).append("return __dv").append(id)
+                    .append(";\n");
+            } else {
+                out.append(indent(indent + 3)).append("return ")
+                    .append(functionValue)
+                    .append(".fn.invoke(new Object[]{ ")
+                    .append(String.join(", ", args)).append(" });\n");
+            }
             out.append(indent(indent + 2)).append("} finally {\n");
             out.append(indent(indent + 3)).append("JvmRuntime.popFrame();\n");
             out.append(indent(indent + 3)).append("MODULE = __prevM;\n");

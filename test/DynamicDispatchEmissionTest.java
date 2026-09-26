@@ -114,6 +114,26 @@ import java.util.Set;
  *       and zero caller-side return boundaries beyond it, matching the
  *       oracle event-for-event and executing under both real
  *       toolchains.</li>
+ *   <li><b>The closed DEAL-body cell forms and their executors
+ *       (ISSUE-0677; design source
+ *       {@code function-typed-value-materialization-and-dispatch} M6 and the
+ *       dynamic DEAL-body cell contract).</b> A runtime-resolved callee
+ *       (the producer rule's {@code DynamicFunctionValue} registration)
+ *       records the landed call-owned cell, which the invocation site
+ *       executes on the value the resolved body returned — sync after the
+ *       body's own {@code RETURN} cell and before the {@code CALL}
+ *       publishes, async in the caller-side task wrapper before the token
+ *       completes; a statically identified same-walk body records its own
+ *       RETURN-materialized cell, executed exactly once by that body's
+ *       {@code RETURN}. Both forms are driven on the oracle and both real
+ *       toolchains with the recorded cell's event position, its single
+ *       execution, and the class path asserted.</li>
+ *   <li><b>The oracle's value channel.</b> A dynamic callee whose value
+ *       carries the producer rule's dynamic record (or none) resolves the
+ *       runtime heap value's own producing registration through the
+ *       value-keyed channel, so the dispatched class is the class of the
+ *       materialized carrier; a heap value with no producing registration
+ *       fails closed as a producer defect.</li>
  *   <li><b>The composed drive.</b> The host module's sync and async
  *       exports, the compiled module's sync and async exports, and the
  *       dynamic dispatch compose in one production project on both
@@ -135,15 +155,15 @@ import java.util.Set;
  *       shapes; no dynamic callee emitter gap exists to retarget.</li>
  * </ol>
  *
- * <p>The drives register the callee carrier read's allocation identity
- * with the runtime carrier's own binding: the closed gate's
- * {@code R-FUNCTION-BINDING} one-registration rule is satisfied exactly
- * as the producer rule's dynamic arm satisfies it (ISSUE-0675: the arm
- * registers a {@code DynamicFunctionValue} for the carrier read, and the
- * drives replace that record with the carrier's own class so the oracle
- * and the emitted artifact both resolve a statically named class), and the
- * oracle then resolves the same class the emitted artifact reads from the
- * carrier's own tag. Nothing else in
+ * <p>The drives lower the fixture through the one project walk and
+ * validate the produced unit as it stands: the callee value keeps the
+ * producer rule's own registration (ISSUE-0675/ISSUE-0677 — the
+ * {@code DynamicFunctionValue} record for a carrier read, the same-walk
+ * body's {@code LoweredBody} for an in-place function expression), the
+ * oracle resolves a runtime-resolved callee's class through the value
+ * channel, and the emitted artifact reads the same class from the
+ * carrier's own tag. No drive doctors a registration: a broken producer
+ * arm, value channel, or form decision fails the drive. Nothing else in
  * the produced unit is changed — every op, cell, boundary, and origin is
  * the one lowering's own output.</p>
  */
@@ -406,7 +426,7 @@ public class DynamicDispatchEmissionTest {
     }
 
     // =========================================================================
-    // The doctored drive (the carrier-class registration)
+    // The drive surface (the producer rule's own registrations)
     // =========================================================================
 
     /** One drive: the unit, its membership table, and the validated project. */
@@ -424,16 +444,7 @@ public class DynamicDispatchEmissionTest {
             Map.of(MODULE, unit), MODULE);
     }
 
-    private static LoweredModuleUnit withRegistration(LoweredModuleUnit unit,
-            ValueId identity, FunctionExecutionBinding binding) {
-        Map<FunctionAllocationIdentity, FunctionExecutionBinding> merged =
-            new LinkedHashMap<>(unit.functionBindings());
-        merged.put(new FunctionAllocationIdentity(identity.id()), binding);
-        return new LoweredModuleUnit(unit.formatVersion(), unit.semanticProfile(),
-            unit.moduleId(), unit.interfaceHash(), unit.loweringContextHash(),
-            unit.requiredCapabilities(), unit.constructCoverage(), unit.classLayouts(),
-            unit.functions(), unit.moduleInit(), unit.exportPlan(), merged, unit.ops());
-    }
+    /** The closed origin text of one op ({@code source:line:column}). */
 
     /** The dynamic CALL op of the unit. */
     private static SemanticOp dynamicCall(LoweredModuleUnit unit) {
@@ -518,7 +529,14 @@ public class DynamicDispatchEmissionTest {
         return null;
     }
 
-    /** One prepared drive: the gate-validated project of one carrier class. */
+    /**
+     * One prepared drive: the gate-validated project of one carrier class
+     * over the producer rule's own registrations (ISSUE-0677). The callee
+     * value keeps the {@code DynamicFunctionValue} record the producer rule
+     * registered for its carrier read — the runtime class comes from the
+     * value channel — and the runtime carrier binding of the argument is
+     * resolved for the drive's class assertions only.
+     */
     private static Drive drive(Fixture fixture, int parameterIndex, String what) {
         RawLowering raw = rawLower(fixture, what);
         if (raw == null) {
@@ -532,37 +550,122 @@ public class DynamicDispatchEmissionTest {
         }
         ValueId callee = ((KindPayload.CallCallee.Dynamic)
             ((KindPayload.CallPayload) call.payload()).callee()).callee();
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            what + ": the callee value carries the producer rule's dynamic "
+                + "materialization record: " + registration);
         FunctionExecutionBinding carrier = carrierBinding(unit, parameterIndex);
-        check(carrier != null, what + ": the argument's carrier binding resolves: "
-            + carrier);
+        check(carrier != null, what + ": the argument's runtime carrier binding "
+            + "resolves: " + carrier);
         if (carrier == null) {
             return null;
         }
-        return doctorAndValidate(unit, raw, callee, carrier, what);
+        return validateDrive(unit, raw, what);
     }
 
     /**
-     * Registers the callee carrier read with the runtime carrier's own
-     * binding (replacing the producer rule's {@code DynamicFunctionValue}
-     * materialization record with the statically named runtime class,
-     * ISSUE-0675) and runs the closed gate over the resulting project.
+     * Runs the closed gate over the produced unit as it stands (no
+     * registration doctoring: the producer rule's own records are the
+     * drive's input).
      */
-    private static Drive doctorAndValidate(LoweredModuleUnit unit, RawLowering raw,
-            ValueId callee, FunctionExecutionBinding carrier, String what) {
-        LoweredModuleUnit doctored = withRegistration(unit, callee, carrier);
-        ExecutableLoweredProject project = projectOf(doctored);
+    private static Drive validateDrive(LoweredModuleUnit unit, RawLowering raw,
+            String what) {
+        ExecutableLoweredProject project = projectOf(unit);
         java.util.Optional<deal.diagnostics.CompilerDiagnostic> gate =
             deal.semantic.ir.SemanticIrValidator.validate(project,
                 new deal.semantic.ir.SemanticIrValidator.ComparisonFacts(
-                    doctored.interfaceHash(), SemanticProfile.DEAL_V1_2_INT32,
+                    unit.interfaceHash(), SemanticProfile.DEAL_V1_2_INT32,
                     REGISTRY_HASH));
         check(gate.isEmpty(), what + ": the closed gate accepts the drive project: "
             + gate.map(deal.diagnostics.CompilerDiagnostic::message).orElse(""));
         if (gate.isPresent()) {
             return null;
         }
-        return new Drive(doctored, raw.table(), project,
+        return new Drive(unit, raw.table(), project,
             new ClassFactoryRegistry(Map.of()));
+    }
+
+    /**
+     * The recorded DEAL-body cell of one drive's dynamic invocation and
+     * whether it is the call-owned form: its parent {@code RETURN} names no
+     * lowered body of the unit.
+     */
+    private record RecordedCell(SemanticOp cell, SemanticOp parent, boolean callOwned) {
+    }
+
+    private static RecordedCell recordedDealCell(LoweredModuleUnit unit, SemanticOp invocation) {
+        OpId cellOpId = switch (invocation.payload()) {
+            case KindPayload.CallPayload call -> call.dynamicReturnBoundary() == null
+                ? null : call.dynamicReturnBoundary().dealBodyBoundaryOpId();
+            case KindPayload.AsyncStartPayload start -> start.returnBoundaryOpId();
+            default -> null;
+        };
+        if (cellOpId == null) {
+            return null;
+        }
+        SemanticOp cell = opOf(unit, cellOpId);
+        KindPayload.ReturnPayload returned = cell == null ? null : returnOf(unit, cell);
+        boolean callOwned = returned == null
+            || !unit.functions().containsKey(returned.function());
+        return new RecordedCell(cell, returned == null ? null
+            : opOf(unit, cell.origin().parentOpId()), callOwned);
+    }
+
+    /** The RETURN payload of one recorded cell's parent op, or null. */
+    private static KindPayload.ReturnPayload returnOf(LoweredModuleUnit unit,
+            SemanticOp cell) {
+        if (cell.origin() == null || cell.origin().parentOpId() == null) {
+            return null;
+        }
+        SemanticOp parent = opOf(unit, cell.origin().parentOpId());
+        return parent != null && parent.kind() == SemanticOpKind.RETURN
+                && parent.payload() instanceof KindPayload.ReturnPayload returned
+            ? returned : null;
+    }
+
+    /** The trace index of the last event of one op in one phase, or -1. */
+    private static int eventIndex(List<String> events, OpId op, String phase) {
+        int found = -1;
+        for (int i = 0; i < events.size(); i++) {
+            if (events.get(i).contains("|" + op.module().path() + "#" + op.id()
+                    + "|" + phase + "|")) {
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * The recorded call-owned cell executes at the invocation site
+     * (ISSUE-0677): its boundary events appear after the resolved body's own
+     * return-cell events and before the invocation's SUCCESS terminal, and
+     * the cell runs exactly once.
+     */
+    private static void assertCallOwnedCellRun(String what, List<String> events,
+            OpId invocation, OpId bodyReturnCell, RecordedCell recorded, int callSuccess) {
+        check(recorded != null && recorded.callOwned(),
+            what + ": the recorded DEAL-body cell is the call-owned form");
+        if (recorded == null || !recorded.callOwned()) {
+            return;
+        }
+        int bodyCell = eventIndex(events, bodyReturnCell, "SUCCESS");
+        int cellStart = eventIndex(events, recorded.cell().opId(), "START");
+        int cellSuccess = eventIndex(events, recorded.cell().opId(), "SUCCESS");
+        int starts = 0;
+        for (String event : events) {
+            if (event.contains("|" + recorded.cell().opId().module().path() + "#"
+                    + recorded.cell().opId().id() + "|START|BOUNDARY|")) {
+                starts++;
+            }
+        }
+        checkEq(1, starts, what + ": the recorded call-owned cell runs exactly once");
+        check(bodyCell >= 0 && cellStart > bodyCell,
+            what + ": the call-owned cell's START (" + cellStart + ") follows the "
+                + "resolved body's own return cell (" + bodyCell + ")");
+        check(cellSuccess > cellStart && callSuccess > cellSuccess,
+            what + ": the call-owned cell's events (" + cellStart + ".." + cellSuccess
+                + ") precede the invocation's SUCCESS terminal (" + callSuccess + ")");
     }
 
     /** The closed origin text of one op ({@code source:line:column}). */
@@ -851,16 +954,18 @@ public class DynamicDispatchEmissionTest {
         if (drive == null) {
             return;
         }
-        // The carrier's class is the closure's own identity: the argument's
-        // registered LoweredBody binding.
+        // The runtime carrier's class is the closure's own identity: the
+        // argument's registered LoweredBody binding. The callee value's
+        // static registration stays the producer rule's dynamic record (the
+        // value channel resolves the runtime class at execution).
         SemanticOp call = dynamicCall(drive.unit());
-        ValueId callee = ((KindPayload.CallCallee.Dynamic)
-            ((KindPayload.CallPayload) call.payload()).callee()).callee();
-        FunctionExecutionBinding registration = drive.unit().functionBindings().get(
-            new FunctionAllocationIdentity(callee.id()));
+        FunctionExecutionBinding registration = carrierBinding(drive.unit(), 0);
         check(registration instanceof FunctionExecutionBinding.LoweredBody,
-            "the drive registers the callee carrier read with the closure's own "
+            "the argument's runtime carrier carries the closure's own "
                 + "LoweredBody binding: " + registration);
+        if (!(registration instanceof FunctionExecutionBinding.LoweredBody)) {
+            return;
+        }
         assertThreeConsumerTrace("closure carrier",
             drive, SemanticDifferentialHarness.Expectation.success(
                 "closure carrier", List.of(), "null"));
@@ -903,6 +1008,12 @@ public class DynamicDispatchEmissionTest {
         check(cellSuccess >= 0 && callSuccess > cellSuccess,
             "the callee body's FUNCTION_RETURN cell SUCCESS (" + cellSuccess
                 + ") precedes the caller's CALL SUCCESS (" + callSuccess + ")");
+        // The recorded call-owned cell executes at the invocation site: the
+        // runtime-resolved callee records the landed call-owned record, and
+        // its events run after the body's own cell and before the CALL
+        // terminal.
+        assertCallOwnedCellRun("closure carrier", events, call.opId(), calleeReturnCell,
+            recordedDealCell(drive.unit(), call), callSuccess);
         check(events.stream().anyMatch(event -> event.contains("|app#" + call.opId().id()
                 + "|SUCCESS|CALL|") && event.endsWith("int:42")),
             "the dynamic CALL publishes the dispatched value");
@@ -926,20 +1037,40 @@ public class DynamicDispatchEmissionTest {
             return;
         }
         SemanticOp call = dynamicCall(drive.unit());
-        ValueId callee = ((KindPayload.CallCallee.Dynamic)
-            ((KindPayload.CallPayload) call.payload()).callee()).callee();
-        FunctionExecutionBinding registration = drive.unit().functionBindings().get(
-            new FunctionAllocationIdentity(callee.id()));
-        check(registration instanceof FunctionExecutionBinding.AdapterBinding,
-            "the drive registers the callee carrier read with the adapter's own "
-                + "AdapterBinding: " + registration);
-        if (registration instanceof FunctionExecutionBinding.AdapterBinding adapter) {
+        // The runtime carrier is the argument's FUNCTION_ADAPT value (the
+        // callee value's static registration stays the producer rule's
+        // dynamic record).
+        FunctionExecutionBinding carrier = carrierBinding(drive.unit(), 0);
+        check(carrier instanceof FunctionExecutionBinding.AdapterBinding,
+            "the argument's runtime carrier carries the adapter's own "
+                + "AdapterBinding: " + carrier);
+        if (carrier instanceof FunctionExecutionBinding.AdapterBinding adapter) {
             checkEq(1, adapter.sourceSignature().paramTypes().size(),
                 "the adapter's source arity is the leading-M projection width");
         }
+        RecordedCell recorded = recordedDealCell(drive.unit(), call);
+        check(recorded != null && recorded.callOwned(),
+            "the runtime-resolved adapter callee records the call-owned DEAL-body "
+                + "cell: " + recorded);
         assertThreeConsumerTrace("adapter carrier",
             drive, SemanticDifferentialHarness.Expectation.success(
                 "adapter carrier", List.of(), "null"));
+        // The recorded call-owned cell executes at the invocation site after
+        // the adapter's DEAL-body source returned and before the CALL
+        // terminal.
+        SemanticRuntimeModel.ConsumerRun run = SemanticOracle.executeProjectInits(
+            drive.project(), Map.of(MODULE, drive.table()),
+            Map.of(MODULE, drive.registry()), null);
+        check(run.terminal() instanceof SemanticRuntimeModel.Terminal.Success,
+            "the adapter drive completes in the oracle: " + run.comparisonReport());
+        List<String> events = traceLines(run);
+        int callSuccessIndex = eventIndex(events, call.opId(), "SUCCESS");
+        check(callSuccessIndex >= 0 && recorded != null && recorded.cell() != null
+                && eventIndex(events, recorded.cell().opId(), "SUCCESS") > 0
+                && eventIndex(events, recorded.cell().opId(), "SUCCESS")
+                    < callSuccessIndex,
+            "the recorded call-owned cell executes before the adapter call's "
+                + "SUCCESS terminal");
         runLuaProduction("adapter carrier", drive, null);
         runJvmProduction("adapter carrier", drive, null);
     }
@@ -968,7 +1099,14 @@ public class DynamicDispatchEmissionTest {
         }
         ValueId callee = ((KindPayload.CallCallee.Dynamic)
             ((KindPayload.AsyncStartPayload) start.payload()).callee()).callee();
-        // The runtime carrier of the awaited parameter is the `value` closure.
+        // The callee value keeps the producer rule's dynamic record; the
+        // runtime carrier of the awaited parameter is the `value` closure,
+        // which the value channel resolves at execution.
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the awaited callee value carries the producer rule's dynamic "
+                + "materialization record: " + registration);
         FunctionExecutionBinding carrier = null;
         for (FunctionExecutionBinding binding : unit.functionBindings().values()) {
             if (binding instanceof FunctionExecutionBinding.LoweredBody body
@@ -983,20 +1121,11 @@ public class DynamicDispatchEmissionTest {
         if (carrier == null) {
             return;
         }
-        LoweredModuleUnit doctored = withRegistration(unit, callee, carrier);
-        ExecutableLoweredProject project = projectOf(doctored);
-        java.util.Optional<deal.diagnostics.CompilerDiagnostic> gate =
-            deal.semantic.ir.SemanticIrValidator.validate(project,
-                new deal.semantic.ir.SemanticIrValidator.ComparisonFacts(
-                    doctored.interfaceHash(), SemanticProfile.DEAL_V1_2_INT32,
-                    REGISTRY_HASH));
-        check(gate.isEmpty(), "the closed gate accepts the dynamic async drive: "
-            + gate.map(deal.diagnostics.CompilerDiagnostic::message).orElse(""));
-        if (gate.isPresent()) {
+        Drive drive = validateDrive(unit, raw, "dynamic async");
+        if (drive == null) {
             return;
         }
-        Drive drive = new Drive(doctored, raw.table(), project,
-            new ClassFactoryRegistry(Map.of()));
+        ExecutableLoweredProject project = drive.project();
         // The async-entry matrix: the oracle and both emitted dispatch entries.
         Path workspace = Files.createTempDirectory("dynamic-async-diff");
         try {
@@ -1022,7 +1151,7 @@ public class DynamicDispatchEmissionTest {
         } finally {
             deleteRecursively(workspace);
         }
-        OpId entry = asyncEntryOp(doctored, "probe");
+        OpId entry = asyncEntryOp(drive.unit(), "probe");
         check(entry != null, "the unit records the async EXTERNAL_ENTRY of the probe");
         runLuaProduction("dynamic async", drive, "app#probe");
         runJvmProduction("dynamic async", drive, "probe");
@@ -1053,9 +1182,14 @@ public class DynamicDispatchEmissionTest {
         }
         ValueId callee = ((KindPayload.CallCallee.Dynamic)
             ((KindPayload.AsyncStartPayload) start.payload()).callee()).callee();
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the awaited callee value carries the producer rule's dynamic "
+                + "materialization record: " + registration);
         FunctionExecutionBinding carrier = carrierBinding(unit, 0);
         check(carrier instanceof FunctionExecutionBinding.AdapterBinding,
-            "the awaited argument's carrier binding is the adapter's own "
+            "the awaited argument's runtime carrier is the adapter's own "
                 + "AdapterBinding: " + carrier);
         if (!(carrier instanceof FunctionExecutionBinding.AdapterBinding adapter)) {
             return;
@@ -1063,8 +1197,7 @@ public class DynamicDispatchEmissionTest {
         checkEq(1, adapter.sourceSignature().paramTypes().size(),
             "the adapter's source arity is the leading-M projection width "
                 + "(the dropped second argument proves the projection)");
-        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
-            "dynamic async adapter");
+        Drive drive = validateDrive(unit, raw, "dynamic async adapter");
         if (drive == null) {
             return;
         }
@@ -1098,6 +1231,157 @@ public class DynamicDispatchEmissionTest {
         }
         runLuaProduction("dynamic async adapter", drive, "app#probe");
         runJvmProduction("dynamic async adapter", drive, "probe");
+    }
+
+    // =========================================================================
+    // 3c. The callee-owned cell drive
+    // =========================================================================
+
+    /**
+     * The callee-owned form fixture: an in-place function-expression callee
+     * (a same-walk body) invoked immediately.
+     */
+    private static final String IIFE_SOURCE = """
+        export function main(): null {
+          let r: int = (function(x: int): int { return x * 2 })(21)
+          if (r !== 42) {
+            throw { code: "TEST_FAIL", message: "iife" }
+          }
+          return null
+        }
+        """;
+
+    /** The awaited in-place function-expression callee. */
+    private static final String IIFE_ASYNC_SOURCE = """
+        export async function probe(): int {
+          return await (async function(): int { return 42 })()
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The callee-owned form drive (ISSUE-0677; design source M6): a
+     * statically identified same-walk body records that body's own
+     * RETURN-materialized cell, which the body's own {@code RETURN} executes
+     * exactly once per invocation — sync and async — on the oracle and both
+     * real toolchains.
+     */
+    private static void testCalleeOwnedCellDrive() throws Exception {
+        System.out.println("-- the callee-owned cell: a same-walk body records its own "
+            + "RETURN cell, executed exactly once by that RETURN --");
+        Fixture fixture = fixture(IIFE_SOURCE, "iife drive");
+        if (fixture == null) {
+            return;
+        }
+        RawLowering raw = rawLower(fixture, "iife drive");
+        if (raw == null) {
+            return;
+        }
+        Drive drive = validateDrive(raw.unit(), raw, "iife drive");
+        if (drive == null) {
+            return;
+        }
+        SemanticOp call = dynamicCall(drive.unit());
+        ValueId calleeValue = ((KindPayload.CallCallee.Dynamic)
+            ((KindPayload.CallPayload) call.payload()).callee()).callee();
+        FunctionExecutionBinding registration = drive.unit().functionBindings().get(
+            new FunctionAllocationIdentity(calleeValue.id()));
+        check(registration instanceof FunctionExecutionBinding.LoweredBody,
+            "the same-walk body callee keeps its LoweredBody registration: "
+                + registration);
+        RecordedCell recorded = recordedDealCell(drive.unit(), call);
+        check(recorded != null && !recorded.callOwned(),
+            "the same-walk body callee records the callee-owned cell: " + recorded);
+        if (recorded == null || recorded.callOwned()) {
+            return;
+        }
+        SemanticOp bodyReturn = recorded.parent();
+        assertThreeConsumerTrace("iife drive", drive,
+            SemanticDifferentialHarness.Expectation.success("iife drive", List.of(),
+                "null"));
+        SemanticRuntimeModel.ConsumerRun run = SemanticOracle.executeProjectInits(
+            drive.project(), Map.of(MODULE, drive.table()),
+            Map.of(MODULE, drive.registry()), null);
+        check(run.terminal() instanceof SemanticRuntimeModel.Terminal.Success,
+            "the iife drive completes in the oracle: " + run.comparisonReport());
+        List<String> events = traceLines(run);
+        int starts = 0;
+        for (String event : events) {
+            if (event.contains("|" + recorded.cell().opId().module().path() + "#"
+                    + recorded.cell().opId().id() + "|START|BOUNDARY|")) {
+                starts++;
+            }
+        }
+        checkEq(1, starts, "the callee-owned cell runs exactly once per invocation");
+        int returnStart = eventIndex(events, bodyReturn.opId(), "START");
+        int cellStart = eventIndex(events, recorded.cell().opId(), "START");
+        int cellSuccess = eventIndex(events, recorded.cell().opId(), "SUCCESS");
+        int callSuccess = eventIndex(events, call.opId(), "SUCCESS");
+        check(returnStart >= 0 && cellStart > returnStart && cellSuccess > cellStart
+                && callSuccess > cellSuccess,
+            "the cell's single event pair runs inside the body's RETURN (" + returnStart
+                + " < " + cellStart + " < " + cellSuccess + " < " + callSuccess + ")");
+        runLuaProduction("iife drive", drive, null);
+        runJvmProduction("iife drive", drive, null);
+
+        // The async twin: the recorded task cell is the same-walk body's own
+        // cell, executed by that body's RETURN inside the task.
+        Fixture asyncFixture = fixture(IIFE_ASYNC_SOURCE, "iife async drive");
+        if (asyncFixture == null) {
+            return;
+        }
+        RawLowering asyncRaw = rawLower(asyncFixture, "iife async drive");
+        if (asyncRaw == null) {
+            return;
+        }
+        Drive asyncDrive = validateDrive(asyncRaw.unit(), asyncRaw, "iife async drive");
+        if (asyncDrive == null) {
+            return;
+        }
+        SemanticOp start = dynamicAsyncStart(asyncDrive.unit());
+        RecordedCell taskCell = recordedDealCell(asyncDrive.unit(), start);
+        check(taskCell != null && !taskCell.callOwned(),
+            "the awaited same-walk body records the callee-owned task cell: " + taskCell);
+        if (taskCell == null || taskCell.callOwned()) {
+            return;
+        }
+        Path workspace = Files.createTempDirectory("dynamic-iife-diff");
+        try {
+            SemanticDifferentialHarness.Verdict verdict =
+                SemanticDifferentialHarness.runAsyncEntry(asyncDrive.project(),
+                    Map.of(MODULE, asyncRaw.table()), "probe", List.of(),
+                    SemanticDifferentialHarness.Expectation.success("iife async drive",
+                        List.of(), "int:42"), workspace, null);
+            checkEq(3, verdict.runs().size(), "the iife async drive produced the three "
+                + "consumers: " + verdict.failures());
+            if (verdict.runs().size() == 3) {
+                List<String> oracleTrace = traceLines(verdict.runs().get(0));
+                for (SemanticRuntimeModel.ConsumerRun consumer : verdict.runs()) {
+                    checkEq(oracleTrace, traceLines(consumer), "the "
+                        + consumer.consumer() + " async-entry trace equals the "
+                        + "oracle's event-for-event");
+                    int asyncStarts = 0;
+                    for (String event : traceLines(consumer)) {
+                        if (event.contains("|" + taskCell.cell().opId().module().path()
+                                + "#" + taskCell.cell().opId().id()
+                                + "|START|BOUNDARY|")) {
+                            asyncStarts++;
+                        }
+                    }
+                    checkEq(1, asyncStarts, "the " + consumer.consumer()
+                        + " runs the callee-owned task cell exactly once");
+                }
+                check(verdict.pass(), "the iife async differential verdict passes: "
+                    + verdict.failures());
+            }
+        } finally {
+            deleteRecursively(workspace);
+        }
+        runLuaProduction("iife async drive", asyncDrive, "app#probe");
+        runJvmProduction("iife async drive", asyncDrive, "probe");
     }
 
     // =========================================================================
@@ -1503,11 +1787,10 @@ public class DynamicDispatchEmissionTest {
                 + "projection");
         // The production factories carry the descriptor text, the canonical spec
         // text, and the function identity (the class tag the dispatch reads).
+        // The drive's callee value keeps the producer rule's dynamic record, so
+        // the runtime carrier's own registration names the dispatched body.
         SemanticOp call = dynamicCall(drive.unit());
-        ValueId callee = ((KindPayload.CallCallee.Dynamic)
-            ((KindPayload.CallPayload) call.payload()).callee()).callee();
-        FunctionExecutionBinding closureRegistration = drive.unit()
-            .functionBindings().get(new FunctionAllocationIdentity(callee.id()));
+        FunctionExecutionBinding closureRegistration = carrierBinding(drive.unit(), 0);
         if (closureRegistration instanceof FunctionExecutionBinding.LoweredBody body) {
             deal.semantic.ir.LoweredFunction function =
                 drive.unit().functions().get(body.functionId());
@@ -1552,13 +1835,17 @@ public class DynamicDispatchEmissionTest {
         }
         ValueId callee = ((KindPayload.CallCallee.Dynamic)
             ((KindPayload.AsyncStartPayload) start.payload()).callee()).callee();
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the async dispatch surface drive's callee value carries the producer "
+                + "rule's dynamic materialization record: " + registration);
         FunctionExecutionBinding carrier = carrierBinding(unit, 0);
         if (carrier == null) {
             fail("the async dispatch surface drive resolves the adapter carrier");
             return;
         }
-        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
-            "dynamic async dispatch surface");
+        Drive drive = validateDrive(unit, raw, "dynamic async dispatch surface");
         if (drive == null) {
             return;
         }
@@ -1897,10 +2184,18 @@ public class DynamicDispatchEmissionTest {
                 original.targetSignature());
         ValueId callee = ((KindPayload.CallCallee.Dynamic)
             ((KindPayload.CallPayload) call.payload()).callee()).callee();
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the adapter fault drive's callee value carries the producer rule's "
+                + "dynamic materialization record: " + registration);
+        // The adapter's runtime carrier keeps the producer rule's dynamic
+        // callee record: the doctored FUNCTION_ADAPT payload (and its own
+        // AdapterBinding) carry the mismatched source signature the D15 check
+        // reads from the runtime carrier.
         Map<FunctionAllocationIdentity, FunctionExecutionBinding> bindings =
             new LinkedHashMap<>(unit.functionBindings());
         bindings.put(new FunctionAllocationIdentity(adaptValue.id()), rewired);
-        bindings.put(new FunctionAllocationIdentity(callee.id()), rewired);
         LoweredModuleUnit doctored = new LoweredModuleUnit(unit.formatVersion(),
             unit.semanticProfile(), unit.moduleId(), unit.interfaceHash(),
             unit.loweringContextHash(), unit.requiredCapabilities(),
@@ -2029,8 +2324,7 @@ public class DynamicDispatchEmissionTest {
             unit.loweringContextHash(), unit.requiredCapabilities(),
             unit.constructCoverage(), unit.classLayouts(), unit.functions(),
             unit.moduleInit(), unit.exportPlan(), bindings, ops);
-        Drive drive = doctorAndValidate(doctoredOps, raw, callee, carrier,
-            "return-cell fault");
+        Drive drive = validateDrive(doctoredOps, raw, "return-cell fault");
         if (drive == null) {
             return;
         }
@@ -2156,8 +2450,12 @@ public class DynamicDispatchEmissionTest {
         if (!(carrier instanceof FunctionExecutionBinding.AdapterBinding)) {
             return;
         }
-        Drive drive = doctorAndValidate(unit, raw, callee, carrier,
-            "adapter source-class fault");
+        FunctionExecutionBinding registration = unit.functionBindings().get(
+            new FunctionAllocationIdentity(callee.id()));
+        check(registration instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the source-class fault drive's callee value carries the producer rule's "
+                + "dynamic materialization record: " + registration);
+        Drive drive = validateDrive(unit, raw, "adapter source-class fault");
         if (drive == null) {
             return;
         }
@@ -2287,6 +2585,7 @@ public class DynamicDispatchEmissionTest {
         testAdapterCarrierDrive();
         testDynamicAsyncDrive();
         testDynamicAsyncAdapterDrive();
+        testCalleeOwnedCellDrive();
         testComposedDrive();
         testEmittedSurface();
         testEmittedAsyncDispatchSurface();

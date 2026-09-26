@@ -4310,6 +4310,14 @@ public final class SemanticLowerer {
             final OpId returnBoundaryOpId;
             final OpId callSiteOpId;
             boolean returnBoundaryEmitted;
+            /**
+             * Whether the body's single return cell was emitted by a
+             * {@code RETURN} of the body (the callee-owned form's recorded
+             * cell). A never-returning body's cell is instead materialized
+             * by its invocation op at the walk's finalization, so the body
+             * carries no RETURN-owned cell to record.
+             */
+            boolean returnCellReturnParented;
             boolean callSiteUsed;
             InvocationShape shape;
             OpId shapeOpId;
@@ -9932,8 +9940,22 @@ public final class SemanticLowerer {
             // execution binding — a member/index read, a call result, or any
             // other callee expression — evaluates to its own value first
             // (left-to-right before the arguments), and the call lowers the
-            // landed dynamic shape over that value.
+            // landed dynamic shape over that value. A callee expression whose
+            // value carries a statically classified registration (an adapter,
+            // a host function or host-materialized value, an external
+            // function, or an intrinsic) belongs to the static/indirect arms
+            // of the closed table, so it resolves through them over the same
+            // evaluated value.
             ValueId dynamicCallee = lowerExpression(call.callee());
+            FunctionExecutionBinding registration = registry.bindings().get(
+                new FunctionAllocationIdentity(dynamicCallee.id()));
+            if (registration != null
+                    && !(registration instanceof FunctionExecutionBinding.LoweredBody)
+                    && !(registration
+                        instanceof FunctionExecutionBinding.DynamicFunctionValue)) {
+                return lowerIndirectCall(call, slot, registration, dynamicCallee,
+                    describeDynamicCallee(call.callee()));
+            }
             return lowerDynamicCall(call, slot, describeDynamicCallee(call.callee()),
                 dynamicCallee);
         }
@@ -10155,13 +10177,33 @@ public final class SemanticLowerer {
             RuntimeDescriptor resultType = signature.returnType();
             ValueId result = slot != null ? slot : ids.nextValueId(module, nextOrdinal++, 0);
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
-            OpId callOpId = ids.nextOpId(module, nextOrdinal++, 0);
             SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(call.span()),
                 SourceOriginKind.USER, anchor, currentParent());
-            // The three recorded per-class return cells (the DEAL-body cell
-            // carries the call-owned RETURN the closed validator requires).
-            OpId dealBodyBoundaryOpId = emitCallOwnedReturnBoundary(signature, result,
-                call.span(), callOpId);
+            // The K12 form decision (M6): the callee value's produced
+            // registration decides the recorded DEAL-body cell's closed
+            // form. A same-walk body (an in-place function-expression
+            // callee and any callee value whose body this walk produced)
+            // records the body's own RETURN-materialized cell through the
+            // landed reserved-identity hand-off; every other callee value
+            // (the producer rule's dynamic record or an unregistered
+            // value) records the landed call-owned record.
+            FunctionContext calleeBody = sameWalkCalleeBody(calleeValue);
+            OpId callOpId;
+            OpId dealBodyBoundaryOpId;
+            if (calleeBody != null) {
+                calleeBody.assignShape(InvocationShape.SOURCE_CALL,
+                    calleeBody.callSiteOpId);
+                callOpId = calleeBody.callSiteUsed
+                    ? ids.nextOpId(module, nextOrdinal++, 0) : calleeBody.callSiteOpId;
+                calleeBody.callSiteUsed = true;
+                dealBodyBoundaryOpId = calleeBody.returnBoundaryOpId;
+            } else {
+                callOpId = ids.nextOpId(module, nextOrdinal++, 0);
+                // The call-owned cell carries the unattached record RETURN
+                // the closed validator requires.
+                dealBodyBoundaryOpId = emitCallOwnedReturnBoundary(signature, result,
+                    call.span(), callOpId);
+            }
             OpId hostBoundaryOpId = emitHostReturnBoundary(signature, result, call.span(),
                 callOpId);
             OpId externalBoundaryOpId = emitExternalReturnBoundary(signature, result,
@@ -10191,6 +10233,34 @@ public final class SemanticLowerer {
             // dynamic materialization keyed by the call's result identity.
             registerDynamicMaterialization(result, callOpId, resultType);
             return result;
+        }
+
+        /**
+         * The same-walk callee body of one dynamic callee value (the K12
+         * form decision, M6): the callee value's produced registration is a
+         * {@code LoweredBody} whose body this same walk lowered and whose
+         * return cell a {@code RETURN} of that body materialized (the
+         * callee-owned form's recorded cell). Any other callee value — a
+         * {@code DynamicFunctionValue} registration, an unregistered
+         * value, a registration whose body another walk produced, or a
+         * never-returning body whose cell is materialized by its
+         * invocation op rather than a {@code RETURN} — records the landed
+         * call-owned record.
+         *
+         * @param calleeValue the evaluated callee value; non-null
+         * @return the same-walk body's lowering context, or {@code null}
+         */
+        private FunctionContext sameWalkCalleeBody(ValueId calleeValue) {
+            FunctionExecutionBinding binding = registry.bindings().get(
+                new FunctionAllocationIdentity(calleeValue.id()));
+            if (!(binding instanceof FunctionExecutionBinding.LoweredBody body)) {
+                return null;
+            }
+            FunctionContext context = contextsByFunctionId.get(body.functionId());
+            if (context == null || !context.returnCellReturnParented) {
+                return null;
+            }
+            return context;
         }
 
         /**
@@ -10984,8 +11054,25 @@ public final class SemanticLowerer {
                     false);
             }
             // The dynamic async arm over a callee expression that is neither
-            // an identifier nor an import-member access.
+            // an identifier nor an import-member access. A callee expression
+            // whose value carries a statically classified registration takes
+            // the static/indirect arms of the closed table (the adapter arm
+            // included) over the same evaluated value; a same-walk body and
+            // the producer rule's dynamic record take the dynamic async arm.
             ValueId dynamicCallee = lowerExpression(call.callee());
+            FunctionExecutionBinding registration = registry.bindings().get(
+                new FunctionAllocationIdentity(dynamicCallee.id()));
+            if (registration instanceof FunctionExecutionBinding.AdapterBinding
+                    adapter) {
+                return lowerAdapterOverAsync(call, slot, awaitSpan, adapter,
+                    describeDynamicCallee(call.callee()));
+            }
+            if (registration != null
+                    && !(registration instanceof FunctionExecutionBinding.LoweredBody)
+                    && !(registration
+                        instanceof FunctionExecutionBinding.DynamicFunctionValue)) {
+                return lowerAsyncStart(call, slot, awaitSpan, registration, false);
+            }
             return lowerDynamicAwait(call, slot, awaitSpan,
                 describeDynamicCallee(call.callee()), dynamicCallee);
         }
@@ -11034,11 +11121,28 @@ public final class SemanticLowerer {
             RuntimeDescriptor completion = signature.returnType();
             ValueId awaitResult = slot != null ? slot
                 : ids.nextValueId(module, nextOrdinal++, 0);
-            OpId startOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            // The K12 form decision (M6): the callee value's produced
+            // registration decides the recorded task cell's closed form —
+            // the same-walk body's own RETURN-materialized cell through the
+            // landed reserved-identity hand-off, or the landed call-owned
+            // record for every other callee value.
+            FunctionContext calleeBody = sameWalkCalleeBody(calleeValue);
+            OpId startOpId;
+            OpId taskCellOpId;
+            if (calleeBody != null) {
+                calleeBody.assignShape(InvocationShape.SOURCE_ASYNC,
+                    calleeBody.callSiteOpId);
+                startOpId = calleeBody.callSiteUsed
+                    ? ids.nextOpId(module, nextOrdinal++, 0) : calleeBody.callSiteOpId;
+                calleeBody.callSiteUsed = true;
+                taskCellOpId = calleeBody.returnBoundaryOpId;
+            } else {
+                startOpId = ids.nextOpId(module, nextOrdinal++, 0);
+                taskCellOpId = emitCallOwnedReturnBoundary(signature, awaitResult,
+                    call.span(), startOpId);
+            }
             AsyncTokenId token = new AsyncTokenId.Canonical(
                 ids.nextTokenId(module, nextOrdinal++, 0), AsyncTokenOwner.DEAL_BODY_TASK);
-            OpId taskCellOpId = emitCallOwnedReturnBoundary(signature, awaitResult,
-                call.span(), startOpId);
             List<SemanticOp> parameterBoundaryOps = new ArrayList<>();
             List<OpId> parameterBoundaryIds = new ArrayList<>();
             for (int i = 0; i < args.size(); i++) {
@@ -11462,6 +11566,7 @@ public final class SemanticLowerer {
                 return;
             }
             context.returnBoundaryEmitted = true;
+            context.returnCellReturnParented = true;
             RuntimeDescriptor returnType = context.signature.returnType();
             FailurePolicyId policy = descriptorKindPolicy(returnType);
             BoundaryKind kind = returnBoundaryKind(context);
