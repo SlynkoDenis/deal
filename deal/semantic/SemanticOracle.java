@@ -71,6 +71,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * The semantic oracle of {@code deal.semantic-ir/1} — an independent
@@ -303,6 +304,27 @@ public final class SemanticOracle {
         return executeClosure(project, tables, registries, responder, true, Map.of());
     }
 
+    /**
+     * The declaration-class seam of {@link
+     * #executeProjectInits(ExecutableLoweredProject, Map, Map, HostResponder)}
+     * (the declaration-layout input of {@link
+     * #execute(ExecutableLoweredProject, Map, Map, HostResponder, Map)};
+     * ISSUE-0624, extended by ISSUE-0667): the project's registered
+     * declaration-class layouts by {@link ClassId} — the layout context an
+     * extern-C C-struct construction (and a host declaration class's
+     * construction) resolves through in the all-init walk.
+     *
+     * @param declarationLayouts the declaration classes' registered
+     *                           layouts by {@link ClassId}; non-null
+     */
+    public static SemanticRuntimeModel.ConsumerRun executeProjectInits(
+            ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
+            Map<ModuleId, ClassFactoryRegistry> registries, HostResponder responder,
+            Map<ClassId, ClassLayout> declarationLayouts) {
+        return executeClosure(project, tables, registries, responder, true,
+            declarationLayouts);
+    }
+
     /** The shared closure executor (all-init or entry-only walks). */
     private static SemanticRuntimeModel.ConsumerRun executeClosure(
             ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
@@ -444,12 +466,18 @@ public final class SemanticOracle {
     /**
      * The deterministic host seam of the E7 call machine: a closed
      * responder supplies every host terminal — sync returns/throws,
-     * async starts (an operation label, or a bad handle), and async
-     * completions. The oracle records one ordered
+     * async starts (an operation label, or a bad handle), async
+     * completions, the loaded host surface entries
+     * ({@link #loadedExport}), the loaded host class defaults
+     * ({@link #loadedClassDefaults}), and the loaded extern-C C-struct
+     * plan projection ({@link #planProjection}). The oracle records one
+     * ordered
      * {@code HOST_CALL}/{@code HOST_RETURN}/{@code HOST_THROW}/
      * {@code ASYNC_START_OP}/{@code ASYNC_COMPLETE_*} effect per
      * terminal, and a thrown host error crosses as a DEAL failure with
-     * the host's code/message at the call origin.
+     * the host's code/message at the call origin. Every terminal is
+     * closed (no ambient host state): a seam the drive does not script
+     * fails closed, never a silent projection.
      */
     public interface HostResponder {
 
@@ -559,6 +587,97 @@ public final class SemanticOracle {
         default Map<String, Value> loadedClassDefaults(ClassId classId) {
             return null;
         }
+
+        /**
+         * One loaded extern-C C-struct class's plan projection
+         * ({@code luajit-ffi-struct-plan-construction-and-oracle-projection}
+         * F4 and the oracle plan-projection contract; ISSUE-0667): the
+         * oracle-side analog of the loaded FFI module table's
+         * {@code <exportName>_plan} entry — the ordered plan entries of one
+         * extern-C {@code @c-struct} class, each carrying the field name,
+         * the field's canonical descriptor, the optional flag, and a
+         * deferred-default supplier. The oracle runs no generated evaluator
+         * content and no native code, so the seamed load supplies the plan
+         * entries the same way it supplies the loaded export entries and the
+         * loaded class defaults: the construction invokes each omitted
+         * required-present field's supplier exactly once per attempt in
+         * class source order. The projection's order, names, and descriptors
+         * must equal the class's registration-seed layout (the
+         * compiler-validated mirror of the plan); a mismatch is a fail-closed
+         * producer defect raised before any phase runs. The returned entries
+         * are the loaded plan's data: the construction consumes them per
+         * attempt and never mutates them. A {@code null} return is the
+         * absent-projection case (the seamed load has not run): a
+         * construction over it is a fail-closed producer defect, never an
+         * invented empty plan.
+         *
+         * @param module        the resolved declaring extern-C module (the
+         *                      loaded surface's module key); non-null
+         * @param className     the class's declared name within the module
+         *                      (the {@code <exportName>_plan} entry's
+         *                      {@code exportName}); non-null
+         * @param declaredClass the class's declared class descriptor; non-null
+         * @return the ordered plan entries, or {@code null} when the seam
+         *         supplies none
+         */
+        default List<PlanEntry> planProjection(ModuleId module, String className,
+                                               RuntimeDescriptor.Class declaredClass) {
+            return null;
+        }
+
+        /**
+         * One ordered entry of a loaded {@code <C>_plan} projection
+         * (struct-plan F4; ISSUE-0667): the plan's field name, canonical
+         * descriptor, optional flag, and deferred default — the plan's
+         * generated evaluator, supplied by the seam as a fresh per-attempt
+         * value. An entry without a deferred default carries a null
+         * supplier; an extern-C struct declares every field required with a
+         * default, so a null supplier on a required entry is a fail-closed
+         * producer defect at the construction, never an absent field.
+         *
+         * @param name             the field name in class source order;
+         *                         non-null
+         * @param descriptor       the field's canonical descriptor; non-null
+         * @param optional         the plan's optional flag (always false for
+         *                         an extern-C struct field)
+         * @param defaultEvaluator the deferred default supplier, or
+         *                         {@code null} when the entry carries no
+         *                         evaluator; the supplier produces a fresh
+         *                         value per invocation (the evaluator-once
+         *                         rule is the construction's, never a memo)
+         */
+        record PlanEntry(String name, RuntimeDescriptor descriptor, boolean optional,
+                         Supplier<Value> defaultEvaluator) {
+
+            public PlanEntry {
+                Objects.requireNonNull(name, "name must not be null");
+                Objects.requireNonNull(descriptor, "descriptor must not be null");
+            }
+        }
+    }
+
+    /**
+     * The deferred-default proxy's failure projection (the plan-projection
+     * contract; ISSUE-0667): a plan-projection entry's default supplier
+     * raises the evaluator's own DEAL failure through this entry — code,
+     * message, and origin cross unchanged, the run reports that exact
+     * failure (exactly like a thrown host terminal), and no instance is
+     * published. The oracle runs no generated evaluator content and no
+     * native code, so a proxy whose proxied evaluator failed signals the
+     * failure here.
+     *
+     * @param code    the evaluator's own failure code; non-null
+     * @param message the evaluator's own failure message; non-null
+     * @param origin  the failure's origin (a host-thrown evaluator failure
+     *                carries the call-expression origin); non-null
+     * @return the DEAL failure the proxy throws
+     */
+    public static DealFailure evaluatorFailure(String code, String message,
+                                               SourceOrigin origin) {
+        Objects.requireNonNull(code, "code must not be null");
+        Objects.requireNonNull(message, "message must not be null");
+        Objects.requireNonNull(origin, "origin must not be null");
+        return new DealFailure(code, message, origin, null, null, null, List.of());
     }
 
     /**
@@ -2382,11 +2501,66 @@ public final class SemanticOracle {
                         priorValues, boundaryOps, classLayouts,
                         checkRunner(op, payload, boundaryOps, null), defaults);
                 }
-                case FFI_PLAN ->
-                    throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " carries defaultOwner FFI_PLAN: the extern-C C-struct"
-                        + " construction is the FFI child's — a fail-closed producer"
-                        + " defect, never executed and never default-evaluated");
+                case FFI_PLAN -> {
+                    // The extern-C C-struct construction (ISSUE-0667;
+                    // struct-plan F4 and the oracle plan-projection
+                    // contract): the loaded plan's ordered entries come
+                    // through the closed plan-projection terminal, and the
+                    // shared executor runs the runtime entry's four phases
+                    // over them. The oracle runs no generated evaluator
+                    // content and no native code: the seam supplies each
+                    // omitted field's deferred default.
+                    ClassLayout declaredLayout = classLayouts.get(payload.classId());
+                    if (declaredLayout == null) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " classId " + payload.classId()
+                            + " does not resolve in the layout-resolution"
+                            + " context: an extern-C C-struct class resolves"
+                            + " through the project's registered declaration"
+                            + " layouts (producer defect)");
+                    }
+                    if (responder == null) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " carries defaultOwner FFI_PLAN without the host"
+                            + " responder: the closed plan-projection terminal"
+                            + " supplies the loaded <C>_plan entries (the oracle"
+                            + " runs no generated evaluator content and no native"
+                            + " code — producer defect)");
+                    }
+                    ModuleId declarationModule = ffiDeclarationModuleOf(payload.classId());
+                    List<HostResponder.PlanEntry> projected = responder.planProjection(
+                        declarationModule, payload.classId().name(),
+                        new RuntimeDescriptor.Class(payload.classId()));
+                    if (projected == null) {
+                        throw new IllegalStateException("CLASS_NEW " + op.opId()
+                            + " classId " + payload.classId() + " reaches the"
+                            + " C-struct construction without the loaded plan"
+                            + " projection: the closed plan-projection terminal"
+                            + " supplies the loaded <exportName>_plan entries —"
+                            + " an absent projection is a fail-closed producer"
+                            + " defect, never an invented empty plan");
+                    }
+                    List<ClassOpsExecutor.FfiPlanEntry> plan = new ArrayList<>(
+                        projected.size());
+                    for (HostResponder.PlanEntry entry : projected) {
+                        Supplier<ClassOpsExecutor.Value> evaluator =
+                            entry.defaultEvaluator() == null ? null : () -> {
+                                Value supplied = entry.defaultEvaluator().get();
+                                return supplied == null ? null
+                                    : executorValueOf(supplied);
+                            };
+                        plan.add(new ClassOpsExecutor.FfiPlanEntry(entry.name(),
+                            entry.descriptor(), entry.optional(), evaluator));
+                    }
+                    ClassOpsExecutor.BoundaryCheckRunner boundaryRunner =
+                        checkRunner(op, payload, boundaryOps, null);
+                    ClassOpsExecutor.FfiPlanCheckRunner ffiCheck =
+                        (boundary, descriptor, input) -> boundary != null
+                            ? boundaryRunner.run(boundary, input)
+                            : rawDescriptorCheck(descriptor, input);
+                    outcome = ClassOpsExecutor.executeClassNewFfiPlan(op, priorValues,
+                        boundaryOps, classLayouts, plan, ffiCheck);
+                }
                 case BUILTIN_DEFAULTS -> {
                     if (!ClassId.ERROR.equals(payload.classId())) {
                         throw new IllegalStateException("CLASS_NEW " + op.opId()
@@ -2496,6 +2670,78 @@ public final class SemanticOracle {
                             failure.expected, failure.actual, Map.of(), null));
                 }
             };
+        }
+
+        /**
+         * The FFI construction's phase-3 descriptor check (struct-plan F4;
+         * ISSUE-0667): one present field validated against its plan entry's
+         * descriptor — the runtime {@code __rt.check_canonical_type}
+         * projection at the literal origin. No boundary op exists for a
+         * plan-supplied field, so the check runs event-free; a provided
+         * field's phase-1 boundary child already emitted its own events and
+         * the entry-descriptor re-check is the same deterministic predicate.
+         */
+        private ClassOpsExecutor.BoundaryResult rawDescriptorCheck(
+                RuntimeDescriptor descriptor, ClassOpsExecutor.Value input) {
+            Value oracleInput = oracleValueOf(input);
+            FailurePolicyId policy = descriptor instanceof RuntimeDescriptor.Func
+                ? FailurePolicyId.FUNCTION_SIGNATURE : FailurePolicyId.TYPE_DESCRIPTOR;
+            BoundaryOutcome outcome;
+            try {
+                outcome = BoundaryExecutor.check(policy, descriptor,
+                    viewOfValue(oracleInput), BoundaryContext.none());
+            } catch (BoundaryExecutor.Defect defect) {
+                throw new IllegalStateException("the C-struct field check of "
+                    + descriptor.canonicalSpecText() + " has no executor"
+                    + " projection: " + defect.getMessage() + " (producer defect)");
+            }
+            return switch (outcome) {
+                case BoundaryOutcome.Pass pass -> new ClassOpsExecutor.BoundaryResult.Pass(
+                    executorValueOf(valueOfView(pass.value(), oracleInput)));
+                case BoundaryOutcome.Fail fail ->
+                    new ClassOpsExecutor.BoundaryResult.Fail(fail.failure());
+            };
+        }
+
+        /**
+         * The resolved module of one extern-C class's declaring declaration
+         * module (struct-plan F4/F1; ISSUE-0667): the closure's HOST-kind
+         * {@code MODULE_IMPORT} whose raw specifier the class identity's
+         * semantic module path names ({@code "$external/" + rawSpecifier ==
+         * classId.modulePath()}). That resolved module is the loaded
+         * surface's module key the plan projection is requested with.
+         */
+        private ModuleId ffiDeclarationModuleOf(ClassId classId) {
+            ModuleId resolved = null;
+            for (UnitState candidate : units.values()) {
+                for (SemanticOp op : candidate.unit.ops()) {
+                    if (op.kind() != SemanticOpKind.MODULE_IMPORT
+                            || !(op.payload()
+                                instanceof KindPayload.ModuleImportPayload payload)
+                            || payload.kind() != ModuleImportKind.HOST) {
+                        continue;
+                    }
+                    if (!("$external/" + payload.rawSpecifier())
+                            .equals(classId.modulePath())) {
+                        continue;
+                    }
+                    if (resolved != null
+                            && !resolved.equals(payload.resolvedModule())) {
+                        throw new IllegalStateException("the extern-C class "
+                            + classId + " resolves two different declaring modules "
+                            + resolved + " and " + payload.resolvedModule()
+                            + " among the closure's HOST imports (producer defect)");
+                    }
+                    resolved = payload.resolvedModule();
+                }
+            }
+            if (resolved == null) {
+                throw new IllegalStateException("the extern-C class " + classId
+                    + " resolves no HOST MODULE_IMPORT in the closure: the"
+                    + " declaring module's loaded surface is the plan projection's"
+                    + " source (producer defect)");
+            }
+            return resolved;
         }
 
         /** The present value of one named declaration-order field of a class instance. */

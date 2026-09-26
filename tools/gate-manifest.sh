@@ -1030,4 +1030,41 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the joint fixture battery. The class lives in package deal.semantic
   # to reach the package-internal project walk.
   'fg|=== Running Materialization-Site Origin / Function-Row Projection Tests (ISSUE-0681) ===|java -ea -cp build deal.semantic.MaterializationSiteOriginTest'
+  # ISSUE-0667 registration: the oracle plan-projection seam and the FFI
+  # construction execution (luajit-ffi-struct-plan-construction-and-oracle-
+  # projection F4 and the oracle plan-projection contract;
+  # luajit-ffi-shared-emission-and-jvm-rejection F6;
+  # luajit-ffi-class-plan-consumption-verification D4; sequencing step 6):
+  # HostResponder gains exactly one closed plan-projection terminal
+  # (module + class name + class descriptor -> the ordered plan entries
+  # with their deferred-default suppliers) and the new
+  # ClassOpsExecutor.executeClassNewFfiPlan surface accepts only FFI_PLAN
+  # and runs the runtime entry's four phases — the provided fields'
+  # CLASS_LITERAL_FIELD boundary children in declaration order, the
+  # provided-source-order E8007 guard, each omitted required-present
+  # field's supplier exactly once per attempt in class source order, the
+  # per-field descriptor validation (the canonical matcher's E8001/E8004
+  # at the literal origin), and the declaration-order ClassValue with
+  # every declared field present, never a partial instance and never a
+  # memoized supplier. The ffi/019 provided-only drive runs the oracle's
+  # plan projection with the resolved declaring module, the class name,
+  # and the class descriptor, asserts the construction's event order and
+  # the fixture's copy isolation, and runs the same fixture's production
+  # artifact (the T5 construction site) under luajit with the pinned
+  # runtime-ok transcript; the omitted-field drive runs the focused
+  # native-counting declaration through the seam with one supplier per
+  # omitted field per attempt (the artifact's counter sequence 0, 2, 3, 5)
+  # beside the same project's production artifact executing under luajit;
+  # the negative seeds reject a mutated entry order, a mutated descriptor,
+  # a short projection, and an absent projection (and the phase-3
+  # E8001/E8004 projections pin the literal origin); a failing deferred
+  # default's proxy failure crosses as its own DEAL failure with the later
+  # field's supplier suppressed; a doctored
+  # extra-field payload yields the identical E8007 through the oracle and
+  # the emitted artifact; the surface rejects every foreign owner, a
+  # non-null factory ref, a non-empty default-op list, and an absent
+  # projection; and the negative drives compile the focused fixture
+  # without building its native library at all (the oracle loads no
+  # library, resolves no symbol, and runs no generated evaluator content).
+  'fg|=== Running FFI Plan Projection Oracle Tests (ISSUE-0667) ===|java -ea -cp build deal.test.FfiPlanProjectionOracleTest'
 )
