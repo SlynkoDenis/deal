@@ -81,7 +81,11 @@ import java.util.Set;
  *       of the intrinsic binding publishes the producer-less seeded
  *       identity unchanged, every alias load republishes the same identity,
  *       no {@code DynamicFunctionValue} is registered for it, and the unit
- *       passes both closed gates.</li>
+ *       passes both closed gates. The identity-preserving exclusion is per
+ *       publishing op and closed over the alias chain (the alias load
+ *       names a cell whose {@code BINDING_INIT} carries the seeded
+ *       identity), while a load naming a cell initialized with another
+ *       identity stays a producing position.</li>
  *   <li><b>The memoized carrier on both targets (J2).</b> The LuaJIT
  *       accessor returns the real carrier — the conversion invoker, the
  *       declared descriptor text and canonical spec text, no function id,
@@ -107,8 +111,10 @@ import java.util.Set;
  * carrier, or behavior surface exists. The value-position program carries
  * the seed write and the alias declarations over one identity, so the
  * closed gate's seed-write counting admits the declaration's re-publication
- * of the seed write (a doctored unit whose seeded identity is also produced
- * by another op still fails the seed clause).</p>
+ * of the seed write and its identity-preserving alias loads, while a
+ * doctored unit whose seeded identity is also produced by another op (or by
+ * a load naming a cell initialized with another identity) still fails the
+ * seed clause.</p>
  */
 public class IntrinsicValueMaterializationTest {
 
@@ -482,6 +488,7 @@ public class IntrinsicValueMaterializationTest {
         // holding the identity — every one a BINDING_LOAD whose result is
         // the seeded identity, and no other op produces it.
         int loads = 0;
+        int aliasLoads = 0;
         boolean seedCellLoad = false;
         for (SemanticOp producer : producersOf(unit, intSeed)) {
             check(producer.kind() == SemanticOpKind.BINDING_LOAD,
@@ -496,6 +503,20 @@ public class IntrinsicValueMaterializationTest {
             if (load.binding().equals(intInit.binding())
                     && load.generation() == intInit.generation()) {
                 seedCellLoad = true;
+            } else {
+                // The exclusion is per publishing op (ISSUE-0675) and closed
+                // over the alias chain (J1's alias-load refinement): the
+                // alias load preserves the seeded identity because the cell
+                // it names was initialized with that identity (the alias
+                // declaration's re-publication), so the identity stays out
+                // of the producing positions. A load naming a cell whose
+                // init carries another identity stays a producing position
+                // (the foreign-load negative below).
+                aliasLoads++;
+                check(cellInitCarries(unit, load.binding(), load.generation(), intSeed),
+                    "each alias load reads a cell whose BINDING_INIT carries the seeded "
+                        + "identity (the alias declaration's re-publication); cell b"
+                        + load.binding().id() + "g" + load.generation());
             }
         }
         check(loads >= 4,
@@ -503,6 +524,9 @@ public class IntrinsicValueMaterializationTest {
                 + "the seeded identity; got " + loads);
         check(seedCellLoad, "the typed load of the intrinsic binding reads the seed "
             + "BINDING_INIT's own cell");
+        check(aliasLoads >= 3,
+            "the identity-preserving alias loads republish the seeded identity; got "
+                + aliasLoads);
 
         // The declarations over the identity: the seed write plus the alias
         // declarations storing the same identity (each a BINDING_INIT whose
@@ -544,6 +568,29 @@ public class IntrinsicValueMaterializationTest {
             "a doctored unit whose seeded identity is also produced by an EXPORT_READ "
                 + "still fails the seed clause: "
                 + doctoredFailure.map(CompilerDiagnostic::message).orElse("admission"));
+
+        // The merged rule's closed direction: an identity-preserving load is
+        // one whose named cell carries the identity. A load naming a cell
+        // whose BINDING_INIT carries another identity is a producing
+        // position even when its result is the seeded identity, so the seed
+        // clause stays load-bearing for the alias-flow spelling too.
+        CellRef foreignCell = foreignFunctionCell(unit, intSeed);
+        check(foreignCell != null, "the unit carries a function-typed cell initialized "
+            + "with another identity (the foreign-load target)");
+        if (foreignCell != null) {
+            SemanticOp foreignLoad = foreignLoadOf(foreignCell, intSeed, unit);
+            BlockId seedBlock = raw.table().opBlocks().get(intSeedInit.opId());
+            LoweredModuleUnit foreignUnit = withOp(unit, foreignLoad);
+            Optional<CompilerDiagnostic> foreignFailure = BindingsProductionValidator
+                .validate(foreignUnit, withTableOp(raw.table(), foreignLoad, seedBlock),
+                    raw.lowerer().pinnedWriteFacts());
+            check(foreignFailure.isPresent()
+                    && "E6005".equals(foreignFailure.get().code())
+                    && foreignFailure.get().message().contains("REGISTRY_ONE_TO_ONE"),
+                "a doctored load naming a cell whose init carries another identity over "
+                    + "the seeded identity still fails the seed clause: "
+                    + foreignFailure.map(CompilerDiagnostic::message).orElse("admission"));
+        }
 
         // The emitted sites: the seed's BINDING_INIT publishes the memoized
         // carrier (never a slot read of the identity it has not filled), the
@@ -789,6 +836,72 @@ public class IntrinsicValueMaterializationTest {
             "the combined unit whose seeded identity is also produced by an "
                 + "EXPORT_READ still fails the seed clause: "
                 + doctoredFailure.map(CompilerDiagnostic::message).orElse("admission"));
+    }
+
+    /** True iff one BINDING_INIT of the cell carries the given identity. */
+    private static boolean cellInitCarries(LoweredModuleUnit unit, BindingId binding,
+                                           long generation, long identity) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && init.binding().equals(binding)
+                    && init.generation() == generation
+                    && init.value().id() == identity) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A cell whose {@code BINDING_INIT} carries a function-typed identity
+     * other than the seed (the foreign-load target: the load naming it is a
+     * producing position under the merged per-op rule).
+     */
+    private static CellRef foreignFunctionCell(LoweredModuleUnit unit, long seed) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.BINDING_INIT
+                    && op.payload() instanceof KindPayload.BindingInitPayload init
+                    && init.value().id() != seed) {
+                for (SemanticOp producer : producersOf(unit, init.value().id())) {
+                    if (producer.resultType() instanceof RuntimeDescriptor.Func) {
+                        return new CellRef(init.binding(), init.generation());
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The unit's table with one extra op placed in the given block. */
+    private static StructuredBodyTable withTableOp(StructuredBodyTable table, SemanticOp op,
+                                                   BlockId block) {
+        Map<BlockId, List<OpId>> blockOps = new LinkedHashMap<>();
+        for (Map.Entry<BlockId, List<OpId>> entry : table.blockOps().entrySet()) {
+            blockOps.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+        }
+        blockOps.computeIfAbsent(block, key -> new ArrayList<>()).add(op.opId());
+        Map<OpId, BlockId> inverse = new LinkedHashMap<>(table.opBlocks());
+        inverse.put(op.opId(), block);
+        return new StructuredBodyTable(blockOps, inverse);
+    }
+
+    /**
+     * A doctored {@code BINDING_LOAD} publishing the seeded identity from a
+     * foreign cell (the merged rule's closed-direction negative).
+     */
+    private static SemanticOp foreignLoadOf(CellRef cell, long identity,
+                                            LoweredModuleUnit unit) {
+        SemanticOp template = unit.ops().get(0);
+        OpId opId = new OpId(MODULE, nextOpIdOf(unit));
+        RuntimeDescriptor.Func descriptor = IntrinsicKind.INT_CONVERT.declaredSignature();
+        KindPayload.BindingLoadPayload payload = new KindPayload.BindingLoadPayload(
+            cell.binding(), cell.generation());
+        return new SemanticOp(opId, SemanticOpKind.BINDING_LOAD, template.origin(),
+            new ValueId(identity), descriptor, List.of(), List.of(), payload,
+            FailurePolicyId.NO_DEAL_FAILURE,
+            contractFor(SemanticOpKind.BINDING_LOAD, payload, descriptor, List.of(),
+                FailurePolicyId.NO_DEAL_FAILURE));
     }
 
     /** A doctored EXPORT_READ op publishing the seeded identity (the T2 negative). */

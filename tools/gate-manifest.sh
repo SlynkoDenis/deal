@@ -1163,6 +1163,10 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # exemption, through the one seed-write predicate both clauses consume
   # (the value-position declaration's re-publication of the seed write is
   # not a second seed write), while the exemption's proof arm and the seed
-  # clause stay closed for the doctored units.
+  # clause stay closed for the doctored units. The exclusion is per
+  # publishing op and closed over the alias chain: an alias load preserves
+  # the seeded identity because the cell it names was initialized with it,
+  # while a load naming a cell initialized with another identity stays a
+  # producing position (the foreign-load negative).
   'fg|=== Running Intrinsic Value Materialization Tests (ISSUE-0676) ===|java -ea -cp build deal.semantic.IntrinsicValueMaterializationTest'
 )
