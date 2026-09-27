@@ -1,6 +1,8 @@
 package deal.codegen.lua;
 
 import deal.ffi.FfiGeneratedModule;
+import deal.ffi.FfiImportedClassPlanReference;
+import deal.ffi.FfiImportedFunctionReference;
 import deal.semantic.DescriptorService;
 import deal.semantic.HostDeclarationSurface;
 import deal.semantic.StdlibFunctionCatalog;
@@ -218,17 +220,22 @@ public final class LuaSemanticEmitter {
      * input (the validated extern-C generated-module metadata and the
      * manifest-directory text). A session carrying the FFI emission
      * input emits, at the owning {@code MODULE_IMPORT} of an extern-C
-     * declaration import, the landed generator's literals — the
-     * provider bindings re-pointed at the chunk's export-surface
-     * registry (never a {@code require} line), the bindings literal,
-     * and the {@code __exportSurfaces[<module>] = ... __rt.load_ffi(...)}
+     * declaration import, the landed generator's literals — one
+     * provider binding per referenced alias, re-pointed at the chunk's
+     * export-surface registry (never a {@code require} line), the
+     * bindings literal, and the
+     * {@code __exportSurfaces[<module>] = ... __rt.load_ffi(...)}
      * registry entry with the import statement's span triplet — so the
      * loaded module table becomes the import's namespace value. A
      * {@code MANIFEST_RELATIVE_PATH} loader text resolves against the
      * input's manifest directory through the pinned prefix-resolved
      * conversion. An extern-C import without generated metadata, an
-     * unserializable generated module, and a provider module outside
-     * the compile's declaration surface each fail closed (an
+     * unserializable generated module, and a wrapper-incapable provider
+     * (a provider the artifact does not publish in the wrapper
+     * convention before the binding position — a spec-stdlib module, a
+     * declaration module whose load the emission emitted after that
+     * position or never emitted, and any module outside the closure and
+     * the declaration facts) each fail closed (an
      * {@link IllegalStateException} the production arm maps to E6005
      * {@code SHARED_EMITTER_COVERAGE} and stages nothing). A session
      * without the FFI emission input keeps the landed arm: an extern-C
@@ -385,6 +392,18 @@ public final class LuaSemanticEmitter {
          * extern-C import keeps the landed no-op arm).
          */
         final FfiEmissionInput ffiInput;
+        /**
+         * The declaration modules whose load this session's walk already
+         * emitted into the chunk-global {@code __exportSurfaces} registry
+         * (the {@code load_host} and {@code load_ffi} loads, in emission
+         * order). The provider-binding predicate admits a declaration
+         * provider exactly when its load was emitted before the binding
+         * position: the binding captures the registry entry by value, so
+         * a load emitted later creates a second surface object the
+         * captured binding never observes.
+         */
+        final java.util.Set<ModuleId> emittedDeclarationLoads =
+            new java.util.LinkedHashSet<>();
         /** The per-session ordinal of the emitted FFI import locals. */
         int ffiImportCounter;
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
@@ -6887,6 +6906,10 @@ public final class LuaSemanticEmitter {
                 .append("__rt.load_host(").append(luaString(payload.rawSpecifier()))
                 .append(", ").append(hostDeclaredMap(facts)).append(", ")
                 .append(loadOriginArgs(op)).append(")\n");
+            // The load's registry entry exists from this position on, so
+            // a later binding of a provider alias naming this declaration
+            // module captures the published loaded table.
+            emittedDeclarationLoads.add(moduleId);
         }
 
         /**
@@ -6905,14 +6928,33 @@ public final class LuaSemanticEmitter {
          * The provider bindings are the same alias mapping the generator
          * renders, re-pointed at the chunk-global {@code __exportSurfaces}
          * registry instead of a per-module {@code require} (the one-chunk
-         * production layout has no per-provider module artifact): the
-         * evaluator text calls {@code <prefix><alias>.<export>.f(...)}, so
-         * the provider module must be a declaration module of the
-         * compile's surface — a provider outside it fails the compile
-         * closed. The registry entry is written with the landed idempotent
-         * {@code or} guard, so two aliases of one module share the one
-         * loaded table and no second open runs. Nothing here evaluates a
-         * plan default, opens a library, or resolves a symbol.
+         * production layout has no per-provider module artifact): one
+         * binding per referenced alias in the generator's graph order
+         * (first-reference order over the imported function and
+         * class-plan references), each capturing the provider module's
+         * published surface object by identity, and the bindings literal
+         * and the {@code load_ffi} publication following in the pinned
+         * order. The evaluator text calls
+         * {@code <prefix><alias>.<export>.f(...)}, so a provider must be
+         * wrapper-capable — a session unit of the lowered closure (its
+         * surface object is created at the chunk top and filled by the
+         * module's own {@code EXPORT_PUBLISH} publication, so an entry
+         * published later in the program is visible to the evaluator
+         * through the captured object) or a covered declaration module
+         * whose load this walk already emitted before the binding
+         * position (the loaded table the registry holds when the binding
+         * captures it). Every other provider — a spec-stdlib module, a
+         * declaration module whose load the artifact does not emit or
+         * emits after the binding position, and any module outside the
+         * closure and the declaration facts — is wrapper-incapable and
+         * fails the compile closed (a producer defect the production arm
+         * maps to E6005 {@code SHARED_EMITTER_COVERAGE}, staging
+         * nothing). An alias that names two provider modules is the same
+         * fail-closed producer defect, never a silent first-wins. The
+         * registry entry is written with the landed idempotent {@code or}
+         * guard, so two aliases of one module share the one loaded table
+         * and no second open runs. Nothing here evaluates a plan default,
+         * opens a library, or resolves a symbol.
          */
         private void emitFfiLoad(SemanticOp op,
                                  KindPayload.ModuleImportPayload payload) {
@@ -6932,26 +6974,24 @@ public final class LuaSemanticEmitter {
                     + generation.failure().message());
             }
             LuaFfiBindingGenerator.LoadCallParts parts = generation.parts();
+            requireOneProviderModulePerAlias(op, payload, moduleId, module);
             for (LuaFfiBindingGenerator.ProviderBinding provider
                     : LuaFfiBindingGenerator.providerBindings(
                         module.bindings())) {
                 ModuleId providerId = new ModuleId(provider.importedModulePath());
-                HostDeclarationSurface.DeclarationFacts providerFacts =
-                    hostSurface.modules().get(providerId);
-                if (providerFacts == null
-                        || (providerFacts.kind()
-                                == HostDeclarationSurface.DeclarationKind.EXTERN_C
-                            && !ffiInput.generatedModules()
-                                .containsKey(providerId))) {
+                if (!isWrapperCapableProvider(providerId)) {
                     throw new IllegalStateException("the extern-C module '"
-                        + moduleId.path() + "' binds the provider alias '"
+                        + moduleId.path() + "' (import '"
+                        + payload.rawSpecifier() + "' at "
+                        + importOriginText(op) + ") binds the provider alias '"
                         + provider.importAlias() + "' to the module '"
-                        + provider.importedModulePath() + "', which is not a"
-                        + " declaration module carrying a loaded wrapper"
-                        + " surface: the emitted evaluator calls the loaded"
-                        + " wrapper convention through the chunk's"
-                        + " export-surface registry (a provider gap — a"
-                        + " producer defect)");
+                        + provider.importedModulePath() + "', which the"
+                        + " artifact does not publish in the wrapper"
+                        + " convention before the binding position: the"
+                        + " provider is neither a session unit of the"
+                        + " lowered closure nor a covered declaration"
+                        + " module whose load the emission already emitted"
+                        + " (a provider gap — a producer defect)");
                 }
                 out.append("local ").append(importPrefix)
                     .append(provider.importAlias())
@@ -6970,6 +7010,90 @@ public final class LuaSemanticEmitter {
                 .append(parts.plansLiteral()).append(", ")
                 .append(bindingsLocal).append(", ")
                 .append(loadOriginArgs(op)).append(")\n");
+            // The load's registry entry exists from this position on, so
+            // a later binding of a provider alias naming this declaration
+            // module captures the published loaded table.
+            emittedDeclarationLoads.add(moduleId);
+        }
+
+        /**
+         * The wrapper-capability predicate of one provider module (P2):
+         * the artifact must publish the provider's export surface in the
+         * wrapper convention before the binding position — either a
+         * session unit of the one lowered closure (its surface object is
+         * created at the chunk top and filled by the module's own
+         * {@code EXPORT_PUBLISH} publication, so an entry published later
+         * in the program is visible to the evaluator through the captured
+         * object) or a covered declaration module whose load this walk
+         * already emitted before the binding position (the loaded table
+         * the registry holds when the binding captures it). Every other
+         * provider is wrapper-incapable and fails the compile closed —
+         * wrapper capability is a property of the artifact's publication,
+         * never of the module kind alone.
+         */
+        private boolean isWrapperCapableProvider(ModuleId providerId) {
+            return units.containsKey(providerId)
+                || emittedDeclarationLoads.contains(providerId);
+        }
+
+        /**
+         * The one-binding-per-alias invariant's fail-closed half (P1): one
+         * import alias resolves exactly one provider module, so a
+         * reference that names a provider module different from the
+         * alias's already-bound provider module is a producer defect —
+         * never a silent first-wins. The two reference lists are the
+         * validator's frozen graph-ordered facts.
+         */
+        private void requireOneProviderModulePerAlias(SemanticOp op,
+                KindPayload.ModuleImportPayload payload, ModuleId moduleId,
+                FfiGeneratedModule module) {
+            Map<String, String> aliasProviders = new LinkedHashMap<>();
+            for (FfiImportedFunctionReference ref
+                    : module.bindings().importedFunctions()) {
+                requireStableAliasProvider(op, payload, moduleId,
+                    aliasProviders, ref.importAlias(),
+                    ref.importedModulePath());
+            }
+            for (FfiImportedClassPlanReference ref
+                    : module.bindings().importedClassPlans()) {
+                requireStableAliasProvider(op, payload, moduleId,
+                    aliasProviders, ref.importAlias(),
+                    ref.importedModulePath());
+            }
+        }
+
+        /** One alias's provider-module agreement check. */
+        private void requireStableAliasProvider(SemanticOp op,
+                KindPayload.ModuleImportPayload payload, ModuleId moduleId,
+                Map<String, String> aliasProviders, String importAlias,
+                String importedModulePath) {
+            String bound = aliasProviders.putIfAbsent(importAlias,
+                importedModulePath);
+            if (bound != null && !bound.equals(importedModulePath)) {
+                throw new IllegalStateException("the extern-C module '"
+                    + moduleId.path() + "' (import '"
+                    + payload.rawSpecifier() + "' at "
+                    + importOriginText(op) + ") binds the provider alias '"
+                    + importAlias + "' to two provider modules ('" + bound
+                    + "' and '" + importedModulePath + "'): one import"
+                    + " alias resolves exactly one provider module (a"
+                    + " provider gap — a producer defect)");
+            }
+        }
+
+        /**
+         * The text of one import statement's origin (file, line, column)
+         * for a fail-closed provider-gap message: the same origin the
+         * load's own {@code FFI_LIBRARY_LOAD}/{@code FFI_SYMBOL_MISSING}
+         * failures name.
+         */
+        private static String importOriginText(SemanticOp op) {
+            SourceSpan span = op.origin().span();
+            if (span == null) {
+                return op.origin().sourceId() + ":0:0";
+            }
+            return op.origin().sourceId() + ":" + span.startLine() + ":"
+                + span.startColumn();
         }
 
         /**

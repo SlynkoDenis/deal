@@ -5,8 +5,13 @@ import deal.codegen.Backend;
 import deal.codegen.lua.FfiEmissionInput;
 import deal.codegen.lua.LuaFfiBindingGenerator;
 import deal.codegen.lua.LuaSemanticEmitter;
+import deal.diagnostics.DiagnosticRange;
+import deal.ffi.FfiBindingState;
 import deal.ffi.FfiCompilerClassDefaultPlan;
+import deal.ffi.FfiForwardBindings;
 import deal.ffi.FfiGeneratedModule;
+import deal.ffi.FfiImportedClassPlanReference;
+import deal.ffi.FfiImportedFunctionReference;
 import deal.identity.CanonicalModuleIdentity;
 import deal.module.CompilationOrchestrator;
 import deal.module.ProductionProjectEmission;
@@ -69,10 +74,19 @@ import java.util.stream.Stream;
  *   <li>the load happens once per module per program and both aliases of a
  *       two-alias import observe the one loaded surface value;</li>
  *   <li>the fail-closed seeds — a missing generated-module entry, a
- *       provider module outside the declaration surface, and an
- *       unserializable generated module — each fail with E6005 and stage
- *       nothing, and the emission input's presence rule throws at the
- *       emitter;</li>
+ *       wrapper-incapable provider, and an unserializable generated
+ *       module — each fail with E6005 and stage nothing, and the
+ *       emission input's presence rule throws at the emitter;</li>
+ *   <li>the provider-binding emission and the wrapper-capability
+ *       predicate (ISSUE-0684,
+ *       {@code plan-evaluator-provider-binding-surface} P1/P2): a
+ *       compiled provider is a session unit of the lowered closure and
+ *       is admitted, one binding line per referenced alias in graph
+ *       order with two aliases of one provider module sharing the one
+ *       registry key, a class-plan-only alias emitting its binding, an
+ *       alias naming two provider modules failing closed, and a covered
+ *       declaration provider admitted exactly when its load the walk
+ *       already emitted before the binding position;</li>
  *   <li>no compile-time library access: the {@code ffi/026} load is
  *       emitted although the wiring's library is never built, the artifact
  *       carries no {@code ffi.C}/cdef text, and no provider {@code require}
@@ -207,6 +221,20 @@ public class FfiLoadEmissionTest {
     private static Fixture compileSource(String name, String declarationFile,
             String declarationRaw, String specifier, String fixtureRaw,
             Map<String, String> extraSources) throws Exception {
+        return compileSource(name, declarationFile, declarationRaw, specifier,
+            fixtureRaw, extraSources, Map.of());
+    }
+
+    /**
+     * The one-declaration project compile with additional externals
+     * declarations ({@code specifier} &rarr; source-relative declaration
+     * file) for the fixtures whose declaration imports a second
+     * declaration module as its provider.
+     */
+    private static Fixture compileSource(String name, String declarationFile,
+            String declarationRaw, String specifier, String fixtureRaw,
+            Map<String, String> extraSources,
+            Map<String, String> extraExternals) throws Exception {
         String declaration = ConformanceHarnessMetadata
             .stripClassificationHeaders(declarationRaw);
         String app = ConformanceHarnessMetadata.stripClassificationHeaders(fixtureRaw);
@@ -227,6 +255,10 @@ public class FfiLoadEmissionTest {
         Map<String, String> externals = new LinkedHashMap<>();
         externals.put(specifier,
             src.resolve(declarationFile).toAbsolutePath().toString());
+        for (Map.Entry<String, String> extra : extraExternals.entrySet()) {
+            externals.put(extra.getKey(),
+                src.resolve(extra.getValue()).toAbsolutePath().toString());
+        }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(entry,
             root.resolve("out"), false, false, false, false, Backend.LUAJIT,
             externals, List.of(src.toAbsolutePath()), null, null,
@@ -253,8 +285,18 @@ public class FfiLoadEmissionTest {
         Map<ModuleId, CanonicalModuleIdentity> identities = new LinkedHashMap<>();
         for (ModuleId declarationModule
                 : orchestrator.hostDeclarationSurface().moduleIds()) {
-            identities.put(declarationModule,
-                new CanonicalModuleIdentity.ExternalModule(specifier));
+            CanonicalModuleIdentity identity = null;
+            for (String externalSpecifier : externals.keySet()) {
+                if (externalSpecifier.replace('/', '.')
+                        .equals(declarationModule.path())) {
+                    identity = new CanonicalModuleIdentity.ExternalModule(
+                        externalSpecifier);
+                    break;
+                }
+            }
+            identities.put(declarationModule, identity != null
+                ? identity
+                : new CanonicalModuleIdentity.ExternalModule(specifier));
         }
         return new Fixture(root, src, specifier, specifier.replace('/', '.'),
             stripped, built.input(), built.index(), manifests.manifests(),
@@ -695,17 +737,25 @@ public class FfiLoadEmissionTest {
         }
     }
 
+    /**
+     * The retargeted wrapper-incapable pin (ISSUE-0684): the compiled
+     * provider of the superseded fixture became admissible (a session
+     * unit of the lowered closure), so the fixture's provider is a
+     * spec-stdlib module — the declaration surface admits it and the
+     * validator resolves it, while no session unit ever loads it, so the
+     * artifact cannot publish its surface in the wrapper convention.
+     */
     private static void testProviderGapSeed() throws Exception {
-        System.out.println("-- a provider outside the declaration surface "
-            + "fails the compile closed --");
+        System.out.println("-- a wrapper-incapable provider (a spec-stdlib "
+            + "module) fails the compile closed --");
         Fixture fixture = compileSource("provider-gap", "probe.d.deal", """
-            import * as util from "./util"
+            import * as math from "std/math"
 
             // @extern-c
 
             // @c-struct
             export class Pair {
-              left: int = util.helper();
+              left: int = math.absInt(3);
             }
 
             export function probe(): int;
@@ -715,18 +765,21 @@ public class FfiLoadEmissionTest {
             export function main(): null {
               return null
             }
-            """, Map.of("util.deal", """
-            export function helper(): int {
-              return 1;
-            }
-            """));
+            """, Map.of());
         try {
             check(!fixture.externCModules().isEmpty(),
-                "the provider-gap fixture publishes its generated metadata");
+                "the wrapper-incapable fixture publishes its generated "
+                    + "metadata");
             for (FfiGeneratedModule module
                     : fixture.externCModules().values()) {
                 checkEq(1, module.bindings().importedFunctions().size(),
                     "the generated metadata carries the imported reference");
+                if (!module.bindings().importedFunctions().isEmpty()) {
+                    checkEq("std.math", module.bindings().importedFunctions()
+                            .get(0).importedModulePath(),
+                        "the provider is the spec-stdlib module the artifact "
+                            + "never loads");
+                }
             }
             Path out = fixture.root().resolve("out-gap");
             PublicationStager stager = PublicationStager.forRoot(out);
@@ -739,18 +792,457 @@ public class FfiLoadEmissionTest {
                 stager.discard();
             }
             check(!result.emitted(),
-                "a provider outside the declaration surface fails closed");
+                "a wrapper-incapable provider fails closed");
+            checkEq(1, result.diagnostics().size(),
+                "exactly one diagnostic: " + result.diagnostics());
             String message = result.firstDiagnostic() == null ? ""
                 : result.firstDiagnostic().message();
             check(result.firstDiagnostic() != null
                     && "E6005".equals(result.firstDiagnostic().code())
                     && message.contains("SHARED_EMITTER_COVERAGE")
-                    && message.contains("util")
-                    && message.contains("wrapper surface"),
+                    && message.contains("'math'")
+                    && message.contains("std.math")
+                    && message.contains("wrapper convention"),
                 "the provider gap is E6005 SHARED_EMITTER_COVERAGE naming the "
                     + "provider: " + result.diagnostics());
+            check(message.contains("import 'native/probe'")
+                    && message.contains("provider-gap.deal:1:1"),
+                "the provider gap names the extern-C import origin (the raw "
+                    + "specifier and the import statement's span): " + message);
         } finally {
             deleteRecursively(fixture.root());
+        }
+    }
+
+    // =========================================================================
+    // 3b. The wrapper-capability predicate and the binding invariants
+    // =========================================================================
+
+    private static final String COMPILED_PROVIDER_DECLARATION = """
+        import * as util from "./util"
+
+        // @extern-c
+
+        // @c-struct
+        export class Pair {
+          left: int = util.helper();
+          right: int = util.helper();
+        }
+
+        export function probe(): int;
+        """;
+
+    private static final String COMPILED_PROVIDER_APP = """
+        import * as native from "native/probe"
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static final String COMPILED_PROVIDER_SOURCE = """
+        export function helper(): int {
+          return 1;
+        }
+        """;
+
+    /** The compiled-provider fixture: the declaration imports ./util. */
+    private static Fixture compiledProviderFixture() throws Exception {
+        return compileSource("compiled-provider", "probe.d.deal",
+            COMPILED_PROVIDER_DECLARATION, "native/probe",
+            COMPILED_PROVIDER_APP,
+            Map.of("util.deal", COMPILED_PROVIDER_SOURCE));
+    }
+
+    /**
+     * The compiled-provider admission drive (ISSUE-0684 P2 item 1): a
+     * declaration whose plan evaluator names a compiled provider's export
+     * admits it as a session unit of the lowered closure, emits the
+     * registry-resolved binding line for its alias, and emits no dotted-
+     * path provider require.
+     */
+    private static void testCompiledProviderAdmission() throws Exception {
+        System.out.println("-- a compiled provider is admitted as a session "
+            + "unit; its alias binds the chunk registry --");
+        Fixture fixture = compiledProviderFixture();
+        try {
+            check(!fixture.externCModules().isEmpty(),
+                "the compiled-provider fixture publishes its metadata");
+            for (FfiGeneratedModule module
+                    : fixture.externCModules().values()) {
+                checkEq(2, module.bindings().importedFunctions().size(),
+                    "the metadata carries both references of the alias");
+                if (!module.bindings().importedFunctions().isEmpty()) {
+                    checkEq("util", module.bindings().importedFunctions()
+                            .get(0).importedModulePath(),
+                        "the provider is the compiled module's dotted path");
+                }
+            }
+            SemanticLowerer.ProjectLoweringResult lowered = lower(fixture);
+            check(lowered.project() != null,
+                "the compiled-provider closure lowers: " + lowered.diagnostics());
+            if (lowered.project() == null) {
+                fail("the compiled-provider closure lowers");
+                return;
+            }
+            check(lowered.project().modules().containsKey(new ModuleId("util")),
+                "the compiled provider is a session unit of the lowered "
+                    + "closure: " + lowered.project().modules().keySet());
+            Path out = fixture.root().resolve("out-compiled");
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(fixture, stager);
+                if (result.emitted()) {
+                    stager.publish();
+                }
+            } finally {
+                stager.discard();
+            }
+            check(result.emitted(), "the compiled-provider closure emits: "
+                + result.diagnostics());
+            if (!result.emitted()) {
+                return;
+            }
+            String artifact = Files.readString(
+                out.resolve("compiled-provider.lua"), StandardCharsets.UTF_8);
+            check(artifact.contains("local __ffi_import_1_util = "
+                    + "__exportSurfaces[\"util\"] or {}"),
+                "the artifact carries the registry-resolved binding line");
+            checkEq(1, countOccurrences(artifact,
+                    "local __ffi_import_1_util ="),
+                "several references through one alias emit exactly one "
+                    + "binding line");
+            check(artifact.contains("__exportSurfaces[\"util\"] = "
+                    + "__exportSurfaces[\"util\"] or {}"),
+                "the session unit's surface object is created at the chunk top");
+            check(artifact.contains("__exportSurfaces[\"util\"][\"helper\"] "
+                    + "= {__kind = \"function\""),
+                "the session unit's own EXPORT_PUBLISH writes the "
+                    + "wrapper-convention entry the binding captures");
+            check(!artifact.contains("require(\"util\")"),
+                "no dotted-path provider require line is emitted");
+            check(artifact.contains("__exportSurfaces[\"native.probe\"] = "
+                    + "__exportSurfaces[\"native.probe\"] or __rt.load_ffi("),
+                "the load publication follows the binding lines");
+            check(artifact.indexOf("local __ffi_import_1_util =")
+                    < artifact.indexOf("local __ffi_bindings_1 ="),
+                "the binding line precedes the bindings literal");
+            check(artifact.indexOf("local __ffi_bindings_1 =")
+                    < artifact.indexOf("__exportSurfaces[\"native.probe\"]"),
+                "the bindings literal precedes the load publication");
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+    }
+
+    private static final String TWO_PROVIDER_ALIAS_DECLARATION = """
+        import * as first from "./util"
+        import * as second from "./util"
+
+        // @extern-c
+
+        // @c-struct
+        export class Pair {
+          left: int = first.helper();
+          right: int = second.helper();
+        }
+
+        export function probe(): int;
+        """;
+
+    /**
+     * The one-binding-per-alias invariant (ISSUE-0684 P1): two aliases of
+     * one provider module emit two binding lines that resolve the one
+     * registry key; a class-plan-only alias emits its own binding line.
+     */
+    private static void testProviderBindingInvariants() throws Exception {
+        System.out.println("-- two aliases of one provider module bind the one "
+            + "published registry object --");
+        Fixture fixture = compileSource("two-provider-alias", "probe.d.deal",
+            TWO_PROVIDER_ALIAS_DECLARATION, "native/probe",
+            COMPILED_PROVIDER_APP,
+            Map.of("util.deal", COMPILED_PROVIDER_SOURCE));
+        try {
+            Path out = fixture.root().resolve("out-two-alias");
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(fixture, stager);
+                if (result.emitted()) {
+                    stager.publish();
+                }
+            } finally {
+                stager.discard();
+            }
+            check(result.emitted(), "the two-alias provider closure emits: "
+                + result.diagnostics());
+            if (!result.emitted()) {
+                return;
+            }
+            String artifact = Files.readString(
+                out.resolve("two-provider-alias.lua"), StandardCharsets.UTF_8);
+            check(artifact.contains("local __ffi_import_1_first = "
+                    + "__exportSurfaces[\"util\"] or {}")
+                    && artifact.contains("local __ffi_import_1_second = "
+                    + "__exportSurfaces[\"util\"] or {}"),
+                "both aliases emit their binding line resolving the one "
+                    + "registry key");
+            checkEq(1, countOccurrences(artifact,
+                    "local __ffi_import_1_first = __exportSurfaces[\"util\"] or {}"),
+                "the first alias binds the one published registry key");
+            checkEq(1, countOccurrences(artifact,
+                    "local __ffi_import_1_second = __exportSurfaces[\"util\"] or {}"),
+                "the second alias binds the same published registry key");
+            checkEq(2, countOccurrences(artifact, "local __ffi_import_1_"),
+                "exactly two binding lines are emitted (one per alias)");
+            check(!artifact.contains("require(\"util\")"),
+                "no dotted-path provider require line is emitted");
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+
+        // A class-plan-only alias (a doctored generated module carrying one
+        // imported class-plan reference) emits its binding line too.
+        System.out.println("-- a class-plan-only alias emits its binding line "
+            + "--");
+        Fixture planFixture = compiledProviderFixture();
+        try {
+            FfiGeneratedModule original = planFixture.externCModules()
+                .values().iterator().next();
+            FfiForwardBindings bindings = original.bindings();
+            FfiImportedClassPlanReference classPlan =
+                new FfiImportedClassPlanReference("plan", "Pair", "util",
+                    "@util/Pair",
+                    bindings.importedFunctions().get(0)
+                        .providerContractDigest(),
+                    0, DiagnosticRange.synthetic(""));
+            FfiForwardBindings doctoredBindings = new FfiForwardBindings(
+                bindings.moduleKey(), FfiBindingState.UNBOUND, bindings.cells(),
+                bindings.importedFunctions(), List.of(classPlan));
+            FfiGeneratedModule doctored = new FfiGeneratedModule(
+                original.modulePath(), original.descriptor(),
+                original.cdefBundle(), original.plans(), doctoredBindings);
+            Map<ModuleId, FfiGeneratedModule> modules = new LinkedHashMap<>();
+            modules.put(new ModuleId(planFixture.dotted()), doctored);
+            Path out = planFixture.root().resolve("out-class-plan");
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(planFixture, stager, modules);
+                if (result.emitted()) {
+                    stager.publish();
+                }
+            } finally {
+                stager.discard();
+            }
+            check(result.emitted(), "the class-plan-only alias closure emits: "
+                + result.diagnostics());
+            if (result.emitted()) {
+                String artifact = Files.readString(
+                    out.resolve("compiled-provider.lua"),
+                    StandardCharsets.UTF_8);
+                check(artifact.contains("local __ffi_import_1_plan = "
+                        + "__exportSurfaces[\"util\"] or {}"),
+                    "the class-plan-only alias emits its binding line");
+                checkEq(1, countOccurrences(artifact,
+                        "local __ffi_import_1_plan ="),
+                    "the class-plan-only alias emits exactly one binding line");
+            }
+        } finally {
+            deleteRecursively(planFixture.root());
+        }
+    }
+
+    /**
+     * The alias-conflict fail-closed rule (ISSUE-0684 P1): one alias
+     * resolves exactly one provider module; a doctored generated module
+     * whose forward bindings name two provider modules for one alias
+     * fails closed — never a silent first-wins.
+     */
+    private static void testAliasConflictSeed() throws Exception {
+        System.out.println("-- an alias naming two provider modules fails "
+            + "closed --");
+        Fixture fixture = compiledProviderFixture();
+        try {
+            FfiGeneratedModule original = fixture.externCModules().values()
+                .iterator().next();
+            FfiForwardBindings bindings = original.bindings();
+            FfiImportedFunctionReference first =
+                bindings.importedFunctions().get(0);
+            FfiImportedFunctionReference conflicting =
+                new FfiImportedFunctionReference(first.importAlias(),
+                    first.exportName(), "other.provider",
+                    first.canonicalDescriptor(),
+                    first.providerContractDigest(), first.graphOrder(),
+                    first.sourceRange());
+            FfiForwardBindings doctoredBindings = new FfiForwardBindings(
+                bindings.moduleKey(), FfiBindingState.UNBOUND, bindings.cells(),
+                List.of(first, conflicting), List.of());
+            FfiGeneratedModule doctored = new FfiGeneratedModule(
+                original.modulePath(), original.descriptor(),
+                original.cdefBundle(), original.plans(), doctoredBindings);
+            Map<ModuleId, FfiGeneratedModule> modules = new LinkedHashMap<>();
+            modules.put(new ModuleId(fixture.dotted()), doctored);
+            Path out = fixture.root().resolve("out-conflict");
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(fixture, stager, modules);
+                check(stager.stagedSet().relativePaths().isEmpty(),
+                    "the alias-conflict compile stages nothing");
+            } finally {
+                stager.discard();
+            }
+            check(!result.emitted(),
+                "an alias naming two provider modules fails closed");
+            checkEq(1, result.diagnostics().size(),
+                "exactly one diagnostic: " + result.diagnostics());
+            String message = result.firstDiagnostic() == null ? ""
+                : result.firstDiagnostic().message();
+            check(result.firstDiagnostic() != null
+                    && "E6005".equals(result.firstDiagnostic().code())
+                    && message.contains("SHARED_EMITTER_COVERAGE")
+                    && message.contains("'util'")
+                    && message.contains("other.provider"),
+                "the alias conflict is E6005 SHARED_EMITTER_COVERAGE naming "
+                    + "both provider modules: " + result.diagnostics());
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+    }
+
+    private static final String DECLARED_PROVIDER_DECLARATION = """
+        import * as h from "host/helper"
+
+        // @extern-c
+
+        // @c-struct
+        export class Pair {
+          left: int = h.ping();
+        }
+
+        export function probe(): int;
+        """;
+
+    private static final String HOST_PROVIDER_DECLARATION = """
+        export function ping(): int;
+        """;
+
+    private static final String LOAD_BEFORE_APP = """
+        import * as h from "host/helper"
+        import * as native from "native/probe"
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static final String LOAD_AFTER_APP = """
+        import * as native from "native/probe"
+        import * as h from "host/helper"
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static final String NO_LOAD_APP = """
+        import * as native from "native/probe"
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static Fixture declaredProviderFixture(String name, String app)
+            throws Exception {
+        return compileSource(name, "probe.d.deal",
+            DECLARED_PROVIDER_DECLARATION, "native/probe", app,
+            Map.of("helper.d.deal", HOST_PROVIDER_DECLARATION),
+            Map.of("host/helper", "helper.d.deal"));
+    }
+
+    /**
+     * The declaration-provider order branch of the wrapper-capability
+     * predicate (ISSUE-0684 P2 item 2): a covered declaration provider is
+     * admitted exactly when its load the walk emitted before the binding
+     * position; a load emitted after the binding position and a
+     * declaration no session unit loads are wrapper-incapable.
+     */
+    private static void testDeclarationProviderOrderBranch() throws Exception {
+        System.out.println("-- a covered declaration provider is admitted only "
+            + "when its load precedes the binding --");
+        Fixture admitted = declaredProviderFixture("declared-before",
+            LOAD_BEFORE_APP);
+        try {
+            Path out = admitted.root().resolve("out-before");
+            PublicationStager stager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(admitted, stager);
+                if (result.emitted()) {
+                    stager.publish();
+                }
+            } finally {
+                stager.discard();
+            }
+            check(result.emitted(), "the load-before closure emits: "
+                + result.diagnostics());
+            if (result.emitted()) {
+                String artifact = Files.readString(
+                    out.resolve("declared-before.lua"), StandardCharsets.UTF_8);
+                check(artifact.contains("local __ffi_import_1_h = "
+                        + "__exportSurfaces[\"host.helper\"] or {}"),
+                    "the covered declaration provider binds the registry key");
+                check(artifact.contains("__rt.load_host(\"host/helper\", "),
+                    "the covered declaration provider's load is emitted");
+                check(artifact.indexOf("__rt.load_host(\"host/helper\", ")
+                        < artifact.indexOf("local __ffi_import_1_h ="),
+                    "the provider's load precedes the binding position");
+            }
+        } finally {
+            deleteRecursively(admitted.root());
+        }
+
+        for (Map.Entry<String, String> unloaded : Map.of(
+                "load-after", LOAD_AFTER_APP,
+                "no-load", NO_LOAD_APP).entrySet()) {
+            Fixture fixture = declaredProviderFixture(unloaded.getKey(),
+                unloaded.getValue());
+            try {
+                Path out = fixture.root().resolve("out-" + unloaded.getKey());
+                PublicationStager stager = PublicationStager.forRoot(out);
+                ProductionProjectEmission.Result result;
+                try {
+                    result = emit(fixture, stager);
+                    check(stager.stagedSet().relativePaths().isEmpty(),
+                        "the " + unloaded.getKey() + " compile stages "
+                            + "nothing");
+                } finally {
+                    stager.discard();
+                }
+                check(!result.emitted(), "the " + unloaded.getKey()
+                    + " declaration provider is wrapper-incapable");
+                checkEq(1, result.diagnostics().size(),
+                    "exactly one diagnostic: " + result.diagnostics());
+                String message = result.firstDiagnostic() == null ? ""
+                    : result.firstDiagnostic().message();
+                check(result.firstDiagnostic() != null
+                        && "E6005".equals(result.firstDiagnostic().code())
+                        && message.contains("SHARED_EMITTER_COVERAGE")
+                        && message.contains("host.helper"),
+                    "the " + unloaded.getKey() + " provider gap is E6005 "
+                        + "SHARED_EMITTER_COVERAGE naming the provider: "
+                        + result.diagnostics());
+                check(message.contains("import 'native/probe'")
+                        && message.contains("native.probe"),
+                    "the " + unloaded.getKey() + " provider gap names the "
+                        + "import's raw specifier and the resolved "
+                        + "declaration module: " + message);
+            } finally {
+                deleteRecursively(fixture.root());
+            }
         }
     }
 
@@ -853,6 +1345,10 @@ public class FfiLoadEmissionTest {
         testLoadOnceSharedByAliases();
         testMissingMetadataSeed();
         testProviderGapSeed();
+        testCompiledProviderAdmission();
+        testProviderBindingInvariants();
+        testAliasConflictSeed();
+        testDeclarationProviderOrderBranch();
         testGeneratorFailureSeed();
         testTraceSessionAndProviderBindings();
         System.out.println();
