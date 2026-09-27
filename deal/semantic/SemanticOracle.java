@@ -563,6 +563,30 @@ public final class SemanticOracle {
         }
 
         /**
+         * One loaded host module's whole surface (K15 item 1 and the
+         * module-namespace contract): the entries of the module table the
+         * artifact publishes as the import's namespace value, in
+         * declaration order — {@code __rt.load_host}'s returned table on
+         * LuaJIT and the loaded extern-C table for an FFI module. The
+         * oracle runs no host code, so the seamed load supplies the
+         * module table the same way it supplies one entry
+         * ({@link #loadedExport}); the completion stores these entries
+         * into the module's one namespace value, so a member read that no
+         * direct read has resolved yet (and {@code std.table.keys} of the
+         * namespace value) observes the loaded table. A {@code null}
+         * return means the seam supplies no whole table (the landed
+         * per-entry seam): the namespace value's entries then resolve one
+         * by one at the member reads.
+         *
+         * @param module the owning host module; non-null
+         * @return the loaded surface's entries in declaration order, or
+         *         {@code null} when the seam supplies no whole table
+         */
+        default Map<String, Value> loadedSurface(ModuleId module) {
+            return null;
+        }
+
+        /**
          * One loaded host class's defaults projection (ISSUE-0624;
          * {@code semantic-ir-construct-coverage-cutover} K10 and the K10
          * contract): the oracle-side analog of the loaded module's
@@ -1030,6 +1054,18 @@ public final class SemanticOracle {
          */
         final Map<ModuleId, Value.TableValue> namespaceValues =
             new LinkedHashMap<>();
+        /**
+         * The module identity of one namespace value (K15 item 5): the
+         * per-run association the member-read resolution consumes. A
+         * namespace value's entries are the module's surface map, so a
+         * member read resolves an entry the surface has not recorded yet
+         * through the module's own import kind — a HOST/FFI module's
+         * loaded table entry comes from the seamed loaded surface (the
+         * oracle runs no host code). Keyed by value identity: two
+         * namespace tables with equal entry maps are still two modules.
+         */
+        final IdentityHashMap<Value.TableValue, ModuleId> namespaceModules =
+            new IdentityHashMap<>();
         /**
          * The per-run cataloged-callable registry (M3/M4): one memoized
          * {@link Value.StdlibCallableValue} per catalog row per
@@ -2072,21 +2108,92 @@ public final class SemanticOracle {
         private String executeMemberRead(SemanticOp op) {
             KindPayload.MemberReadPayload payload = (KindPayload.MemberReadPayload) op.payload();
             Value.TableValue table = (Value.TableValue) valueOf(payload.table());
+            SemanticOp boundary = singleChild(op);
+            RuntimeDescriptor descriptor = boundary == null ? null
+                : ((KindPayload.BoundaryPayload) boundary.payload()).descriptor();
             Value read = table.entries().get(payload.key());
             if (read == null) {
-                read = Value.MissingValue.INSTANCE;
+                // The module-namespace member read (K15 item 3; the
+                // module-namespace contract): a read through one module's
+                // namespace value resolves the module's own surface entry —
+                // for a HOST/FFI module the loaded module table's entry,
+                // supplied by the seamed load exactly like the direct
+                // EXPORT_READ's loaded entry (the oracle runs no host
+                // code). The resolved entry is memoized into the module's
+                // surface, so the namespace value, the direct reads, and
+                // the emitted artifacts observe one entry per
+                // (module, export).
+                read = resolveNamespaceSurfaceEntry(op, table, payload.key(),
+                    descriptor);
             }
-            SemanticOp boundary = singleChild(op);
+            if (read == null) {
+                read = Value.MissingValue.INSTANCE;
+            } else {
+                keyNamespaceSurfaceEntry(table, payload.key(), read, descriptor);
+            }
             if (boundary == null) {
                 return publish(op, read);
             }
-            RuntimeDescriptor descriptor =
-                ((KindPayload.BoundaryPayload) boundary.payload()).descriptor();
             if (defersContextualCheck(descriptor)) {
                 return publish(op, runDeferredBoundaryChild(boundary, read));
             }
             Value checked = runBoundaryChild(boundary, read, BoundaryContext.none());
             return contextualReadDecision(op, checked, descriptor);
+        }
+
+        /**
+         * The resolved surface entry of one namespace member read (K15
+         * item 3): a read through a module's namespace value that the
+         * surface has not recorded yet resolves the module's loaded
+         * table entry — the seamed load's entry for a HOST/FFI module,
+         * exactly the entry the direct {@code EXPORT_READ} of that export
+         * publishes — and memoizes it into the module's surface map (the
+         * namespace table's own entry map), so every later read of one
+         * export publishes the identical value. A non-namespace table, a
+         * non-HOST/FFI module, a read without a contextual descriptor, or
+         * a seam that supplies no entry keeps the landed absent-slot
+         * projection ({@link Value.MissingValue}).
+         */
+        private Value resolveNamespaceSurfaceEntry(SemanticOp op,
+                Value.TableValue table, String key, RuntimeDescriptor descriptor) {
+            ModuleId module = namespaceModules.get(table);
+            if (module == null || descriptor == null || responder == null) {
+                return null;
+            }
+            if (importKindOf(stateOf(op.opId()), module)
+                    != ModuleImportKind.HOST) {
+                return null;
+            }
+            Value entry = responder.loadedExport(module, key, descriptor);
+            if (entry != null) {
+                table.entries().put(key, entry);
+            }
+            return entry;
+        }
+
+        /**
+         * The value-keyed execution class of one namespace member read's
+         * entry (K15 item 3): a loaded HOST/FFI surface entry read through
+         * the module's namespace is the module's declared export, so a
+         * later dynamic dispatch of the read value resolves the identical
+         * HOST class the direct {@code EXPORT_READ} of that export
+         * registers — the namespace entry and the read entry are one
+         * value with one class. The value's own producing registration
+         * always wins (a compiled module's published value and a stdlib
+         * callable are keyed at their creation), and a read whose
+         * contextual descriptor is not a function type carries no class.
+         */
+        private void keyNamespaceSurfaceEntry(Value.TableValue table, String key,
+                Value entry, RuntimeDescriptor descriptor) {
+            ModuleId module = namespaceModules.get(table);
+            if (module == null
+                    || !(descriptor instanceof RuntimeDescriptor.Func func)) {
+                return;
+            }
+            if (bindingsByValue.get(entry) == null) {
+                bindingsByValue.put(entry, new FunctionExecutionBinding.HostFunction(
+                    module, key, func));
+            }
         }
 
         /**
@@ -6497,6 +6604,24 @@ public final class SemanticOracle {
                 payload.resolvedModule(), ignored -> new LinkedHashMap<>());
             Value.TableValue namespace = new Value.TableValue(entries);
             namespaceValues.put(payload.resolvedModule(), namespace);
+            namespaceModules.put(namespace, payload.resolvedModule());
+            if (payload.kind() == ModuleImportKind.HOST && responder != null) {
+                // The loaded module table is the HOST/FFI namespace value
+                // (K15 items 1/5): the seamed load supplies the whole table
+                // the artifact publishes, so the completion's namespace value
+                // carries the loaded entries before any read — a member read
+                // that no direct read resolved yet, and std.table.keys of the
+                // namespace value, observe the loaded table exactly like the
+                // emitted artifacts. A seam without a whole table keeps the
+                // per-entry resolution of the member reads.
+                Map<String, Value> loaded =
+                    responder.loadedSurface(payload.resolvedModule());
+                if (loaded != null) {
+                    for (Map.Entry<String, Value> entry : loaded.entrySet()) {
+                        entries.putIfAbsent(entry.getKey(), entry.getValue());
+                    }
+                }
+            }
             if (payload.kind() == ModuleImportKind.STDLIB) {
                 for (StdlibFunctionCatalog.Entry row : StdlibFunctionCatalog.entries()) {
                     if (!row.modulePath().equals(payload.resolvedModule().path())) {

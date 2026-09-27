@@ -1,6 +1,7 @@
 package deal.codegen.lua;
 
 import deal.ffi.FfiGeneratedModule;
+import deal.ffi.FfiFunctionDescriptor;
 import deal.ffi.FfiImportedClassPlanReference;
 import deal.ffi.FfiImportedFunctionReference;
 import deal.semantic.DescriptorService;
@@ -982,16 +983,18 @@ public final class LuaSemanticEmitter {
             // The per-module export-surface registry (K15 item 1: the
             // module's namespace value): one surface per module of the
             // closure, keyed by the module identity (the dotted module
-            // path), created idempotently before the module walks — the
-            // registry is chunk-global and every surface keeps its
-            // published entries, so a repeated deferred-main drive or a
-            // second chunk of the same process never wipes a surface. It
-            // is declared in both modes: every E7-lowered unit with
-            // exports carries EXPORT_PUBLISH ops (SemanticLowerer's
-            // emitE7Terminals) whose publication emission references the
-            // registry — a trace-mode session over such a unit must emit
-            // valid Lua too (production-only is the entry-surface return
-            // terminal, not the declaration).
+            // path), created idempotently before the module walks and
+            // registered in the identity-keyed namespace state
+            // (__nsSurface) the shared table consumers read — the registry
+            // is chunk-global and every surface keeps its published
+            // entries, so a repeated deferred-main drive or a second chunk
+            // of the same process never wipes a surface. It is declared in
+            // both modes: every E7-lowered unit with exports carries
+            // EXPORT_PUBLISH ops (SemanticLowerer's emitE7Terminals) whose
+            // publication emission references the registry — a trace-mode
+            // session over such a unit must emit valid Lua too
+            // (production-only is the entry-surface return terminal, not
+            // the declaration).
             out.append("__exportSurfaces = __exportSurfaces or {}\n");
             // The program-scoped cataloged-callable registry (M4): one
             // carrier per catalog row per module per program, so a read
@@ -1029,6 +1032,8 @@ public final class LuaSemanticEmitter {
                 out.append("__exportSurfaces[").append(moduleKey)
                     .append("] = __exportSurfaces[").append(moduleKey)
                     .append("] or {}\n");
+                out.append("__nsSurface(__exportSurfaces[").append(moduleKey)
+                    .append("])\n");
             }
             emitStdlibSurfacePopulation();
             // The host-driven callback dispatch table (CALLBACK_INVOKE):
@@ -1353,11 +1358,16 @@ public final class LuaSemanticEmitter {
                 String key = luaString(modulePath);
                 out.append("__exportSurfaces[").append(key).append("] = ")
                     .append("__exportSurfaces[").append(key).append("] or {}\n");
+                out.append("__nsSurface(__exportSurfaces[").append(key)
+                    .append("])\n");
                 for (StdlibFunctionCatalog.Entry row : rows) {
                     out.append("__exportSurfaces[").append(key).append("][")
                         .append(luaString(row.exportName())).append("] = ")
                         .append("__stdlibEntry(")
                         .append(stdlibRowArgs(row)).append(")\n");
+                    out.append("__orderAdd(__exportSurfaces[").append(key)
+                        .append("], ").append(luaString(row.exportName()))
+                        .append(")\n");
                 }
             }
         }
@@ -6208,6 +6218,13 @@ public final class LuaSemanticEmitter {
                 .append(", f = __unfn(").append(slot(payload.value()))
                 .append("), __val = ").append(slot(payload.value()))
                 .append("}\n");
+            // The publication records the entry's key in the surface's own
+            // order discipline: the module's declared exports are its
+            // surface's entries in declaration order (K15 item 1), so
+            // TABLE_KEYS and the JSON walker read the module's table.
+            out.append("__orderAdd(__exportSurfaces[")
+                .append(luaString(emittingModulePath(op))).append("], ")
+                .append(luaString(payload.name())).append(")\n");
             emitPlainSuccess(op);
         }
 
@@ -7245,10 +7262,55 @@ public final class LuaSemanticEmitter {
                 .append("__rt.load_host(").append(luaString(payload.rawSpecifier()))
                 .append(", ").append(hostDeclaredMap(facts)).append(", ")
                 .append(loadOriginArgs(op)).append(")\n");
+            out.append("__nsSurface(__exportSurfaces[").append(key).append("])\n");
+            // The loaded table is the import's namespace value, and its
+            // declared function exports are its entries in declaration
+            // order — the loader's own `pairs(declared)` build order is
+            // not a declaration order — so the surface's order discipline
+            // records exactly the entries the JVM host ABI surface writes
+            // and the direct read path resolves.
+            emitSurfaceOrder(key, declaredFunctionExports(facts));
             // The load's registry entry exists from this position on, so
             // a later binding of a provider alias naming this declaration
             // module captures the published loaded table.
             emittedDeclarationLoads.add(moduleId);
+        }
+
+        /** The declared function export names of one host declaration, in order. */
+        private static List<String> declaredFunctionExports(
+                HostDeclarationSurface.DeclarationFacts facts) {
+            List<String> names = new ArrayList<>();
+            for (Map.Entry<String, Type> export : facts.exports().entrySet()) {
+                if (export.getValue() instanceof Type.Func) {
+                    names.add(export.getKey());
+                }
+            }
+            return names;
+        }
+
+        /**
+         * Records one surface's declared entry names in the namespace state
+         * ({@code __nsOrder}): the emitted order list is the surface's
+         * declared exports in declaration order, so TABLE_KEYS and the JSON
+         * walker read the module's declared table. The write is idempotent,
+         * so a second alias of one module re-records nothing, and a
+         * surface the artifact never published (a torn or poisoned drive)
+         * stays absent for the read path's own missing-entry row.
+         */
+        private void emitSurfaceOrder(String key, List<String> names) {
+            if (names.isEmpty()) {
+                return;
+            }
+            StringBuilder order = new StringBuilder("{");
+            for (int i = 0; i < names.size(); i++) {
+                if (i > 0) {
+                    order.append(", ");
+                }
+                order.append(luaString(names.get(i)));
+            }
+            order.append("}");
+            out.append("__nsOrder(__exportSurfaces[").append(key).append("], ")
+                .append(order).append(")\n");
         }
 
         /**
@@ -7356,10 +7418,28 @@ public final class LuaSemanticEmitter {
                 .append(parts.plansLiteral()).append(", ")
                 .append(bindingsLocal).append(", ")
                 .append(loadOriginArgs(op)).append(")\n");
+            out.append("__nsSurface(__exportSurfaces[").append(key).append("])\n");
+            // The loaded extern-C table is the import's namespace value,
+            // and its declared function exports are its entries in source
+            // order (the runtime's `<exportName>_plan` entries are the
+            // construction child's loaded plans, not declared exports), so
+            // the surface's order discipline records exactly the entries
+            // the runtime publishes for the declared functions.
+            emitSurfaceOrder(key, ffiDeclaredFunctionExports(module));
             // The load's registry entry exists from this position on, so
             // a later binding of a provider alias naming this declaration
             // module captures the published loaded table.
             emittedDeclarationLoads.add(moduleId);
+        }
+
+        /** The declared function export names of one extern-C module, in order. */
+        private static List<String> ffiDeclaredFunctionExports(
+                FfiGeneratedModule module) {
+            List<String> names = new ArrayList<>();
+            for (FfiFunctionDescriptor function : module.descriptor().functions()) {
+                names.add(function.dealName());
+            }
+            return names;
         }
 
         /**
@@ -8863,20 +8943,57 @@ local __NULL = setmetatable({}, {__tostring = function() return "null" end})
 -- A module export surface (the K15 namespace value an import alias cell
 -- holds: a compiled module's publication table, a stdlib module's
 -- cataloged-callable table, or the runtime-loaded host/FFI module table)
--- carries no keyed-table marker — its entries are the module's declared
--- exports, never nil — so its presence is the non-nil read. A compiled
--- module's entry is the cross-chunk ABI wrapper ({__kind, sig, f,
--- __val}), and the member read yields the same published value the direct
--- __exportValue read resolves (the wrapper's __val), so the two read paths
--- publish the identical value and the dynamic dispatch resolves the
--- carrier's own class. A host table entry and a cataloged callable carry
--- no __val and are returned as they stand.
-local function __nsMemberValue(t, v)
-  if type(v) ~= "table" or v.__val == nil then return v end
-  for _, __surface in pairs(__exportSurfaces) do
-    if __surface == t then return v.__val end
+-- is the module's table in the shared table discipline without carrying a
+-- compiler mark of its own: its entries stay exactly the module's
+-- declared exports (the retained-caller ABI table and every publication
+-- enumeration keep the reads child's payload), and the shared table
+-- consumers read it through this identity-keyed namespace state. Its
+-- presence is the entry's own non-nil slot (an entry is never a stored
+-- nil), and the published value of an entry is __nsEntry's projection: a
+-- compiled module's entry is the cross-chunk ABI wrapper ({__kind, sig,
+-- f, __val}) whose __val is the identical value the direct __exportValue
+-- read resolves, while a cataloged callable and a loaded host/FFI entry
+-- carry no __val and are the entry itself. The state records the entry
+-- order (the module's declared exports in declaration order plus every
+-- later member/index write), the recorded keys, and the number-variant
+-- marks of the entries written after creation. The registry is
+-- chunk-global like the export-surface registry, so a surface a previous
+-- chunk of the same process created keeps its state.
+__nsSurfaces = __nsSurfaces or {}
+local function __nsSurface(t)
+  -- A torn or poisoned artifact whose load line never published the
+  -- surface keeps it absent: the read path's own missing-entry row is the
+  -- fail-closed projection, exactly as it is for an unpublished surface.
+  if t == nil then return t end
+  if __nsSurfaces[t] == nil then
+    __nsSurfaces[t] = {keys = {}, order = {}, numbers = {}}
+  end
+  return t
+end
+local function __nsEntry(t, v)
+  if __nsSurfaces[t] ~= nil and type(v) == "table" and v.__val ~= nil then
+    return v.__val
   end
   return v
+end
+-- Records one surface's declared entry names in its namespace state (the
+-- declared exports in declaration order): the emitted order list is the
+-- emit-time fact, never the loader's own key order. The write is
+-- idempotent (a name already recorded is not appended again), so a second
+-- alias of one module re-records nothing, and an absent surface (a torn
+-- or poisoned artifact whose load line never published it) stays absent —
+-- the read path's own missing-entry row is the fail-closed projection.
+local function __nsOrder(t, names)
+  if t == nil then return t end
+  __nsSurface(t)
+  local ns = __nsSurfaces[t]
+  for i = 1, #names do
+    if not ns.keys[names[i]] then
+      ns.order[#ns.order + 1] = names[i]
+    end
+    ns.keys[names[i]] = true
+  end
+  return t
 end
 local function __member(t, k)
   if t.__c then
@@ -8887,6 +9004,17 @@ local function __member(t, k)
     end
     return __MISSING
   end
+  local __ns = __nsSurfaces[t]
+  if __ns ~= nil then
+    -- The module namespace surface resolves in both of its branches: a
+    -- member write to the surface (which records its key in the
+    -- namespace state like any other table records __keys/__order) never
+    -- hides the published entries, and the entry is projected through
+    -- __nsEntry.
+    local v = t[k]
+    if v == nil then return __MISSING end
+    return __nsEntry(t, v)
+  end
   local __keys = t.__keys
   if __keys ~= nil then
     if __keys[k] then return t[k] end
@@ -8894,7 +9022,7 @@ local function __member(t, k)
   end
   local v = t[k]
   if v == nil then return __MISSING end
-  return __nsMemberValue(t, v)
+  return v
 end
 local function __esc(s)
   if s == nil then return "" end
@@ -9019,6 +9147,18 @@ end
 -- runtime's typing rule.
 local function __numKey(t, k, v, isNumber)
   if type(v) == "table" and v.__jn then isNumber = (v.k == "number") end
+  local ns = __nsSurfaces[t]
+  if ns ~= nil then
+    -- A module namespace surface keeps its number-variant marks in the
+    -- namespace state: the surface's own entries stay the module's
+    -- exports, exactly as the oracle's and the JVM's surfaces do.
+    if isNumber then
+      ns.numbers[k] = true
+    else
+      ns.numbers[k] = nil
+    end
+    return
+  end
   if isNumber then
     local marks = t.__nK
     if type(marks) ~= "table" then marks = {}; t.__nK = marks end
@@ -9039,7 +9179,8 @@ end
 -- atoms, and the failure actuals always see the value's own variant.
 local function __readVar(t, k, v, wantsNumber)
   if type(v) ~= "number" then return v end
-  local marks = t.__nK
+  local ns = __nsSurfaces[t]
+  local marks = ns ~= nil and ns.numbers or t.__nK
   if type(marks) == "table" and marks[k] == true then
     return {__jn = true, k = "number", d = v}
   end
@@ -9310,8 +9451,8 @@ local function __bcheck(desc, staticKind, v, csig, completion)
     -- namespace value an import alias cell holds: a compiled module's
     -- publication table, a stdlib module's cataloged-callable table, or
     -- the runtime-loaded host/FFI module table) both admit. The surface
-    -- is an ordinary table the loader/publication built without the
-    -- carrier markers, so admission follows the actual-kind projection
+    -- carries no carrier mark of its own (its namespace state is
+    -- identity-keyed), so admission follows the actual-kind projection
     -- (the marked carriers of other kinds keep their own arms and never
     -- pass a table boundary; the two internal sentinels never do).
     if type(v) == "table" and v ~= __MISSING and v ~= __NULL
@@ -9849,13 +9990,21 @@ end
 -- INDEX_DELETE remove the order slot, and a reinsertion appends it.
 -- TABLE_KEYS and JSON_STRINGIFY consume exactly this order.
 local function __orderAdd(t, k)
+  local ns = __nsSurfaces[t]
+  if ns ~= nil then
+    if not ns.keys[k] then
+      ns.order[#ns.order + 1] = k
+    end
+    ns.keys[k] = true
+    return
+  end
   local __keys = t.__keys
   if __keys == nil then
-    -- The first member write of a module export surface (the K15
-    -- namespace value, an ordinary table the loader/publication built
-    -- without the carrier markers) gives it the shared carrier's
-    -- key/order markers, so its insertion order and presence discipline
-    -- match every other table value from then on.
+    -- The fail-safe marker creation for a table built without the shared
+    -- carrier's marks (a plain table the value model produced outside
+    -- TABLE_NEW / JSON_PARSE): the first write gives it the key/order
+    -- marks, so its insertion order and presence discipline match every
+    -- other table value from then on.
     __keys = {}
     t.__keys = __keys
     t.__order = {}
@@ -9866,6 +10015,17 @@ local function __orderAdd(t, k)
   __keys[k] = true
 end
 local function __orderRemove(t, k)
+  local ns = __nsSurfaces[t]
+  if ns ~= nil then
+    ns.keys[k] = nil
+    for i = 1, #ns.order do
+      if ns.order[i] == k then
+        table.remove(ns.order, i)
+        return
+      end
+    end
+    return
+  end
   if t.__keys == nil then return end
   t.__keys[k] = nil
   for i = 1, #t.__order do
@@ -10248,8 +10408,10 @@ local function __stdlib(kind, fn, opKey, digest, parent, origin, ...)
     return table.concat(out)
   elseif fn == "TABLE_KEYS" then
     local t = __args[1]
-    local keys = {__a = true, __n = #t.__order}
-    for i = 1, #t.__order do keys[i] = t.__order[i] end
+    local ns = __nsSurfaces[t]
+    local order = ns ~= nil and ns.order or t.__order
+    local keys = {__a = true, __n = #order}
+    for i = 1, #order do keys[i] = order[i] end
     return keys
   elseif fn == "JSON_PARSE" then
     local s = __args[1]
@@ -10529,6 +10691,26 @@ local function __stdlib(kind, fn, opKey, digest, parent, origin, ...)
           path[v] = nil
           return
         end
+        local ns = __nsSurfaces[v]
+        if ns ~= nil then
+          if path[v] then sfFail("table"); return end
+          path[v] = true
+          out[#out + 1] = "{"
+          for i = 1, #ns.order do
+            if i > 1 then out[#out + 1] = "," end
+            local k = ns.order[i]
+            out[#out + 1] = __jsonEscape(k)
+            out[#out + 1] = ":"
+            -- A module namespace surface's entry is projected through
+            -- __nsEntry (a compiled module's ABI wrapper unwraps to its
+            -- published value), so the walker rejects the module's own
+            -- entries exactly like the oracle's and the JVM's value.
+            sfValue(__nsEntry(v, v[k]), false)
+          end
+          out[#out + 1] = "}"
+          path[v] = nil
+          return
+        end
         if v.__t then
           if path[v] then sfFail("table"); return end
           path[v] = true
@@ -10551,7 +10733,9 @@ local function __stdlib(kind, fn, opKey, digest, parent, origin, ...)
         -- marker is checked before the function arm (every class instance
         -- carries the field map __f).
         if v.__c then sfFail("class:"..v.__id); return end
-        if v.__fn ~= nil or v.__f then sfFail("function"); return end
+        if v.__fn ~= nil or v.__f or v.__kind == "function" then
+          sfFail("function"); return
+        end
         if v.__d then sfFail("class:@builtin/Error"); return end
         sfFail("table")
         return
