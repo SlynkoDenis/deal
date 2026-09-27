@@ -1299,20 +1299,28 @@ public class IntrinsicValueMaterializationTest {
             "the oracle projects E8010 at the annotation span with the intrinsic's "
                 + "declared signature as the actual text: " + oracle.terminal());
 
+        // The row's own text is the canonical spec spelling (ISSUE-0683
+        // aligned the shared function row to the pinned corpus projection:
+        // the two signature texts, never the DEAL carrier's internal
+        // `function(…)` text), exactly as the oracle has always projected it.
         String lua = luaProductionFailure(projectOf(doctored), raw.table(),
             new ClassFactoryRegistry(Map.of()), "carried signature");
         check(lua.startsWith("ERR:E8010|function signature mismatch:")
                 && lua.contains("|" + origin + "|")
-                && lua.contains("function(number;int)"),
+                && lua.contains("(number)->int")
+                && lua.contains("expected (int)->int, got (number)->int"),
             "the LuaJIT artifact projects E8010 at the annotation span over the "
-                + "intrinsic's declared carrier signature: " + lua);
+                + "intrinsic's declared carrier signature (the canonical texts): "
+                + lua);
         String jvm = jvmProductionFailure(projectOf(doctored), raw.table(),
             new ClassFactoryRegistry(Map.of()), "carried signature");
         check(jvm.startsWith("ERR:E8010|function signature mismatch:")
                 && jvm.contains("|" + origin + "|")
-                && jvm.contains("function(number;int)"),
-            "the JVM artifact projects E8010 at the annotation span over the intrinsic's "
-                + "declared carrier signature: " + jvm);
+                && jvm.contains("(number)->int")
+                && jvm.contains("expected (int)->int, got (number)->int"),
+            "the JVM artifact projects E8010 at the annotation span over the "
+                + "intrinsic's declared carrier signature (the canonical texts): "
+                + jvm);
     }
 
     /** The unit with one boundary op's descriptor replaced (the doctor). */

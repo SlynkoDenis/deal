@@ -3150,9 +3150,24 @@ public final class LuaSemanticEmitter {
          */
         private void emitChainOperandProducers(SemanticOp child) {
             for (SemanticOp producer : ChainOperandCompletion.operandProducersOf(
-                    child, unit, structuralOwned)) {
+                    child, unitOwning(child), structuralOwned)) {
                 emitOp(producer);
             }
+        }
+
+        /**
+         * The lowered unit that owns one op (the chain-operand completion's
+         * membership authority): a chain inside a non-entry module's
+         * factory resolves its operand producers against that module's own
+         * ops, never against the session's entry unit — a cross-module
+         * closure body's chain (the returned-closure drive) would otherwise
+         * lose its operand producers (their value identities live in the
+         * owning module) and execute with unset slots.
+         */
+        private LoweredModuleUnit unitOwning(SemanticOp op) {
+            ModuleId owner = opModule.get(op.opId());
+            LoweredModuleUnit owning = owner == null ? null : units.get(owner);
+            return owning == null ? unit : owning;
         }
 
         /** A chain boundary child (bounds check only from its projection, A-D8). */
@@ -6935,7 +6950,11 @@ public final class LuaSemanticEmitter {
                 .append(luaString(descriptorText(boundaryPayload.descriptor())))
                 .append(", ")
                 .append(luaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __tA.value, nil, true)\n");
+                .append(", __tA.value, ")
+                .append(containsFunction(boundaryPayload.descriptor())
+                    ? luaString(boundaryPayload.descriptor().canonicalSpecText())
+                    : "nil")
+                .append(", true)\n");
             out.append("if not __okB then\n");
             out.append("  __chkB.o = ").append(luaString(originOf(boundary))).append("\n");
             emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
@@ -9060,6 +9079,27 @@ local function __completionActualOf(staticKind, v)
   end
   return __actualOf(staticKind, v)
 end
+-- The function row's carried-signature check (E8010): the row's own
+-- text is the canonical spec text (the declared descriptor beside the
+-- carrier's carried metadata), so the pinned corpus projection
+-- "function signature mismatch: expected {D}, got {A}" carries the two
+-- canonical signature texts on every consumer; a carrier or boundary
+-- that carries no canonical text keeps the internal descriptor text
+-- (the DEAL carrier's own spelling) unchanged.
+local function __fnRow(desc, csig, v, carriedCsig, carriedSig)
+  local wanted = csig or desc
+  local carried = carriedCsig or carriedSig or ""
+  local matches
+  if csig ~= nil and carriedCsig ~= nil then
+    matches = (carriedCsig == csig)
+  else
+    matches = (carriedSig == desc)
+  end
+  if matches then return v end
+  return error(__failExpr("E8010",
+    "function signature mismatch: expected "..wanted..", got "..carried,
+    "-", wanted, carried), 0)
+end
 local function __bcheck(desc, staticKind, v, csig, completion)
   local actual = completion and __completionActualOf(staticKind, v)
     or __actualOf(staticKind, v)
@@ -9177,18 +9217,10 @@ local function __bcheck(desc, staticKind, v, csig, completion)
     return __bcheck(string.sub(desc, 10, -2), staticKind, v, innerSig, completion)
   elseif string.sub(desc, 1, 9) == "function(" then
     if type(v) == "function" then
-      local carried = v.__sig or ""
-      if carried == desc then return v end
-      return error(__failExpr("E8010",
-        "function signature mismatch: expected "..desc..", got "..carried,
-        "-", desc, carried), 0)
+      return __fnRow(desc, csig, v, v.__csig, v.__sig)
     end
     if type(v) == "table" and v.__fn ~= nil then
-      local carried = v.__sig or ""
-      if carried == desc then return v end
-      return error(__failExpr("E8010",
-        "function signature mismatch: expected "..desc..", got "..carried,
-        "-", desc, carried), 0)
+      return __fnRow(desc, csig, v, v.__csig, v.__sig)
     end
     if type(v) == "table" and v.__kind == "function" then
       -- The host ABI wrapper — the loaded host surface entry a HOST

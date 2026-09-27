@@ -672,6 +672,54 @@ public final class JvmSemanticEmitter {
 
         // -- java literals -----------------------------------------------------------
 
+        /**
+         * The expression of one prelude boundary check: the descriptor
+         * text, the static kind, the value, and — when the descriptor
+         * carries a function position — the descriptor's canonical spec
+         * text as the trailing argument, so the function row projects the
+         * pinned canonical signature texts ({@code function signature
+         * mismatch: expected (int)->int, got (int)->string}) on every
+         * consumer. The text of every non-function check is emitted
+         * unchanged (no canonical trailer).
+         */
+        static String bcheckArgs(RuntimeDescriptor descriptor, String value) {
+            return bcheckArgs("JvmRuntime.bcheck", descriptor, value);
+        }
+
+        /**
+         * The completion cell's expression over one awaited function-typed
+         * completion (the {@code AWAIT} boundary): the same canonical trailer
+         * as {@link #bcheckArgs(RuntimeDescriptor, String)}.
+         */
+        static String bcheckCompletionArgs(RuntimeDescriptor descriptor,
+                                           String value) {
+            return bcheckArgs("JvmRuntime.bcheckCompletion", descriptor, value);
+        }
+
+        private static String bcheckArgs(String method, RuntimeDescriptor descriptor,
+                                         String value) {
+            String args = javaString(descriptorText(descriptor)) + ", "
+                + javaString(staticKind(descriptor)) + ", " + value;
+            if (containsFunction(descriptor)) {
+                args += ", " + javaString(descriptor.canonicalSpecText());
+            }
+            return method + "(" + args + ")";
+        }
+
+        /** Whether one descriptor carries a function position (recursively). */
+        static boolean containsFunction(RuntimeDescriptor descriptor) {
+            if (descriptor instanceof RuntimeDescriptor.Func) {
+                return true;
+            }
+            if (descriptor instanceof RuntimeDescriptor.Array array) {
+                return containsFunction(array.element());
+            }
+            if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
+                return containsFunction(nullable.inner());
+            }
+            return false;
+        }
+
         static String javaString(String text) {
             StringBuilder sb = new StringBuilder();
             sb.append('"');
@@ -1937,11 +1985,9 @@ public final class JvmSemanticEmitter {
                 emitBoundaryStart(boundary, slot(input), payload.elementDescriptor(),
                     indent);
                 out.append(indent(indent)).append("Object __be_").append(boundary.opId().id())
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(payload.elementDescriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(payload.elementDescriptor())))
-                    .append(", ").append(slot(input)).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(payload.elementDescriptor(), slot(input)))
+                    .append(";\n");
                 out.append(indent(indent)).append("((JvmRuntime.Array) ").append(target)
                     .append(").elements.add(__be_").append(boundary.opId().id())
                     .append(");\n");
@@ -2018,11 +2064,10 @@ public final class JvmSemanticEmitter {
                         .append(target).append(";\n");
                 } else {
                     out.append(indent(indent)).append("    __mr_")
-                        .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(target).append(");\n");
+                        .append(boundary.opId().id())
+                        .append(" = ")
+                        .append(bcheckArgs(boundaryPayload.descriptor(), target))
+                        .append(";\n");
                 }
                 out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
@@ -2162,11 +2207,10 @@ public final class JvmSemanticEmitter {
                         .append(";\n");
                 } else {
                     out.append(indent(indent + 1)).append("Object ")
-                        .append(checkedName).append(" = JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(target).append(");\n");
+                        .append(checkedName)
+                        .append(" = ")
+                        .append(bcheckArgs(boundaryPayload.descriptor(), target))
+                        .append(";\n");
                 }
                 out.append(indent(indent + 1)).append(target).append(" = ")
                     .append(checkedName).append(";\n");
@@ -2381,10 +2425,9 @@ public final class JvmSemanticEmitter {
                 .append(";\n");
             out.append(indent(indent)).append("try {\n");
             out.append(indent(indent + 1)).append(checkedName)
-                .append(" = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(payload.descriptor()))).append(", ")
-                .append(javaString(staticKind(payload.descriptor()))).append(", ")
-                .append(inputExpr).append(");\n");
+                .append(" = ")
+                .append(bcheckArgs(payload.descriptor(), inputExpr))
+                .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __fbe) {\n");
             out.append(indent(indent + 1))
                 .append("JvmRuntime.DealError __fbre = new JvmRuntime.DealError("
@@ -2573,10 +2616,9 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("Object ").append(target).append(";\n");
             out.append(indent(indent)).append("try {\n");
             out.append(indent(indent)).append("  ").append(target)
-                .append(" = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(payload.descriptor()))).append(", ")
-                .append(javaString(staticKind(payload.descriptor()))).append(", ")
-                .append(slot(payload.input())).append(");\n");
+                .append(" = ")
+                .append(bcheckArgs(payload.descriptor(), slot(payload.input())))
+                .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
             out.append(indent(indent))
                 .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -3087,9 +3129,24 @@ public final class JvmSemanticEmitter {
          */
         private void emitChainOperandProducers(SemanticOp child, int indent) {
             for (SemanticOp producer : ChainOperandCompletion.operandProducersOf(
-                    child, unit, structuralOwned)) {
+                    child, unitOwning(child), structuralOwned)) {
                 emitOp(producer, indent);
             }
+        }
+
+        /**
+         * The lowered unit that owns one op (the chain-operand completion's
+         * membership authority): a chain inside a non-entry module's
+         * factory resolves its operand producers against that module's own
+         * ops, never against the session's entry unit — a cross-module
+         * closure body's chain (the returned-closure drive) would otherwise
+         * lose its operand producers (their value identities live in the
+         * owning module) and execute with unset slots.
+         */
+        private LoweredModuleUnit unitOwning(SemanticOp op) {
+            ModuleId owner = opModule.get(op.opId());
+            LoweredModuleUnit owning = owner == null ? null : units.get(owner);
+            return owning == null ? unit : owning;
         }
 
         /**
@@ -3141,11 +3198,10 @@ public final class JvmSemanticEmitter {
                 default -> {
                     emitBoundaryStart(boundary, input, payload.descriptor(), indent);
                     out.append(indent(indent)).append("Object __cb_")
-                        .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(payload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(payload.descriptor())))
-                        .append(", ").append(input).append(");\n");
+                        .append(boundary.opId().id())
+                        .append(" = ")
+                        .append(bcheckArgs(payload.descriptor(), input))
+                        .append(";\n");
                     emitBoundarySuccess(boundary, "__cb_" + boundary.opId().id(),
                         payload.descriptor(), indent);
                 }
@@ -3243,11 +3299,9 @@ public final class JvmSemanticEmitter {
                 emitBoundaryStart(boundary, slot(boundaryPayload.input()),
                     boundaryPayload.descriptor(), indent);
                 out.append(indent(indent)).append("Object __pb_").append(boundary.opId().id())
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(slot(boundaryPayload.input())).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), slot(boundaryPayload.input())))
+                    .append(";\n");
                 emitBoundarySuccess(boundary, "__pb_" + boundary.opId().id(),
                     boundaryPayload.descriptor(), indent);
             }
@@ -4091,11 +4145,9 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("Object ").append(checked).append(";\n");
             out.append(indent(indent)).append("try {\n");
             out.append(indent(indent + 1)).append(checked)
-                .append(" = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ")
-                .append(javaString(staticKind(boundaryPayload.descriptor())))
-                .append(", ").append(hostValue).append(");\n");
+                .append(" = ")
+                .append(bcheckArgs(boundaryPayload.descriptor(), hostValue))
+                .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
             emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
                 "JvmRuntime.errtext(__be)", indent + 1);
@@ -5271,11 +5323,9 @@ public final class JvmSemanticEmitter {
                     .append(";\n");
                 out.append(indent(indent)).append("try {\n");
                 out.append(indent(indent)).append("  ").append(checked)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), inputExpr))
+                    .append(";\n");
                 out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -5348,11 +5398,9 @@ public final class JvmSemanticEmitter {
                     .append(";\n");
                 out.append(indent(indent)).append("try {\n");
                 out.append(indent(indent)).append("  ").append(checked)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), inputExpr))
+                    .append(";\n");
                 out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -5470,11 +5518,9 @@ public final class JvmSemanticEmitter {
                     .append(";\n");
                 out.append(indent(indent)).append("try {\n");
                 out.append(indent(indent)).append("  ").append(checkedName)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), inputExpr))
+                    .append(";\n");
                 out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -5868,11 +5914,10 @@ public final class JvmSemanticEmitter {
                     .append(boundary.opId().id()).append(";\n");
                 out.append(indent(indent)).append("  try {\n");
                 out.append(indent(indent)).append("    __sb_")
-                    .append(boundary.opId().id()).append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(slot(boundaryPayload.input())).append(");\n");
+                    .append(boundary.opId().id())
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), slot(boundaryPayload.input())))
+                    .append(";\n");
                 out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("    JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -5931,11 +5976,9 @@ public final class JvmSemanticEmitter {
                 }
                 out.append(indent(indent)).append("  try {\n");
                 out.append(indent(indent)).append("    ").append(target)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(");\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), target))
+                    .append(";\n");
                 out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("    JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -6324,11 +6367,9 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("Object ").append(rvc).append(";\n");
             out.append(indent(indent)).append("try {\n");
             out.append(indent(indent + 1)).append(rvc)
-                .append(" = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ")
-                .append(javaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __rv_").append(op.opId().id()).append(");\n");
+                .append(" = ")
+                .append(bcheckArgs(boundaryPayload.descriptor(), "__rv_" + op.opId().id()))
+                .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError ")
                 .append(caught).append(") {\n");
             out.append(indent(indent + 1)).append("JvmRuntime.DealError ")
@@ -6430,12 +6471,10 @@ public final class JvmSemanticEmitter {
                     emitBoundaryStart(candidate, slot(boundaryPayload.input()),
                         boundaryPayload.descriptor(), indent + 1);
                     out.append(indent(indent + 1)).append("Object __ep_")
-                        .append(candidate.opId().id()).append(" = JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(slot(boundaryPayload.input()))
-                        .append(");\n");
+                        .append(candidate.opId().id())
+                        .append(" = ")
+                        .append(bcheckArgs(boundaryPayload.descriptor(),
+                            slot(boundaryPayload.input()))).append(";\n");
                     emitBoundarySuccess(candidate, "__ep_" + candidate.opId().id(),
                         boundaryPayload.descriptor(), indent + 1);
                 }
@@ -6535,11 +6574,9 @@ public final class JvmSemanticEmitter {
                     .append(";\n");
                 out.append(indent(indent)).append("  try {\n");
                 out.append(indent(indent)).append("    ").append(checked)
-                    .append(" = JvmRuntime.bcheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(javaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", __args[").append(i).append("]);\n");
+                    .append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), "__args[" + i + "]"))
+                    .append(";\n");
                 out.append(indent(indent)).append("  } catch (JvmRuntime.DealError __be) {\n");
                 out.append(indent(indent))
                     .append("    JvmRuntime.DealError __bre = new JvmRuntime.DealError("
@@ -6764,11 +6801,9 @@ public final class JvmSemanticEmitter {
                 .append(";\n");
             out.append(indent(indent)).append("  try {\n");
             out.append(indent(indent)).append("    ").append(checked)
-                .append(" = JvmRuntime.bcheck(")
-                .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ")
-                .append(javaString(staticKind(boundaryPayload.descriptor())))
-                .append(", __res);\n");
+                .append(" = ")
+                .append(bcheckArgs(boundaryPayload.descriptor(), "__res"))
+                .append(";\n");
             out.append(indent(indent))
                 .append("  } catch (JvmRuntime.DealError __be) {\n");
             out.append(indent(indent))
@@ -6890,12 +6925,9 @@ public final class JvmSemanticEmitter {
                         boundaryPayload.descriptor(), indent);
                     String checked = "__sa_" + boundary.opId().id();
                     out.append(indent(indent)).append("Object ").append(checked)
-                        .append(" = JvmRuntime.bcheck(")
-                        .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(javaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(slot(boundaryPayload.input()))
-                        .append(");\n");
+                        .append(" = ")
+                        .append(bcheckArgs(boundaryPayload.descriptor(),
+                            slot(boundaryPayload.input()))).append(";\n");
                     emitBoundarySuccess(boundary, checked,
                         boundaryPayload.descriptor(), indent);
                     args.add(checked);
@@ -7306,12 +7338,9 @@ public final class JvmSemanticEmitter {
             String checked = "__avc_" + op.opId().id();
             out.append(indent(indent)).append("Object ").append(checked).append(";\n");
             out.append(indent(indent)).append("try {\n");
-            out.append(indent(indent + 1)).append(checked).append(" = "
-                + "JvmRuntime.bcheckCompletion(")
-                .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                .append(", ")
-                .append(javaString(staticKind(boundaryPayload.descriptor())))
-                .append(", ").append(awaited).append(");\n");
+            out.append(indent(indent + 1)).append(checked).append(" = ")
+                .append(bcheckCompletionArgs(boundaryPayload.descriptor(), awaited))
+                .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
             out.append(indent(indent + 1)).append("JvmRuntime.DealError __bre = new "
                 + "JvmRuntime.DealError(__be.code, __be.msg, ")

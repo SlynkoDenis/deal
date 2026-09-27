@@ -1528,6 +1528,21 @@ public final class SemanticOracle {
          */
         void pushParamCells(UnitState state, BlockId bodyBlock, int paramCount,
                             List<Value> args) {
+            pushParamCells(state, bodyBlock, paramCount, args, Map.of());
+        }
+
+        /**
+         * Pushes one invocation's parameter-cell overlay and the resolved
+         * callee value's captured cells (the returned-closure drive): the
+         * closure's captures are the cells it captured at its allocation, so
+         * a body invocation installs exactly those cell objects and the
+         * body's capture loads/stores resolve them — a store commits to the
+         * captured cell every later invocation observes, never to a fresh
+         * cell (the alias/state-preservation contract of a returned
+         * closure).
+         */
+        void pushParamCells(UnitState state, BlockId bodyBlock, int paramCount,
+                            List<Value> args, Map<BindingId, Cell> captures) {
             List<OpId> bodyOps = state.table.blockOps().get(bodyBlock);
             if (bodyOps == null) {
                 throw new IllegalStateException("the callee body block " + bodyBlock
@@ -1546,6 +1561,10 @@ public final class SemanticOracle {
                 cell.value = args.get(i);
                 cell.initialized = true;
                 overlay.put(allocPayload.binding() + "#" + allocPayload.generation(), cell);
+            }
+            for (Map.Entry<BindingId, Cell> capture : captures.entrySet()) {
+                Cell cell = capture.getValue();
+                overlay.put(cell.binding + "#" + cell.generation, cell);
             }
             cellOverlays.push(overlay);
             valueOverlays.push(new LinkedHashMap<>());
@@ -3951,7 +3970,8 @@ public final class SemanticOracle {
                                         FunctionExecutionBinding.LoweredBody body,
                                         List<Value> checkedArgs) {
             return runOwnedBodyBlock(body.functionId(), body.blockId(),
-                payload.signature().paramTypes().size(), checkedArgs);
+                payload.signature().paramTypes().size(), checkedArgs,
+                capturesOf(calleeValueOf(op)));
         }
 
         /**
@@ -3964,8 +3984,24 @@ public final class SemanticOracle {
          */
         private Value runOwnedBodyBlock(FunctionId functionId, BlockId bodyBlock,
                                         int paramCount, List<Value> args) {
+            return runOwnedBodyBlock(functionId, bodyBlock, paramCount, args, Map.of());
+        }
+
+        /**
+         * One lowered body block run under its owning unit with the callee
+         * value's captured cells installed for the invocation: a closure
+         * value invoked after its enclosing invocation returned (the
+         * returned-closure shape) carries the cells it captured at its
+         * allocation, and the body's capture loads/stores resolve exactly
+         * those cells — the oracle twin of the emitted factories' capture
+         * arguments. A declared function body carries no captures (the empty
+         * map), so its invocation is unchanged.
+         */
+        private Value runOwnedBodyBlock(FunctionId functionId, BlockId bodyBlock,
+                                        int paramCount, List<Value> args,
+                                        Map<BindingId, Cell> captures) {
             UnitState state = unitOwningFunction(functionId);
-            bindParamCells(state, bodyBlock, paramCount, args);
+            bindParamCells(state, bodyBlock, paramCount, args, captures);
             frames.add(0, functionId);
             try {
                 stateStack.push(state);
@@ -3978,6 +4014,18 @@ public final class SemanticOracle {
                 frames.remove(0);
                 popParamCells();
             }
+        }
+
+        /**
+         * The captured cells of one resolved callee value: a function value
+         * allocated by {@code CLOSURE_NEW}/{@code RECURSIVE_GROUP_INIT}
+         * carries the cells current at its allocation, so an invocation of
+         * that value installs them as its capture overlay. Every other value
+         * (a declared-function carrier, a host carrier, an intrinsic) has no
+         * captures.
+         */
+        private static Map<BindingId, Cell> capturesOf(Value callee) {
+            return callee instanceof Value.FuncValue func ? func.captures() : Map.of();
         }
 
         /**
@@ -4000,7 +4048,13 @@ public final class SemanticOracle {
         /** Binds one body block's leading parameter ALLOC cells (the invocation overlay). */
         private void bindParamCells(UnitState state, BlockId bodyBlock, int paramCount,
                                     List<Value> args) {
-            pushParamCells(state, bodyBlock, paramCount, args);
+            bindParamCells(state, bodyBlock, paramCount, args, Map.of());
+        }
+
+        /** Binds one body invocation's parameter cells and the callee value's captures. */
+        private void bindParamCells(UnitState state, BlockId bodyBlock, int paramCount,
+                                    List<Value> args, Map<BindingId, Cell> captures) {
+            pushParamCells(state, bodyBlock, paramCount, args, captures);
         }
 
         /** The D15 adapter invocation protocol (source class statically fixed). */
@@ -4014,7 +4068,8 @@ public final class SemanticOracle {
             List<Value> leading = List.copyOf(checkedArgs.subList(0, m));
             return switch (sourceBinding) {
                 case FunctionExecutionBinding.LoweredBody body ->
-                    runOwnedBodyBlock(body.functionId(), body.blockId(), m, leading);
+                    runOwnedBodyBlock(body.functionId(), body.blockId(), m, leading,
+                        capturesOf(sourceValue));
                 case FunctionExecutionBinding.HostFunction host -> {
                     // The cataloged-callable HOST sub-class resolves the closed
                     // catalog row's algorithm (never a host responder); every
@@ -4138,7 +4193,7 @@ public final class SemanticOracle {
                     // The resolved body runs under its own unit (the
                     // value-channel class of a cross-module source value).
                     Value returned = runOwnedBodyBlock(body.functionId(), body.blockId(),
-                        m, leading);
+                        m, leading, capturesOf(sourceValue));
                     yield runRecordedDealBodyCell(op,
                         payload.dynamicReturnBoundary().dealBodyBoundaryOpId(), returned);
                 }
@@ -4983,8 +5038,35 @@ public final class SemanticOracle {
             // The resolved body runs under its own unit (the value-channel
             // class of a cross-module callee value): a body whose function id
             // belongs to another module of the closure executes through that
-            // unit's membership table and module context.
-            return runOwnedBodyBlock(body.functionId(), body.blockId(), args.size(), args);
+            // unit's membership table and module context, with the resolved
+            // callee value's captured cells installed for the invocation.
+            return runOwnedBodyBlock(body.functionId(), body.blockId(), args.size(), args,
+                capturesOf(calleeValueOf(op)));
+        }
+
+        /**
+         * The callee value of one invocation (sync CALL or ASYNC_START): the
+         * value identity the callee names — the dynamic callee's carrier whose
+         * own registration resolved the class, or the indirect arm's tracked
+         * identity; a static binding has no value identity of its own. A
+         * closure body invocation installs this value's captured cells.
+         */
+        private Value calleeValueOf(SemanticOp op) {
+            KindPayload.CallCallee callee = switch (op.payload()) {
+                case KindPayload.CallPayload call -> call.callee();
+                case KindPayload.AsyncStartPayload start -> start.callee();
+                default -> null;
+            };
+            if (callee == null) {
+                return null;
+            }
+            return switch (callee) {
+                case KindPayload.CallCallee.Indirect indirect ->
+                    valueOf(indirect.callee());
+                case KindPayload.CallCallee.Dynamic dynamic ->
+                    valueOf(dynamic.callee());
+                case KindPayload.CallCallee.Static ignored -> null;
+            };
         }
 
         /**
