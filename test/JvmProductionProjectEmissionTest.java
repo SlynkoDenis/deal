@@ -221,7 +221,10 @@ public class JvmProductionProjectEmissionTest {
         System.out.println("-- the production project entry signature --");
         Method entry = null;
         for (Method method : JvmSemanticEmitter.class.getDeclaredMethods()) {
-            if (method.getName().equals("emitProductionProject")) {
+            // The reflected order of same-named overloads is unspecified:
+            // select the five-input production entry by its signature.
+            if (method.getName().equals("emitProductionProject")
+                    && method.getParameterCount() == 5) {
                 entry = method;
             }
         }
@@ -260,10 +263,14 @@ public class JvmProductionProjectEmissionTest {
         Method projectEntry = null;
         Method moduleEntry = null;
         for (Method method : JvmSemanticEmitter.class.getDeclaredMethods()) {
-            if (method.getName().equals("emitProject")) {
+            // The reflected order of same-named overloads is unspecified:
+            // select each landed entry by its own signature.
+            if (method.getName().equals("emitProject")
+                    && method.getParameterCount() == 3) {
                 projectEntry = method;
             }
-            if (method.getName().equals("emitProductionModule")) {
+            if (method.getName().equals("emitProductionModule")
+                    && method.getParameterCount() == 4) {
                 moduleEntry = method;
             }
         }

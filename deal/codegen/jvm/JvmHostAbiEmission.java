@@ -788,12 +788,27 @@ final class JvmHostAbiEmission {
                 surfaceArgs.append("\"-\", 0, 0");
                 // A declared null return emits a void wrapper: the
                 // surface entry's invoker runs it as a statement and
-                // yields the language null.
-                String invoker = func.returnType() instanceof Type.Null
-                    ? "__a -> { " + wrapperName(key, export.getKey()) + "("
-                        + surfaceArgs + "); return null; }"
-                    : "__a -> " + wrapperName(key, export.getKey()) + "("
+                // yields the language null. A declared async return's
+                // wrapper yields the host operation handle itself (never a
+                // completion value), so the invoker passes it through
+                // unchanged. Every other declared return is boxed onto the
+                // production value carrier (the wrapper returns the
+                // host-facing primitive/boxed carrier, while the surface
+                // entry's invoker is a production function value carrier
+                // over the same convention, so an int return becomes the
+                // production Long).
+                String invoker;
+                if (func.returnType() instanceof Type.Null) {
+                    invoker = "__a -> { " + wrapperName(key, export.getKey()) + "("
+                        + surfaceArgs + "); return null; }";
+                } else if (func.isAsync()) {
+                    invoker = "__a -> " + wrapperName(key, export.getKey()) + "("
                         + surfaceArgs + ")";
+                } else {
+                    invoker = "__a -> " + JvmSemanticEmitter.productionValueOf(
+                        func.returnType(), wrapperName(key, export.getKey()) + "("
+                            + surfaceArgs + ")");
+                }
                 out.append("    __surf.write(").append(javaString(export.getKey()))
                     .append(", new JvmRuntime.FunctionValue(").append(invoker)
                     .append(", ")
@@ -1182,7 +1197,24 @@ final class JvmHostAbiEmission {
             + "adaptation failed: \" + __e, \"-\", null, null);\n");
         out.append("    }\n");
         out.append("    return new JvmRuntime.FunctionValue(__args -> {\n");
-        out.append("      try { return m.invoke(fw, __args); }\n");
+        // The production arguments project onto the host-facing declared
+        // carriers before the reflective invocation (H7's argument
+        // projection, the same one the per-export wrapper's parameters
+        // run), and the host-facing result returns onto the production
+        // value carrier (an int result is the production Long).
+        StringBuilder projected = new StringBuilder();
+        for (int i = 0; i < func.paramTypes().size(); i++) {
+            if (projected.length() > 0) {
+                projected.append(", ");
+            }
+            projected.append("__hostProjectArg(")
+                .append(javaString(descriptorText(func.paramTypes().get(i))))
+                .append(", __args[").append(i).append("])");
+        }
+        String invocation = projected.length() == 0
+            ? "m.invoke(fw)" : "m.invoke(fw, " + projected + ")";
+        out.append("      java.lang.Object __hc;\n");
+        out.append("      try { __hc = ").append(invocation).append("; }\n");
         out.append("      catch (java.lang.reflect.InvocationTargetException __e) {\n");
         out.append("        java.lang.Throwable __c = __e.getCause();\n");
         out.append("        if (__c instanceof RuntimeException __rr) { throw __rr; }\n");
@@ -1195,7 +1227,11 @@ final class JvmHostAbiEmission {
         out.append("        throw JvmRuntime.fail(\"E8010\", \"host function value "
             + "invocation failed: \" + __e, \"-\", null, null);\n");
         out.append("      }\n");
-        out.append("    }, ").append(javaString(descriptorText(func))).append(", ")
+        out.append("      return ")
+            .append(JvmSemanticEmitter.checkedResultOf(func.returnType(), "__hc"))
+            .append(";\n");
+        out.append("    }, ").append(javaString(JvmSemanticEmitter.runtimeDescriptorText(
+            DescriptorService.describe(func)))).append(", ")
             .append(javaString(descriptorText(func))).append(", null);\n");
         out.append("  }\n\n");
     }

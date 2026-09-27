@@ -1322,4 +1322,22 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # or actual-kind token stays the lane cutover's (ISSUE-0628); the shared
   # function row projects the pinned canonical signature texts.
   'fg|=== Running Named Fixture and Origin Battery Tests (ISSUE-0683) ===|java -ea -cp build deal.test.NamedFixtureAndOriginBatteryTest'
+  # ISSUE-0682 (the joint dynamic dispatch battery): one focused drive per
+  # carrier class (deal body, adapter, host, host-materialized value,
+  # shared-body external, stdlib callable, intrinsic conversion) through an
+  # indirect or dynamic call on the oracle, the production LuaJIT artifact
+  # under real luajit, and the production JVM artifact under
+  # javac --release 25 -proc:none plus java; the dynamic-await drives of the
+  # DEAL-body, adapter, host and shared-body external async classes; the
+  # function-typed completion drive (exactly one DynamicFunctionValue keyed by
+  # the AWAIT op's result identity with the completion descriptor); the
+  # dynamic cross-module corpus fixtures (imported-closure-factory,
+  # cross-module-shared-state-closure, imported-recursive-callback) and the
+  # K12 reference-identity anchor with their pinned runtime-ok outcomes; and
+  # the fault drives (a non-function carrier at a materialization site, a
+  # differing carried signature, a swapped recorded cell form, a
+  # DynamicFunctionValue-registered value named as a static/indirect callee,
+  # and the untagged-carrier residue executed on the oracle and both
+  # production artifacts), with the closed-set guard unchanged.
+  'fg|=== Running Dynamic Dispatch Battery Tests (ISSUE-0682) ===|java -ea -cp build deal.test.DynamicDispatchBatteryTest'
 )

@@ -2300,6 +2300,18 @@ public final class BindingsProductionValidator {
         // identity-preserving load of that init's own cell).
         Set<Long> nonLoadProducedValues = new LinkedHashSet<>();
         List<SemanticOp> loads = new ArrayList<>();
+        // A dynamic call's recorded host cell is a selector of the dynamic
+        // return-boundary set, never a producing crossing (the call-result
+        // arm keys the call's own function-typed result with its single
+        // dynamic registration), so it contributes no producing position.
+        Set<OpId> recordedDynamicHostCells = new LinkedHashSet<>();
+        for (SemanticOp op : model.unit.ops()) {
+            if (op.payload() instanceof KindPayload.CallPayload call
+                    && call.dynamicReturnBoundary() != null) {
+                recordedDynamicHostCells.add(
+                    call.dynamicReturnBoundary().hostBoundaryOpId());
+            }
+        }
         for (SemanticOp op : model.unit.ops()) {
             switch (op.kind()) {
                 case CLOSURE_NEW -> {
@@ -2329,9 +2341,11 @@ public final class BindingsProductionValidator {
                     // allocation identity, so a later crossing of the
                     // same identity through any other boundary kind is
                     // an ordinary identity-preserving flow, not a
-                    // production.
+                    // production. A dynamic call's recorded host cell is
+                    // a selector, never a producing crossing.
                     if (op.payload() instanceof KindPayload.BoundaryPayload boundary
-                            && boundary.kind() == BoundaryKind.HOST_TO_DEAL) {
+                            && boundary.kind() == BoundaryKind.HOST_TO_DEAL
+                            && !recordedDynamicHostCells.contains(op.opId())) {
                         boundaryInputs.merge(boundary.input().id(), 1, Integer::sum);
                         if (boundary.descriptor() instanceof RuntimeDescriptor.Func) {
                             functionBoundaryInputs.merge(boundary.input().id(), 1,
@@ -2681,15 +2695,30 @@ public final class BindingsProductionValidator {
                 }
             }
         }
-        // Every HOST_TO_DEAL boundary with a function-typed descriptor
-        // registers exactly one HostFunctionValue at the producing
-        // crossing.
+        // Every producing HOST_TO_DEAL crossing with a function-typed
+        // descriptor registers exactly one HostFunctionValue at the crossing.
+        // A dynamic call's recorded host cell is not a producing crossing
+        // (the dynamic return-boundary set selects it only when the runtime
+        // class resolves to HOST): the call's function-typed result is the
+        // producer rule's dynamic call-result arm keyed by the call identity,
+        // so the recorded selector cell is outside this clause.
+        java.util.Set<OpId> recordedDynamicHostCells = new java.util.HashSet<>();
+        for (SemanticOp op : model.unit.ops()) {
+            if (op.payload() instanceof KindPayload.CallPayload call
+                    && call.dynamicReturnBoundary() != null) {
+                recordedDynamicHostCells.add(
+                    call.dynamicReturnBoundary().hostBoundaryOpId());
+            }
+        }
         for (SemanticOp op : model.unit.ops()) {
             if (!(op.payload() instanceof KindPayload.BoundaryPayload boundary)) {
                 continue;
             }
             if (boundary.kind() != BoundaryKind.HOST_TO_DEAL
                     || !(boundary.descriptor() instanceof RuntimeDescriptor.Func)) {
+                continue;
+            }
+            if (recordedDynamicHostCells.contains(op.opId())) {
                 continue;
             }
             FunctionExecutionBinding binding = model.unit.functionBindings().get(

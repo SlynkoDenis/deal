@@ -253,6 +253,87 @@ public final class JvmSemanticEmitter {
         return Session.descriptorText(descriptor);
     }
 
+    /**
+     * The production projection of one checked host return held as an
+     * {@code java.lang.Object} (the host-check seam's result, the
+     * reflective host invocation's result): the declared carrier is
+     * reconciled with the production value carrier — a numeric or boolean
+     * position unboxes through its boxed form (a {@code null}-safe form for
+     * a {@code ?} position), a declared array or function return crosses
+     * back into the production carriers through the host-to-DEAL
+     * projection, and every other reference carrier is the production value
+     * itself.
+     *
+     * @param declaredReturn the declared position's type; non-null
+     * @param expression     the Java expression holding the object-held value; non-null
+     * @return the Java expression holding the production value carrier; non-null
+     */
+    static String checkedResultOf(Type declaredReturn, String expression) {
+        Type inner = declaredReturn instanceof Type.Nullable nullable
+            ? nullable.inner() : declaredReturn;
+        boolean nullable = declaredReturn instanceof Type.Nullable;
+        if (inner instanceof Type.Int) {
+            String unbox = "java.lang.Long.valueOf(((java.lang.Number) "
+                + expression + ").longValue())";
+            return nullable
+                ? "(" + expression + " == null ? null : " + unbox + ")"
+                : unbox;
+        }
+        if (inner instanceof Type.Number) {
+            String unbox = "java.lang.Double.valueOf(((java.lang.Number) "
+                + expression + ").doubleValue())";
+            return nullable
+                ? "(" + expression + " == null ? null : " + unbox + ")"
+                : unbox;
+        }
+        if (inner instanceof Type.Boolean && !nullable) {
+            return "java.lang.Boolean.valueOf(((java.lang.Boolean) "
+                + expression + ").booleanValue())";
+        }
+        if (inner instanceof Type.Array || inner instanceof Type.Func) {
+            return "__hostToDeal("
+                + Session.javaString(JvmHostAbiEmission.descriptorText(
+                    declaredReturn))
+                + ", " + expression + ")";
+        }
+        return expression;
+    }
+
+    /**
+     * The production value carrier of one declared host position (the host
+     * ABI's shared scalar rule): the host-facing scalar carriers differ from
+     * the production carriers for the signed32 int (a host primitive/boxed
+     * {@code int} is the production {@code Long}), the projected
+     * array/function returns are already production values, and a nullable
+     * position keeps the language null.
+     *
+     * @param declaredReturn the declared position's type; non-null
+     * @param expression     the Java expression holding the host-facing value; non-null
+     * @return the Java expression holding the production value carrier; non-null
+     */
+    static String productionValueOf(Type declaredReturn, String expression) {
+        Type inner = declaredReturn instanceof Type.Nullable nullable
+            ? nullable.inner() : declaredReturn;
+        boolean nullable = declaredReturn instanceof Type.Nullable;
+        if (inner instanceof Type.Int) {
+            return nullable
+                ? "(" + expression + " == null ? null :"
+                    + " java.lang.Long.valueOf(((java.lang.Number) "
+                    + expression + ").longValue()))"
+                : "java.lang.Long.valueOf(" + expression + ")";
+        }
+        if (inner instanceof Type.Number) {
+            return nullable
+                ? "(" + expression + " == null ? null : java.lang.Double.valueOf("
+                    + "((java.lang.Number) " + expression + ").doubleValue()))"
+                : "java.lang.Double.valueOf(" + expression + ")";
+        }
+        if (inner instanceof Type.Boolean && !nullable) {
+            return "java.lang.Boolean.valueOf(" + expression + ")";
+        }
+        return expression;
+    }
+
     private static final class Session {
         final LoweredModuleUnit unit;
         final StructuredBodyTable table;
@@ -340,15 +421,26 @@ public final class JvmSemanticEmitter {
             this.trace = trace;
             this.projectSession = false;
             this.entryModule = entryModule;
-            // A single-unit session never carries the host ABI emission
-            // surface: the surface is emitted once per production project
-            // artifact, and a unit session has no declaration surface.
-            this.hostAbi = null;
+            // The artifact class name resolves before the host seam: the
+            // seam's emitted members delegate to the artifact class's
+            // crossing helpers, so the seam needs the name.
             if (className != null) {
                 this.className = className;
             } else {
                 this.className = sharedClassName(unit.moduleId().path());
             }
+            // The seam-only host ABI (the project session's rule, applied to
+            // one unit): a unit whose op walk carries host-boundary cells of
+            // its own (the DEAL_TO_HOST/HOST_PARAMETER/HOST_TO_DEAL/
+            // HOST_SYNC_RETURN family — a dynamic call's recorded return
+            // cells, a stdlib export read's host cells) emits checks the host
+            // seam realizes, so the artifact compiles with the emitted seam.
+            // A unit carrying a host import keeps the landed null (its
+            // declaration surface is the production project session's).
+            this.hostAbi = !unitHasHostImports(unit)
+                    && unitHasHostCellBoundaries(unit)
+                ? new JvmHostAbiEmission(java.util.List.of(), this.className)
+                : null;
             registerUnit(unit, table, new ClassFactoryRegistry(Map.of()));
             if (!entryModule) {
                 // A non-entry module never runs its ENTRY_INVOKE delegation
@@ -393,19 +485,40 @@ public final class JvmSemanticEmitter {
         private static boolean closureHasHostCellBoundaries(
                 ExecutableLoweredProject project) {
             for (LoweredModuleUnit moduleUnit : project.modules().values()) {
-                for (SemanticOp op : moduleUnit.ops()) {
-                    if (op.kind() != SemanticOpKind.BOUNDARY
-                            || !(op.payload()
-                                instanceof KindPayload.BoundaryPayload boundary)) {
-                        continue;
-                    }
-                    BoundaryKind kind = boundary.kind();
-                    FailurePolicyId policy = op.failurePolicy();
-                    if (kind == BoundaryKind.DEAL_TO_HOST || kind == BoundaryKind.HOST_TO_DEAL
-                            || policy == FailurePolicyId.HOST_PARAMETER
-                            || policy == FailurePolicyId.HOST_SYNC_RETURN) {
-                        return true;
-                    }
+                if (unitHasHostCellBoundaries(moduleUnit)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Whether one unit's op walk carries at least one host-boundary cell
+         * (the single-unit twin of {@link #closureHasHostCellBoundaries}).
+         */
+        private static boolean unitHasHostCellBoundaries(LoweredModuleUnit unit) {
+            for (SemanticOp op : unit.ops()) {
+                if (!(op.payload() instanceof KindPayload.BoundaryPayload boundary)) {
+                    continue;
+                }
+                BoundaryKind kind = boundary.kind();
+                FailurePolicyId policy = op.failurePolicy();
+                if (kind == BoundaryKind.DEAL_TO_HOST || kind == BoundaryKind.HOST_TO_DEAL
+                        || policy == FailurePolicyId.HOST_PARAMETER
+                        || policy == FailurePolicyId.HOST_SYNC_RETURN) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Whether one unit's op walk carries a HOST-kind import. */
+        private static boolean unitHasHostImports(LoweredModuleUnit unit) {
+            for (SemanticOp op : unit.ops()) {
+                if (op.kind() == SemanticOpKind.MODULE_IMPORT
+                        && ((KindPayload.ModuleImportPayload) op.payload()).kind()
+                            == ModuleImportKind.HOST) {
+                    return true;
                 }
             }
             return false;
@@ -5085,36 +5198,6 @@ public final class JvmSemanticEmitter {
         }
 
         /**
-         * The production value carrier of one declared host return: the
-         * host-facing scalar carriers are the production carriers (an
-         * {@code int} is a {@code Long}, a {@code number} a
-         * {@code Double}), the projected array/function returns are
-         * already production values, and a nullable position keeps the
-         * language null.
-         */
-        private String productionValueOf(Type declaredReturn, String expression) {
-            Type inner = innerOf(declaredReturn);
-            boolean nullable = declaredReturn instanceof Type.Nullable;
-            if (inner instanceof Type.Int) {
-                return nullable
-                    ? "(" + expression + " == null ? null :"
-                        + " java.lang.Long.valueOf(((java.lang.Number) "
-                        + expression + ").longValue()))"
-                    : "java.lang.Long.valueOf(" + expression + ")";
-            }
-            if (inner instanceof Type.Number) {
-                return nullable
-                    ? "(" + expression + " == null ? null : java.lang.Double.valueOf("
-                        + "((java.lang.Number) " + expression + ").doubleValue()))"
-                    : "java.lang.Double.valueOf(" + expression + ")";
-            }
-            if (inner instanceof Type.Boolean && !nullable) {
-                return "java.lang.Boolean.valueOf(" + expression + ")";
-            }
-            return expression;
-        }
-
-        /**
          * The production projection of one checked host return held as
          * the host-check seam's {@code java.lang.Object} result (the
          * {@code HostFunctionValue} indirect and callback arms; H3/H7):
@@ -5125,34 +5208,6 @@ public final class JvmSemanticEmitter {
          * production carriers through the host-to-DEAL projection, and
          * every other reference carrier is the production value itself.
          */
-        private String checkedResultOf(Type declaredReturn, String expression) {
-            Type inner = innerOf(declaredReturn);
-            boolean nullable = declaredReturn instanceof Type.Nullable;
-            if (inner instanceof Type.Int) {
-                String unbox = "java.lang.Long.valueOf(((java.lang.Number) "
-                    + expression + ").longValue())";
-                return nullable
-                    ? "(" + expression + " == null ? null : " + unbox + ")"
-                    : unbox;
-            }
-            if (inner instanceof Type.Number) {
-                String unbox = "java.lang.Double.valueOf(((java.lang.Number) "
-                    + expression + ").doubleValue())";
-                return nullable
-                    ? "(" + expression + " == null ? null : " + unbox + ")"
-                    : unbox;
-            }
-            if (inner instanceof Type.Boolean && !nullable) {
-                return "java.lang.Boolean.valueOf(((java.lang.Boolean) "
-                    + expression + ").booleanValue())";
-            }
-            if (inner instanceof Type.Array || inner instanceof Type.Func) {
-                return "__hostToDeal("
-                    + javaString(JvmHostAbiEmission.descriptorText(declaredReturn))
-                    + ", " + expression + ")";
-            }
-            return expression;
-        }
 
         /** The origin-argument triplet of a wrapper invocation. */
         private String originArgs(SemanticOp op) {

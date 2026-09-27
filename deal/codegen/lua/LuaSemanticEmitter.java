@@ -4525,6 +4525,7 @@ public final class LuaSemanticEmitter {
             out.append(")\n");
             emitHostReturnCellRun(op, returnBoundary, "__atom");
             out.append("  else\n");
+            out.append("  __hbT = {}\n");
             int index = 1;
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp parameter = opsById.get(boundaryId);

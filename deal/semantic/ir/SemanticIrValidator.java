@@ -3261,7 +3261,22 @@ public final class SemanticIrValidator {
         // the registration descriptor equal to the crossing's checked
         // descriptor. The runtime resolves later calls through the same
         // identity on exactly that registration — a missing correlation
-        // is invalid IR.
+        // is invalid IR. A dynamic call's recorded host cell is a selector
+        // of the dynamic return-boundary set, never a producing crossing:
+        // the call-result arm keys the call's own function-typed result
+        // with its single dynamic registration (M2 item 2), so the recorded
+        // cell is outside the producing-crossing clause.
+        java.util.Set<OpId> recordedDynamicHostCells = new java.util.HashSet<>();
+        for (RawOp candidate : unit.ops()) {
+            if (enumByName(SemanticOpKind.class, candidate.kind()) != SemanticOpKind.CALL) {
+                continue;
+            }
+            KindPayload.DynamicReturnBoundary recorded =
+                parseDynamicReturnBoundary(candidate);
+            if (recorded != null) {
+                recordedDynamicHostCells.add(recorded.hostBoundaryOpId());
+            }
+        }
         for (RawOp op : unit.ops()) {
             if (enumByName(SemanticOpKind.class, op.kind()) != SemanticOpKind.BOUNDARY) {
                 continue;
@@ -3273,6 +3288,9 @@ public final class SemanticIrValidator {
             RuntimeDescriptor descriptor = parseDescriptorQuiet(
                 optionalString(op.payload(), "descriptor"));
             if (!(descriptor instanceof RuntimeDescriptor.Func)) {
+                continue;
+            }
+            if (recordedDynamicHostCells.contains(op.opId())) {
                 continue;
             }
             ValueId input = parseBoundaryInput(op);

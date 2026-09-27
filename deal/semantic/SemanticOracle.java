@@ -1197,6 +1197,21 @@ public final class SemanticOracle {
                 ownedChildren.addAll(state.ownedChildren);
                 classLayouts.putAll(state.unit.classLayouts());
             }
+            // Only the entry module's ENTRY_INVOKE delegation runs: a
+            // companion module's delegation and its delegated CALL stay
+            // skipped (the shared emitters' non-entry skip), so the skip
+            // set keeps the delegation out of every block walk and the
+            // delegated CALL executes nowhere.
+            for (Map.Entry<ModuleId, UnitState> moduleEntry : units.entrySet()) {
+                if (moduleEntry.getKey().equals(project.entryModule())) {
+                    continue;
+                }
+                for (SemanticOp op : moduleEntry.getValue().unit.ops()) {
+                    if (op.kind() == SemanticOpKind.ENTRY_INVOKE) {
+                        ownedChildren.add(op.opId());
+                    }
+                }
+            }
             // The declaration classes' registered layouts (ISSUE-0624;
             // K10): identical in every execution's layout context.
             classLayouts.putAll(this.declarationLayouts);
@@ -1495,6 +1510,22 @@ public final class SemanticOracle {
             return cell;
         }
 
+        /**
+         * The cell a write commits to: the in-scope cell the same
+         * binding's read resolves — the innermost invocation overlay's
+         * cell, or an outer invocation's cell a closure captured in the
+         * capture overlay ({@link #pushCaptureCells}) — else a fresh cell
+         * in the innermost overlay. A captured binding's store must
+         * commit into the captured cell so every later invocation of the
+         * same closure observes the write, exactly like the emitted
+         * carriers' upvalues; a binding allocated in the current
+         * invocation keeps its own fresh cell.
+         */
+        Cell storeCellOf(BindingId binding, long generation) {
+            Cell existing = cellOf(binding, generation, false);
+            return existing != null ? existing : cellOf(binding, generation, true);
+        }
+
         /** The binding's current (latest-generation) cell (overlays innermost-first). */
         Cell currentCellOf(BindingId binding) {
             for (Map<String, Cell> overlay : cellOverlays) {
@@ -1664,6 +1695,7 @@ public final class SemanticOracle {
             emitStart(op, inputs);
             try {
                 String output = executeKind(op);
+                keyHostMaterializedValue(op);
                 emitSuccess(op, output);
             } catch (ReturnSignal | LoopSignal signal) {
                 emitSuccess(op, null);
@@ -1671,6 +1703,31 @@ public final class SemanticOracle {
             } catch (DealFailure failure) {
                 emitFailure(op, failure);
                 throw failure;
+            }
+        }
+
+        /**
+         * The host-materialized function value class (the M5 class table's
+         * HOST row): the value a function-typed {@code HOST_TO_DEAL}
+         * crossing published is the producing allocation, so the value
+         * channel keys the published value to the crossing's registration
+         * — the resolution a later call on the materialized value uses,
+         * exactly like the closure and adapter values. An
+         * identity-preserving flow (a host returning a value it received)
+         * keeps its original class: the keying never replaces an existing
+         * value registration.
+         */
+        private void keyHostMaterializedValue(SemanticOp op) {
+            if (!(op.result() instanceof ValueId result)) {
+                return;
+            }
+            FunctionExecutionBinding registration = bindingOf(result);
+            if (!(registration instanceof FunctionExecutionBinding.HostFunctionValue)) {
+                return;
+            }
+            Value value = valueOf(result);
+            if (value != null) {
+                bindingsByValue.putIfAbsent(value, registration);
             }
         }
 
@@ -1913,6 +1970,16 @@ public final class SemanticOracle {
                 case Value.TableValue table -> new ComparisonOperandView.Ref(refIdentity(table));
                 case Value.ArrayValue array -> new ComparisonOperandView.Ref(refIdentity(array));
                 case Value.FuncValue func -> new ComparisonOperandView.Ref(refIdentity(func));
+                case Value.ClassValue classValue ->
+                    // A class instance is a reference value (the closed
+                    // view contract's "class instance"): two instances of
+                    // one class compare unequal, an alias compares equal,
+                    // exactly as both production artifacts compare the
+                    // carrier objects (REFERENCE_EQ).
+                    new ComparisonOperandView.Ref(refIdentity(classValue));
+                case Value.AdapterValue adapter ->
+                    // An adapter is a function value with reference identity.
+                    new ComparisonOperandView.Ref(refIdentity(adapter));
                 case Value.IntrinsicValue intrinsic ->
                     new ComparisonOperandView.Ref(refIdentity(intrinsic));
                 case Value.StdlibCallableValue callable ->
@@ -3575,7 +3642,7 @@ public final class SemanticOracle {
         private String executeBindingInit(SemanticOp op) {
             KindPayload.BindingInitPayload payload =
                 (KindPayload.BindingInitPayload) op.payload();
-            Cell cell = cellOf(payload.binding(), payload.generation(), true);
+            Cell cell = storeCellOf(payload.binding(), payload.generation());
             Value value = valueOf(payload.value());
             if (value == null) {
                 // The seed's producer-less intrinsic identity (int()/number()
@@ -3619,7 +3686,7 @@ public final class SemanticOracle {
         private String executeBindingStore(SemanticOp op) {
             KindPayload.BindingStorePayload payload =
                 (KindPayload.BindingStorePayload) op.payload();
-            Cell cell = cellOf(payload.binding(), payload.generation(), true);
+            Cell cell = storeCellOf(payload.binding(), payload.generation());
             cell.value = valueOf(payload.value());
             cell.initialized = true;
             return null;
@@ -3877,11 +3944,23 @@ public final class SemanticOracle {
                 case KindPayload.CallCallee.Dynamic dynamic ->
                     resolveDynamicCalleeBinding(dynamic.callee());
             };
+            // The runtime callee value when the callee is value-carried
+            // (the INDIRECT and DYNAMIC arms): the resolved body's closure
+            // allocation carries the captured cells an escaped closure's
+            // body reads, so the invocation installs them as the body's
+            // capture overlay. A static callee records no runtime value.
+            Value calleeValue = switch (payload.callee()) {
+                case KindPayload.CallCallee.Static ignored -> null;
+                case KindPayload.CallCallee.Indirect indirect ->
+                    valueOf(indirect.callee());
+                case KindPayload.CallCallee.Dynamic dynamic ->
+                    valueOf(dynamic.callee());
+            };
             Value returned = payload.callee() instanceof KindPayload.CallCallee.Dynamic
-                ? executeDynamicCall(op, payload, binding, checkedArgs)
+                ? executeDynamicCall(op, payload, binding, checkedArgs, calleeValue)
                 : switch (binding) {
                     case FunctionExecutionBinding.LoweredBody body ->
-                        invokeLoweredBody(op, payload, body, checkedArgs);
+                        invokeLoweredBody(op, payload, body, checkedArgs, calleeValue);
                     case FunctionExecutionBinding.AdapterBinding adapter ->
                         invokeAdapter(op, payload, adapter, checkedArgs);
                     case FunctionExecutionBinding.HostFunction host ->
@@ -3968,7 +4047,7 @@ public final class SemanticOracle {
          */
         private Value invokeLoweredBody(SemanticOp op, KindPayload.CallPayload payload,
                                         FunctionExecutionBinding.LoweredBody body,
-                                        List<Value> checkedArgs) {
+                                        List<Value> checkedArgs, Value calleeValue) {
             return runOwnedBodyBlock(body.functionId(), body.blockId(),
                 payload.signature().paramTypes().size(), checkedArgs,
                 capturesOf(calleeValueOf(op)));
@@ -3981,6 +4060,17 @@ public final class SemanticOracle {
          * on every path. The identity is resolved from the body's own function id
          * ({@link #unitOwningFunction}); an identity no unit records is a
          * fail-closed producer defect.
+         *
+         * <p>The runtime callee value, when the invocation resolves one, is
+         * the body's closure allocation: its captured cells install as the
+         * invocation's capture overlay (outer to the parameter overlay), so
+         * an escaped closure's body — an imported closure factory's captured
+         * argument, a cross-module step over a shared class and table in
+         * {@code loadAdapterSource}/{@code executeDynamicAdapterCall}, or any
+         * value-carried callee — reads the cells the closure allocated with,
+         * exactly as the emitted carriers' upvalues do. A static callee
+         * spells no runtime value and installs nothing (its captures resolve
+         * in the enclosing invocation or the module state).</p>
          */
         private Value runOwnedBodyBlock(FunctionId functionId, BlockId bodyBlock,
                                         int paramCount, List<Value> args) {
@@ -4136,7 +4226,7 @@ public final class SemanticOracle {
          */
         private Value executeDynamicCall(SemanticOp op, KindPayload.CallPayload payload,
                                          FunctionExecutionBinding binding,
-                                         List<Value> checkedArgs) {
+                                         List<Value> checkedArgs, Value calleeValue) {
             if (binding instanceof FunctionExecutionBinding.AdapterBinding adapter) {
                 return executeDynamicAdapterCall(op, payload, adapter, checkedArgs);
             }
@@ -4146,7 +4236,8 @@ public final class SemanticOracle {
             return switch (selection) {
                 case ReturnBoundarySelection.CalleeReturn ignored -> {
                     Value returned = invokeLoweredBody(op, payload,
-                        (FunctionExecutionBinding.LoweredBody) binding, checkedArgs);
+                        (FunctionExecutionBinding.LoweredBody) binding, checkedArgs,
+                        calleeValue);
                     yield runRecordedDealBodyCell(op,
                         payload.dynamicReturnBoundary().dealBodyBoundaryOpId(), returned);
                 }
@@ -4751,15 +4842,25 @@ public final class SemanticOracle {
                 case KindPayload.CallCallee.Dynamic dynamic ->
                     resolveDynamicCalleeBinding(dynamic.callee());
             };
+            // The runtime callee value of a value-carried async start (the
+            // dynamic and indirect arms): the resolved body's closure
+            // allocation installs its captured cells for the task.
+            Value calleeValue = switch (payload.callee()) {
+                case KindPayload.CallCallee.Static ignored -> null;
+                case KindPayload.CallCallee.Indirect indirect ->
+                    valueOf(indirect.callee());
+                case KindPayload.CallCallee.Dynamic dynamic ->
+                    valueOf(dynamic.callee());
+            };
             AsyncTokenId token = (AsyncTokenId) op.result();
             if (payload.callee() instanceof KindPayload.CallCallee.Dynamic) {
-                executeDynamicAsyncStart(op, binding, checkedArgs, token);
+                executeDynamicAsyncStart(op, binding, checkedArgs, token, calleeValue);
                 return tokenAtom(token);
             }
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     tasks.put(token.tokenId(), new Task(token,
-                        () -> runTaskBody(op, body, checkedArgs)));
+                        () -> runTaskBody(op, body, checkedArgs, calleeValue)));
                     readyQueue.add(token.tokenId());
                 }
                 case FunctionExecutionBinding.AdapterBinding adapter -> {
@@ -4851,7 +4952,7 @@ public final class SemanticOracle {
          */
         private void executeDynamicAsyncStart(SemanticOp op,
                 FunctionExecutionBinding binding, List<Value> checkedArgs,
-                AsyncTokenId token) {
+                AsyncTokenId token, Value calleeValue) {
             if (binding instanceof FunctionExecutionBinding.AdapterBinding adapter) {
                 executeDynamicAdapterAsyncStart(op, adapter, checkedArgs, token);
                 return;
@@ -4862,7 +4963,8 @@ public final class SemanticOracle {
                     FunctionExecutionBinding.LoweredBody body =
                         (FunctionExecutionBinding.LoweredBody) binding;
                     tasks.put(token.tokenId(), new Task(token,
-                        () -> runTaskBodyWithRecordedCell(op, body, checkedArgs)));
+                        () -> runTaskBodyWithRecordedCell(op, body, checkedArgs,
+                            calleeValue)));
                     readyQueue.add(token.tokenId());
                 }
                 case HOST -> {
@@ -4935,7 +5037,7 @@ public final class SemanticOracle {
                         (FunctionExecutionBinding.LoweredBody) sourceBinding;
                     tasks.put(token.tokenId(), new Task(token, () -> {
                         Value returned = runOwnedBodyBlock(body.functionId(),
-                            body.blockId(), m, leading);
+                            body.blockId(), m, leading, capturesOf(sourceValue));
                         return runRecordedDealBodyCell(op, recordedTaskCellOf(op),
                             returned);
                     }));
@@ -5032,9 +5134,14 @@ public final class SemanticOracle {
             }
         }
 
-        /** One DEAL body task: the body executes exactly once and completes the token. */
+        /**
+         * One DEAL body task: the body executes exactly once and completes
+         * the token. The runtime callee value, when the async start is
+         * value-carried, installs the closure's captured cells for the body
+         * task exactly like the sync invocation.
+         */
         private Value runTaskBody(SemanticOp op, FunctionExecutionBinding.LoweredBody body,
-                                  List<Value> args) {
+                                  List<Value> args, Value calleeValue) {
             // The resolved body runs under its own unit (the value-channel
             // class of a cross-module callee value): a body whose function id
             // belongs to another module of the closure executes through that
@@ -5080,8 +5187,9 @@ public final class SemanticOracle {
          * body's own cell and runs nothing here.
          */
         private Value runTaskBodyWithRecordedCell(SemanticOp op,
-                FunctionExecutionBinding.LoweredBody body, List<Value> args) {
-            Value returned = runTaskBody(op, body, args);
+                FunctionExecutionBinding.LoweredBody body, List<Value> args,
+                Value calleeValue) {
+            Value returned = runTaskBody(op, body, args, calleeValue);
             return runRecordedDealBodyCell(op, recordedTaskCellOf(op), returned);
         }
 
@@ -5299,6 +5407,16 @@ public final class SemanticOracle {
          * {@code main}: null and exits the program after the terminal.
          */
         private String executeEntryInvoke(SemanticOp op) {
+            // Only the entry module's ENTRY_INVOKE delegation runs: a
+            // non-entry module's delegation and its delegated CALL stay
+            // skipped, exactly like the shared emitters' non-entry skip
+            // (the retained emitter invokes main() only from the entry
+            // module). The op's unit is the resolution authority: the
+            // project form's entry module is this execution's unit, and a
+            // companion's delegation never runs.
+            if (!stateOf(op.opId()).unit.moduleId().equals(unit.moduleId())) {
+                return null;
+            }
             SemanticOp call = entryCallOf(op);
             execute(call);
             entryResultAtom = atomOf(valueOf((ValueId) call.result()));

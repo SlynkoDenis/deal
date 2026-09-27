@@ -10205,7 +10205,7 @@ public final class SemanticLowerer {
                     call.span(), callOpId);
             }
             OpId hostBoundaryOpId = emitHostReturnBoundary(signature, result, call.span(),
-                callOpId);
+                callOpId).opId();
             OpId externalBoundaryOpId = emitExternalReturnBoundary(signature, result,
                 call.span(), callOpId);
             List<SemanticOp> parameterBoundaryOps = new ArrayList<>();
@@ -10363,14 +10363,20 @@ public final class SemanticLowerer {
             }
         }
 
-        /** The pinned host sync-return cell run by the call op. */
-        private OpId emitHostReturnBoundary(RuntimeDescriptor.Func descriptor, ValueId result,
-                                            Span span, OpId callOpId) {
+        /**
+         * The pinned host sync-return cell run by the call op. Returns the
+         * emitted boundary op: the producing crossing of a function-typed
+         * host return registers its {@code HostFunctionValue} keyed by this
+         * op and its boundary payload (M2 item 1).
+         */
+        private SemanticOp emitHostReturnBoundary(RuntimeDescriptor.Func descriptor,
+                                                  ValueId result, Span span,
+                                                  OpId callOpId) {
             SemanticOp boundary = buildChildBoundaryWithPolicy(BoundaryKind.HOST_TO_DEAL,
                 descriptor.returnType(), FailurePolicyId.HOST_SYNC_RETURN, result, span,
                 callOpId);
             emit(boundary);
-            return boundary.opId();
+            return boundary;
         }
 
         /** The retained-ABI external return cell run by the call op. */
@@ -10579,6 +10585,11 @@ public final class SemanticLowerer {
             OpId returnBoundaryOpId = null;
             OpId externalEntryRef = null;
             BlockId bodyBlock = null;
+            // The producing host crossing of a function-typed return (M2 item
+            // 1): its boundary op and owning host module register the result's
+            // HostFunctionValue instead of the dynamic record.
+            SemanticOp hostCrossing = null;
+            ModuleId hostCrossingModule = null;
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     FunctionContext context = contextsByFunctionId.get(body.functionId());
@@ -10609,12 +10620,18 @@ public final class SemanticLowerer {
                                 context.callSiteOpId);
                             returnBoundaryOpId = context.returnBoundaryOpId;
                         }
-                        case FunctionExecutionBinding.HostFunction host ->
-                            returnBoundaryOpId = emitHostReturnBoundary(host.descriptor(),
+                        case FunctionExecutionBinding.HostFunction host -> {
+                            hostCrossing = emitHostReturnBoundary(host.descriptor(), result,
+                                call.span(), callOpId);
+                            returnBoundaryOpId = hostCrossing.opId();
+                            hostCrossingModule = host.hostModuleId();
+                        }
+                        case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                            hostCrossing = emitHostReturnBoundary(hostValue.descriptor(),
                                 result, call.span(), callOpId);
-                        case FunctionExecutionBinding.HostFunctionValue hostValue ->
-                            returnBoundaryOpId = emitHostReturnBoundary(
-                                hostValue.descriptor(), result, call.span(), callOpId);
+                            returnBoundaryOpId = hostCrossing.opId();
+                            hostCrossingModule = hostValue.hostModuleId();
+                        }
                         case FunctionExecutionBinding.ExternalFunction external -> {
                             if (external.executionOwner()
                                     == ExternalExecutionOwner.SHARED_BODY) {
@@ -10637,7 +10654,8 @@ public final class SemanticLowerer {
                             // call op (the adapter's xN target-signature
                             // FUNCTION_PARAMETER cells were recorded above).
                             returnBoundaryOpId = emitHostReturnBoundary(
-                                intrinsic.descriptor(), result, call.span(), callOpId);
+                                intrinsic.descriptor(), result, call.span(),
+                                callOpId).opId();
                         case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                             throw dynamicCarrierDefect(dynamic, "the adapted call of '"
                                 + calleeName + "'");
@@ -10647,12 +10665,18 @@ public final class SemanticLowerer {
                                 + "ISSUE-0531's)");
                     }
                 }
-                case FunctionExecutionBinding.HostFunction host ->
-                    returnBoundaryOpId = emitHostReturnBoundary(host.descriptor(), result,
+                case FunctionExecutionBinding.HostFunction host -> {
+                    hostCrossing = emitHostReturnBoundary(host.descriptor(), result,
                         call.span(), callOpId);
-                case FunctionExecutionBinding.HostFunctionValue hostValue ->
-                    returnBoundaryOpId = emitHostReturnBoundary(hostValue.descriptor(),
+                    returnBoundaryOpId = hostCrossing.opId();
+                    hostCrossingModule = host.hostModuleId();
+                }
+                case FunctionExecutionBinding.HostFunctionValue hostValue -> {
+                    hostCrossing = emitHostReturnBoundary(hostValue.descriptor(),
                         result, call.span(), callOpId);
+                    returnBoundaryOpId = hostCrossing.opId();
+                    hostCrossingModule = hostValue.hostModuleId();
+                }
                 case FunctionExecutionBinding.ExternalFunction external -> {
                     if (external.executionOwner() == ExternalExecutionOwner.SHARED_BODY) {
                         externalEntryRef = externalEntryRefOf(external);
@@ -10666,7 +10690,7 @@ public final class SemanticLowerer {
                     // run by the call op (the intrinsic's class is HOST,
                     // {@link DynamicReturnBoundaryProtocol#kindOf}).
                     returnBoundaryOpId = emitHostReturnBoundary(intrinsic.descriptor(),
-                        result, call.span(), callOpId);
+                        result, call.span(), callOpId).opId();
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicCarrierDefect(dynamic, "the call of '" + calleeName + "'");
             }
@@ -10680,11 +10704,14 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
-            // The producer rule's call arm: a call result with a
-            // function-typed result registers exactly one dynamic
-            // materialization keyed by the call's result identity
-            // (whatever call arm allocated it).
-            registerDynamicMaterialization(result, callOpId, resultType);
+            // The producer rule's call arm: a host crossing's function-typed
+            // return is the host-materialized value class and registers
+            // exactly one HostFunctionValue at the producing crossing (M2 item
+            // 1); every other call result whose class is not statically known
+            // registers the closed dynamic record keyed by the call's result
+            // identity (M2 item 2).
+            registerCallResultMaterialization(result, callOpId, hostCrossing,
+                hostCrossingModule, resultType);
             return result;
         }
 
@@ -10954,9 +10981,15 @@ public final class SemanticLowerer {
             }
             OpId returnBoundaryOpId = null;
             OpId externalEntryRef = null;
+            SemanticOp hostCrossing = null;
+            ModuleId hostCrossingModule = null;
             if (host) {
-                returnBoundaryOpId = emitHostReturnBoundary(descriptor, result, call.span(),
+                hostCrossing = emitHostReturnBoundary(descriptor, result, call.span(),
                     callOpId);
+                returnBoundaryOpId = hostCrossing.opId();
+                hostCrossingModule = binding instanceof FunctionExecutionBinding.HostFunction
+                    ? ((FunctionExecutionBinding.HostFunction) binding).hostModuleId()
+                    : ((FunctionExecutionBinding.HostFunctionValue) binding).hostModuleId();
             } else if (binding instanceof FunctionExecutionBinding.ExternalFunction external) {
                 if (external.executionOwner() == ExternalExecutionOwner.SHARED_BODY) {
                     externalEntryRef = externalEntryRefOf(external);
@@ -10978,10 +11011,13 @@ public final class SemanticLowerer {
             for (SemanticOp boundary : parameterBoundaryOps) {
                 emit(boundary);
             }
-            // The producer rule's call arm: an imported call result with a
-            // function-typed result registers exactly one dynamic
-            // materialization keyed by the call's result identity.
-            registerDynamicMaterialization(result, callOpId, resultType);
+            // The producer rule's call arm: a host crossing's function-typed
+            // return is the host-materialized value class and registers
+            // exactly one HostFunctionValue at the producing crossing (M2 item
+            // 1); every other imported call result registers the closed
+            // dynamic record keyed by the call's result identity (M2 item 2).
+            registerCallResultMaterialization(result, callOpId, hostCrossing,
+                hostCrossingModule, resultType);
             return result;
         }
 
@@ -12941,6 +12977,41 @@ public final class SemanticLowerer {
             }
             registry.registerDynamicFunctionValue(new FunctionAllocationIdentity(result.id()),
                 materializingOpId, funcDescriptor);
+        }
+
+        /**
+         * The producer rule's call-result arm: a call result whose declared
+         * result is a function type registers exactly one binding keyed by
+         * the call's result identity and correlated to its producing op.
+         * When the call's returning crossing is a producing host crossing
+         * whose descriptor is function-typed (a direct or indirect host
+         * call, or an adapter over a host source), the materialized value is
+         * the host-materialized value class and registers its
+         * {@code HostFunctionValue} at the crossing (M2 item 1, the gate's
+         * producing-crossing clause). Every other function-typed call result
+         * — an external cross-module result, a dynamic callee's result — has
+         * no statically known class and registers the closed dynamic record
+         * (M2 item 2).
+         *
+         * @param result             the call's result identity; non-null
+         * @param callOpId           the call op (the dynamic record's correlation
+         *                           id); non-null
+         * @param hostCrossing       the emitted host return crossing, or null
+         * @param hostCrossingModule the crossing's owning host module, or null
+         * @param resultType         the call's declared result descriptor; non-null
+         */
+        private void registerCallResultMaterialization(ValueId result, OpId callOpId,
+                SemanticOp hostCrossing, ModuleId hostCrossingModule,
+                RuntimeDescriptor resultType) {
+            if (hostCrossing != null && hostCrossingModule != null
+                    && hostCrossing.payload() instanceof KindPayload.BoundaryPayload
+                        boundary
+                    && boundary.descriptor() instanceof RuntimeDescriptor.Func) {
+                registry.registerHostFunctionValue(new FunctionAllocationIdentity(
+                    result.id()), boundary, hostCrossing.opId(), hostCrossingModule);
+                return;
+            }
+            registerDynamicMaterialization(result, callOpId, resultType);
         }
 
         /**
