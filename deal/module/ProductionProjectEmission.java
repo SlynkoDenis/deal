@@ -86,7 +86,11 @@ import java.util.Set;
  *       outside the landed production set, an extern-C import without
  *       generated metadata, an unserializable generated module, or a
  *       provider gap) maps to E6005 {@code SHARED_EMITTER_COVERAGE} and
- *       stages nothing;</li>
+ *       stages nothing — the provider gap through its typed signal, so
+ *       the E6005 detail names the consuming (emitting) module, the
+ *       extern-C import statement's origin, the raw specifier, the
+ *       resolved declaration module, and the offending provider alias
+ *       and module;</li>
  *   <li>the unchanged LuaJIT runtime/stdlib deployment copies, staged
  *       from the resolved distribution surface after the one project
  *       artifact (a missing runtime is the pinned E6000); the JVM target
@@ -115,6 +119,19 @@ public final class ProductionProjectEmission {
      * extern-C remnant contract).
      */
     public static final String HOST_MODULE_IMPORT = "HOST_MODULE_IMPORT";
+
+    /**
+     * The stable detail token of the FFI provider-gap outcome (the
+     * extern-C load emission's binding step; design source
+     * {@code plan-evaluator-provider-binding-surface} P4 and the
+     * provider-gap fail-closed contract): a wrapper-incapable provider or
+     * an import alias naming two provider modules fails the compile closed
+     * with one E6005 {@code SHARED_EMITTER_COVERAGE} whose detail names the
+     * consuming module, the extern-C import statement's origin, the
+     * import's raw specifier, the resolved declaration module, and the
+     * offending provider alias and module path.
+     */
+    public static final String FFI_PROVIDER_GAP = "FFI_PROVIDER_GAP";
 
     /** The pinned C9 warning of the LuaJIT target (printed verbatim). */
     public static final String WARNING_LUAJIT =
@@ -468,12 +485,30 @@ public final class ProductionProjectEmission {
      * The fail-closed mapping of a production emitter gap: an op outside
      * the landed production emission set is E6005
      * {@code SHARED_EMITTER_COVERAGE} — never a crash, never a fallback
-     * to a retained emitter, and no artifact stages.
+     * to a retained emitter, and no artifact stages. A typed
+     * {@link LuaSemanticEmitter.FfiProviderGap} keeps the provider-gap
+     * detail (P4): the detail's module is the consuming (emitting) module
+     * of the extern-C import — the module whose {@code MODULE_IMPORT}
+     * carries it, never the entry module — and the detail's origin carries
+     * the import statement's origin, the raw specifier, the resolved
+     * declaration module, and the offending provider alias and module.
+     * Every other gap keeps the entry-module detail and the generic gap
+     * text.
      */
-    private static CompilerDiagnostic sharedEmitterCoverage(String modulePath,
-            IllegalStateException gap, CompilerInvocation invocation) {
+    private static CompilerDiagnostic sharedEmitterCoverage(
+            String entryModulePath, IllegalStateException gap,
+            CompilerInvocation invocation) {
+        if (gap instanceof LuaSemanticEmitter.FfiProviderGap providerGap) {
+            return FailureContractRegistry.e6005(new LoweringFailureDetail(
+                providerGap.consumingModulePath(), SemanticCapability.MODULES,
+                SHARED_EMITTER_COVERAGE, invocation.semanticProfile(),
+                LoweredModuleUnit.FORMAT_VERSION,
+                "ProductionProjectEmission " + SHARED_EMITTER_COVERAGE + " "
+                    + FFI_PROVIDER_GAP + " (" + providerGap.getMessage()
+                    + ")"));
+        }
         return FailureContractRegistry.e6005(new LoweringFailureDetail(
-            modulePath, SemanticCapability.MODULES, SHARED_EMITTER_COVERAGE,
+            entryModulePath, SemanticCapability.MODULES, SHARED_EMITTER_COVERAGE,
             invocation.semanticProfile(), LoweredModuleUnit.FORMAT_VERSION,
             "ProductionProjectEmission " + SHARED_EMITTER_COVERAGE + " ("
                 + gap.getMessage() + ")"));
