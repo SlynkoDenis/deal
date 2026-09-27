@@ -122,6 +122,12 @@ public final class SemanticIrValidator {
      * that violates its closed conditions), and the closed dynamic-invocation
      * clauses (the callee-value class set and the recorded DEAL-body cell
      * form's correlation with the callee value's registration — ISSUE-0677).
+     * The {@code INDIRECT} arm's resolved-binding switch pins every statically
+     * classified callee's cell family — the conversion intrinsic's registration
+     * is a boundary-shaped callable, so its indirect call takes the host family
+     * (one {@code DEAL_TO_HOST} + {@code HOST_PARAMETER} cell per declared
+     * parameter and the single {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN}
+     * return cell — ISSUE-0679).
      */
     public static final String R_BOUNDARY_TRIPLE = "R-BOUNDARY-TRIPLE";
 
@@ -1172,10 +1178,41 @@ public final class SemanticIrValidator {
         String shape = optionalString(binding, "type");
         if (!"loweredBody".equals(shape) && !"adapter".equals(shape)
                 && !"hostFunction".equals(shape) && !"hostFunctionValue".equals(shape)
-                && !"externalFunction".equals(shape)) {
+                && !"externalFunction".equals(shape)
+                && !"intrinsicFunction".equals(shape)) {
             return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
                 origin(R_ENUM, "open value \"" + shape
                     + "\" in a closed FunctionExecutionBinding shape position"));
+        }
+        if ("intrinsicFunction".equals(shape)) {
+            // The intrinsic function value's closed shape position
+            // (ISSUE-0679; design source
+            // {@code conversion-intrinsic-function-values} J3): the static
+            // callee slot of an indirect intrinsic call carries the seeded
+            // identity's own registration — the closed {@code IntrinsicKind}
+            // member plus the intrinsic's declared signature text, both
+            // required, so a doctored nested payload with an open kind or
+            // with either position absent fails the closed gate exactly as
+            // the unit-level binding shape does.
+            String nestedKind = optionalString(binding, "intrinsicKind");
+            String nestedDescriptor = optionalString(binding, "descriptor");
+            Optional<CompilerDiagnostic> kindFailure = checkSlotEnum(unit, facts,
+                "IntrinsicKind", nestedKind, IntrinsicKind.class);
+            if (kindFailure.isPresent()) {
+                return kindFailure;
+            }
+            if (nestedKind == null || nestedDescriptor == null) {
+                return fail(unit, facts, R_ENUM, SemanticCapability.FOUNDATION_VALUES,
+                    origin(R_ENUM, "the intrinsicFunction shape at a nested binding "
+                        + "position carries no intrinsic kind and descriptor text (the "
+                        + "closed shape position is its kind plus its declared "
+                        + "signature)"));
+            }
+            Optional<CompilerDiagnostic> descriptorFailure = checkSlotDescriptor(unit, facts,
+                "descriptor", nestedDescriptor);
+            if (descriptorFailure.isPresent()) {
+                return descriptorFailure;
+            }
         }
         String captureMode = optionalString(binding, "captureMode");
         if (captureMode != null && enumByName(CaptureMode.class, captureMode) == null) {
@@ -1954,6 +1991,20 @@ public final class SemanticIrValidator {
                         isReturn, policy, descriptor);
                     case "hostFunction", "hostFunctionValue" -> hostCallCell(call, boundary,
                         signature, index, isReturn, policy, descriptor);
+                    // The conversion intrinsic's value call (ISSUE-0679;
+                    // design source
+                    // {@code conversion-intrinsic-function-values} J3): the
+                    // seeded identity's registration is a boundary-shaped
+                    // callable, so its indirect call records exactly the host
+                    // cell family — one DEAL_TO_HOST + HOST_PARAMETER cell per
+                    // declared parameter and the single HOST_TO_DEAL +
+                    // HOST_SYNC_RETURN return cell run by the call op. The
+                    // class is HOST
+                    // ({@link DynamicReturnBoundaryProtocol#kindOf}), so the
+                    // pinned cell family is the host one, exactly as the
+                    // statically resolved host rows'.
+                    case "intrinsicFunction" -> hostCallCell(call, boundary, signature,
+                        index, isReturn, policy, descriptor);
                     case "externalFunction" -> externalCallCell(call, boundary, signature, index,
                         isReturn, policy, descriptor, binding.executionOwner());
                     default -> Optional.empty();

@@ -393,16 +393,18 @@ public final class JvmRuntime {
      */
     static Object intrinsicInvoke(String kind, Object[] args) {
         Object value = args.length > 0 ? args[0] : null;
-        String staticKind = args.length > 1 && args[1] instanceof String text ? text
+        String evKind = args.length > 1 && args[1] instanceof String text ? text
+            : "INTRINSIC_CALL";
+        String staticKind = args.length > 2 && args[2] instanceof String text ? text
             : ("INT_CONVERT".equals(kind) ? "number" : "int");
-        String opKey = args.length > 2 && args[2] instanceof String text ? text : "-";
-        String digest = args.length > 3 && args[3] instanceof String text ? text : "-";
-        String parent = args.length > 4 && args[4] instanceof String text ? text : "-";
-        String origin = args.length > 5 && args[5] instanceof String text ? text : "-";
+        String opKey = args.length > 3 && args[3] instanceof String text ? text : "-";
+        String digest = args.length > 4 && args[4] instanceof String text ? text : "-";
+        String parent = args.length > 5 && args[5] instanceof String text ? text : "-";
+        String origin = args.length > 6 && args[6] instanceof String text ? text : "-";
         if ("INT_CONVERT".equals(kind)) {
-            return intConv(value, staticKind, opKey, digest, parent, origin);
+            return intConv(value, evKind, staticKind, opKey, digest, parent, origin);
         }
-        return numConv(value, staticKind, opKey, digest, parent, origin);
+        return numConv(value, evKind, staticKind, opKey, digest, parent, origin);
     }
 
     /**
@@ -2729,12 +2731,22 @@ public final class JvmRuntime {
         }
     }
 
-    /** The intrinsic conversion ladders (INT_CONVERSION/NUMBER_CONVERSION). */
-    public static Object intConv(Object v, String kind, String opKey, String digest,
-                                 String parent, String origin) {
+    /**
+     * The intrinsic conversion ladders (INT_CONVERSION/NUMBER_CONVERSION).
+     *
+     * <p>The invoking op's own kind label is a parameter (ISSUE-0679; design
+     * source {@code conversion-intrinsic-function-values} J4): the direct
+     * {@code INTRINSIC_CALL} arm passes its own kind, and an intrinsic value
+     * call passes the invoking CALL op's kind, so the trace's FAILURE event
+     * carries the op that invoked the conversion exactly as the oracle's
+     * {@code emitFailure(op, ...)} does. One algorithm authority, one
+     * parameter more.</p>
+     */
+    public static Object intConv(Object v, String evKind, String kind, String opKey,
+                                 String digest, String parent, String origin) {
         if (v == null) {
             DealError e = fail("E8001", "cannot convert null to int", origin, "int", "null");
-            ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+            ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                 List.of(), null, errtext(e));
             throw e;
         }
@@ -2742,27 +2754,27 @@ public final class JvmRuntime {
             double d = doubleValue;
             if (Double.isNaN(d)) {
                 DealError e = fail("E8001", "expected int, got NaN", origin, "int", "NaN");
-                ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+                ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                     List.of(), null, errtext(e));
                 throw e;
             }
             if (Double.isInfinite(d)) {
                 DealError e = fail("E8001", "expected int, got infinity", origin, "int",
                     "infinity");
-                ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+                ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                     List.of(), null, errtext(e));
                 throw e;
             }
             if (d != Math.rint(d)) {
                 DealError e = fail("E8001", "expected int, got non-integer number",
                     origin, "int", "non-integer number");
-                ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+                ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                     List.of(), null, errtext(e));
                 throw e;
             }
             if (d < -2147483648d || d > 2147483647d) {
                 DealError e = fail("E8004", "int out of safe range", origin, "int", "number");
-                ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+                ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                     List.of(), null, errtext(e));
                 throw e;
             }
@@ -2773,17 +2785,17 @@ public final class JvmRuntime {
         }
         DealError e = fail("E8001", "expected int, got " + actualOf(kind, v), origin, "int",
             actualOf(kind, v));
-        ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, List.of(),
+        ev(currentModule(), opKey, "FAILURE", evKind, digest, parent, List.of(),
             null, errtext(e));
         throw e;
     }
 
-    public static Object numConv(Object v, String kind, String opKey, String digest,
-                                 String parent, String origin) {
+    public static Object numConv(Object v, String evKind, String kind, String opKey,
+                                 String digest, String parent, String origin) {
         if (v == null) {
             DealError e = fail("E8001", "cannot convert null to number", origin, "number",
                 "null");
-            ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent,
+            ev(currentModule(), opKey, "FAILURE", evKind, digest, parent,
                 List.of(), null, errtext(e));
             throw e;
         }
@@ -2795,7 +2807,7 @@ public final class JvmRuntime {
         }
         DealError e = fail("E8001", "expected number, got " + actualOf(kind, v), origin,
             "number", actualOf(kind, v));
-        ev(currentModule(), opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, List.of(),
+        ev(currentModule(), opKey, "FAILURE", evKind, digest, parent, List.of(),
             null, errtext(e));
         throw e;
     }

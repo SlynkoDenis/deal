@@ -3227,6 +3227,16 @@ public final class LuaSemanticEmitter {
                 emitHostValueCall(op, payload, hostValue);
                 return;
             }
+            // The conversion intrinsic's value call (ISSUE-0679; design
+            // source {@code conversion-intrinsic-function-values} J3/J4): the
+            // seeded identity's registration is a boundary-shaped callable, so
+            // the indirect arm runs the recorded host cell family and the one
+            // conversion ladder at the call site with the invoking CALL op's
+            // own context and kind.
+            if (binding instanceof FunctionExecutionBinding.IntrinsicFunction intrinsic) {
+                emitIntrinsicValueCall(op, payload, intrinsic);
+                return;
+            }
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp boundary = opsById.get(boundaryId);
                 KindPayload.BoundaryPayload boundaryPayload =
@@ -3735,6 +3745,29 @@ public final class LuaSemanticEmitter {
 
         private void emitHostInvocation(SemanticOp op, KindPayload.CallPayload payload,
                 String target, StdlibFunctionCatalog.Entry catalogRow) {
+            int argCount = emitHostParameterCells(op, payload);
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            if (catalogRow == null) {
+                emitHostInvocationTail(op, target, argCount, returnBoundary);
+            } else {
+                emitStdlibCalleeInvocation(op, payload, target, catalogRow, argCount,
+                    returnBoundary);
+            }
+            String result = slot((ValueId) op.result());
+            out.append(result).append(" = __resT\n");
+            emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The recorded host parameter cells of one host-shaped call (the
+         * {@code DEAL_TO_HOST} + {@code HOST_PARAMETER} family): the loaded
+         * wrapper's own parameter rule runs per declared position in one-based
+         * order, so the pinned E8010 {@code parameter {i} type mismatch} texts
+         * surface at the call origin, and each host-facing projection (H7)
+         * lands in {@code __hbT[i]}. Returns the position count.
+         */
+        private int emitHostParameterCells(SemanticOp op, KindPayload.CallPayload payload) {
             out.append("__hbT = {}\n");
             int index = 1;
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
@@ -3772,14 +3805,50 @@ public final class LuaSemanticEmitter {
                     .append(sourceTextOf(boundaryPayload.descriptor())).append(", __chkB)\n");
                 index++;
             }
+            return index - 1;
+        }
+
+        /**
+         * The conversion intrinsic's value call (ISSUE-0679; design source
+         * {@code conversion-intrinsic-function-values} J3/J4): the seeded
+         * identity's registration is a boundary-shaped callable, so the
+         * indirect arm runs exactly the recorded host cell family — one
+         * {@code DEAL_TO_HOST} + {@code HOST_PARAMETER} cell per declared
+         * parameter through the landed host parameter rule (the argument
+         * domain the cells own; a null or wrong-kind argument is a
+         * parameter-cell projection, never a conversion failure) — then the one
+         * conversion ladder with the invoking CALL op's own context and kind
+         * label (the pinned texts and the FAILURE event carry the invoking op),
+         * then the recorded {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN}
+         * cell at the call origin. One algorithm authority with the direct
+         * {@code INTRINSIC_CALL} arm, whose kind label stays its own.
+         */
+        private void emitIntrinsicValueCall(SemanticOp op, KindPayload.CallPayload payload,
+                FunctionExecutionBinding.IntrinsicFunction intrinsic) {
+            int argCount = emitHostParameterCells(op, payload);
+            if (argCount != intrinsic.descriptor().paramTypes().size()) {
+                throw new IllegalStateException("the conversion intrinsic call "
+                    + op.opId() + " records " + argCount + " parameter cell(s) for the '"
+                    + intrinsic.kind() + "' intrinsic's "
+                    + intrinsic.descriptor().paramTypes().size() + " declared "
+                    + "parameter(s) (a producer defect)");
+            }
+            String helper = intrinsic.kind() == IntrinsicKind.INT_CONVERT
+                ? "__intConv" : "__numConv";
+            out.append("__resT = ").append(helper).append("(__hbT[1], ")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(staticKind(
+                    intrinsic.descriptor().paramTypes().get(0))))
+                .append(", ").append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op))).append(")\n");
             SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
                 ? null : opsById.get(payload.returnBoundaryOpId());
-            if (catalogRow == null) {
-                emitHostInvocationTail(op, target, index - 1, returnBoundary);
-            } else {
-                emitStdlibCalleeInvocation(op, payload, target, catalogRow, index - 1,
-                    returnBoundary);
-            }
+            // The converted value is a plain chunk value (a DEAL int/number,
+            // never a host carrier), admitted by the same general check the
+            // direct arm's and the cataloged callable's recorded cells run.
+            emitHostReturnCellRun(op, returnBoundary, "__atom");
             String result = slot((ValueId) op.result());
             out.append(result).append(" = __resT\n");
             emitResultSuccess(op, result, (RuntimeDescriptor) op.resultType());
@@ -4121,7 +4190,12 @@ public final class LuaSemanticEmitter {
 
         /**
          * The dynamic dispatch's HOST row: the carrier's own HOST sub-class
-         * decides the path (never the checked descriptor). A loaded surface
+         * decides the path (never the checked descriptor). The conversion
+         * intrinsic ({@code __it}) runs the closed kind's conversion ladder
+         * with the invoking CALL op's own context and kind label — one
+         * algorithm authority with the direct {@code INTRINSIC_CALL} arm
+         * (ISSUE-0679; design source
+         * {@code conversion-intrinsic-function-values} J3/J4). A loaded surface
          * entry is invoked through its host calling convention ({@code .f} with
          * the projected parameters and the trailing literal span triplet); the
          * cataloged stdlib callable ({@code __sid}) runs the closed catalog
@@ -4129,7 +4203,7 @@ public final class LuaSemanticEmitter {
          * identity plus the op key, contract digest, parent key, and origin —
          * one algorithm authority with the direct {@code STDLIB_CALL} arm and
          * the read's callable), its failures projecting the CALL op's own
-         * FAILURE event kind. Both sub-classes then run the recorded
+         * FAILURE event kind. Every sub-class then runs the recorded
          * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell exactly once at
          * the call origin (the oracle's {@code invokeResolvedHostRequest}
          * followed by {@code runBoundaryChild}). The checked value is left in
@@ -4137,11 +4211,45 @@ public final class LuaSemanticEmitter {
          */
         private void emitDynamicHostRow(SemanticOp op, KindPayload.CallPayload payload,
                                         SemanticOp returnBoundary) {
-            // The cataloged stdlib callable's sub-class: the row invoker runs
-            // with the invoking call's own context (including the invoking
-            // op's kind label, so an algorithm failure publishes the CALL op's
-            // FAILURE event), then the recorded cell admits the result.
-            out.append("  if __dynC.__sid ~= nil then\n");
+            // The conversion intrinsic's sub-class (ISSUE-0679): the carrier's
+            // own kind tag selects the one conversion ladder over the value the
+            // recorded class-independent parameter cells admitted (the declared
+            // parameter descriptor is the argument domain), with the invoking
+            // CALL op's context and kind label; then the recorded cell admits
+            // the converted value.
+            if (payload.parameterBoundaryOpIds().size() == 1) {
+                SemanticOp parameter = opsById.get(payload.parameterBoundaryOpIds().get(0));
+                KindPayload.BoundaryPayload parameterPayload =
+                    (KindPayload.BoundaryPayload) parameter.payload();
+                String input = slot(parameterPayload.input());
+                String declaredKind = luaString(staticKind(parameterPayload.descriptor()));
+                out.append("  if __dynC.__it == \"INT_CONVERT\" then\n");
+                out.append("    __resT = __intConv(").append(input)
+                    .append(", ").append(luaString(op.kind().name())).append(", ")
+                    .append(declaredKind).append(", ")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(originOf(op))).append(")\n");
+                emitHostReturnCellRun(op, returnBoundary, "__atom");
+                out.append("  elseif __dynC.__it == \"NUMBER_CONVERT\" then\n");
+                out.append("    __resT = __numConv(").append(input)
+                    .append(", ").append(luaString(op.kind().name())).append(", ")
+                    .append(declaredKind).append(", ")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(originOf(op))).append(")\n");
+                emitHostReturnCellRun(op, returnBoundary, "__atom");
+                out.append("  elseif __dynC.__sid ~= nil then\n");
+            } else {
+                // No checker-valid program reaches an intrinsic carrier at a
+                // site without the intrinsic's single declared parameter cell;
+                // the tag still fails closed rather than guessing a conversion.
+                out.append("  if __dynC.__it ~= nil then\n");
+                emitDynamicCarrierFailure(op, luaString(originOf(op)));
+                out.append("  elseif __dynC.__sid ~= nil then\n");
+            }
             out.append("    __resT = __dynC.__fn(")
                 .append(luaString(op.kind().name())).append(", ")
                 .append(luaString(opKey(op.opId()))).append(", ")
@@ -4468,15 +4576,20 @@ public final class LuaSemanticEmitter {
             String input = slot(payload.input());
             String kind = staticKind(op.operandTypes().get(0));
             String origin = originOf(op);
+            // The direct arm keeps its own kind as the invoking op's label
+            // (ISSUE-0679 J4); an intrinsic value call passes the invoking
+            // CALL op's kind through the same ladder.
             switch (payload.kind()) {
                 case INT_CONVERT -> out.append(target).append(" = __intConv(")
-                    .append(input).append(", ").append(luaString(kind)).append(", ")
+                    .append(input).append(", ").append(luaString(op.kind().name()))
+                    .append(", ").append(luaString(kind)).append(", ")
                     .append(luaString(opKey(op.opId()))).append(", ")
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
                     .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
                     .append(luaString(origin)).append(")\n");
                 case NUMBER_CONVERT -> out.append(target).append(" = __numConv(")
-                    .append(input).append(", ").append(luaString(kind)).append(", ")
+                    .append(input).append(", ").append(luaString(op.kind().name()))
+                    .append(", ").append(luaString(kind)).append(", ")
                     .append(luaString(opKey(op.opId()))).append(", ")
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
                     .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
@@ -8842,78 +8955,79 @@ local function __arith(selector, l, r, opKey, digest, parent, origin)
   if selector == "NUMBER_POW_IEEE" then return l ^ r end
   return 0
 end
-local function __intConv(v, kind, opKey, digest, parent, origin)
+local function __intConv(v, evKind, kind, opKey, digest, parent, origin)
   if v == nil then
     local e = __failExpr("E8001", "cannot convert null to int", origin, "int", "null")
-    __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+    __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
     error(e, 0)
   end
   v = __num(v)
   if type(v) == "number" then
     if v ~= v then
       local e = __failExpr("E8001", "expected int, got NaN", origin, "int", "NaN")
-      __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+      __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
     if v == math.huge or v == -math.huge then
       local e = __failExpr("E8001", "expected int, got infinity", origin, "int",
         "infinity")
-      __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+      __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
     if v % 1 ~= 0 then
       local e = __failExpr("E8001", "expected int, got non-integer number", origin,
         "int", "non-integer number")
-      __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+      __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
     if v < -2147483648 or v > 2147483647 then
       local e = __failExpr("E8004", "int out of safe range", origin, "int", "number")
-      __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+      __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
       error(e, 0)
     end
     return v
   end
   local e = __failExpr("E8001", "expected int, got "..__actualOf(kind, v), origin,
     "int", __actualOf(kind, v))
-  __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+  __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
   error(e, 0)
 end
-local function __numConv(v, kind, opKey, digest, parent, origin)
+local function __numConv(v, evKind, kind, opKey, digest, parent, origin)
   if v == nil then
     local e = __failExpr("E8001", "cannot convert null to number", origin, "number",
       "null")
-    __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+    __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
     error(e, 0)
   end
   v = __num(v)
   if type(v) == "number" then return v end
   local e = __failExpr("E8001", "expected number, got "..__actualOf(kind, v), origin,
     "number", __actualOf(kind, v))
-  __ev(opKey, "FAILURE", "INTRINSIC_CALL", digest, parent, {}, nil, __errtext(e))
+  __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
   error(e, 0)
 end
 -- The intrinsic carrier's generic invoker (J2): the conversion ladder
 -- of the carrier's kind over the caller's first argument, with the
 -- invoking call's context when one is supplied (the DEAL convention
--- packs the static kind, the op key, the digest, the parent key, and
--- the origin after the value) and the absent context otherwise — total
--- and deterministic for any non-DEAL caller (the host bridge and any
--- generic unwrap). DEAL call sites run the ladder directly with the
--- invoking op's own context; the carrier's invoker never invents a
--- call site's origin, and its declared-parameter kind is the default
--- static kind (the intrinsic's declared signature is the only
--- descriptor source).
-__intrinsicInvoke = function(it, v, kind, opKey, digest, parent, origin)
+-- packs the invoking op's kind label, the static kind, the op key, the
+-- digest, the parent key, and the origin after the value) and the
+-- absent context otherwise — total and deterministic for any non-DEAL
+-- caller (the host bridge and any generic unwrap). DEAL call sites run
+-- the ladder directly with the invoking op's own context and kind
+-- (ISSUE-0679 J4); the carrier's invoker never invents a call site's
+-- origin, and its declared-parameter kind is the default static kind
+-- (the intrinsic's declared signature is the only descriptor source).
+__intrinsicInvoke = function(it, v, evKind, kind, opKey, digest, parent, origin)
+  if evKind == nil then evKind = "INTRINSIC_CALL" end
   if kind == nil then kind = (it == "INT_CONVERT") and "number" or "int" end
   if opKey == nil then opKey = "-" end
   if digest == nil then digest = "-" end
   if parent == nil then parent = "-" end
   if origin == nil then origin = "-" end
   if it == "INT_CONVERT" then
-    return __intConv(v, kind, opKey, digest, parent, origin)
+    return __intConv(v, evKind, kind, opKey, digest, parent, origin)
   end
-  return __numConv(v, kind, opKey, digest, parent, origin)
+  return __numConv(v, evKind, kind, opKey, digest, parent, origin)
 end
 local function __arrayRead(opKey, digest, parent, bKey, bDigest, bParent, desc, inner,
                            container, slotName, nullable, wantsNumber, origin)
@@ -9023,21 +9137,24 @@ local function __unfn(v)
 end
 -- The dynamic dispatch's carrier-class resolution (ISSUE-0658;
 -- dynamic-call-shape-production-and-emission Y2/Y3/Y5; ISSUE-0678 for the
--- cataloged callable's tag): the carrier's own tag selects exactly one
--- closed resolution class — never the checked descriptor, the callee
--- spelling, or an argument value. A DEAL closure or compiled export read
--- carries its function id (__fid); an adapter carries its capture mode
--- (__mode); a loaded host surface entry carries the host ABI wrapper kind
--- (__kind == "function"); the cataloged stdlib callable carries its closed
--- catalog row tag (__sid) and resolves the HOST class, whose catalog row
--- invoker the call site runs. Every other value identifies no class (nil)
--- and the dynamic call fails closed at its origin.
+-- cataloged callable's tag; ISSUE-0679 for the conversion intrinsic's): the
+-- carrier's own tag selects exactly one closed resolution class — never the
+-- checked descriptor, the callee spelling, or an argument value. A DEAL
+-- closure or compiled export read carries its function id (__fid); an adapter
+-- carries its capture mode (__mode); a loaded host surface entry carries the
+-- host ABI wrapper kind (__kind == "function"); the cataloged stdlib callable
+-- carries its closed catalog row tag (__sid) and resolves the HOST class,
+-- whose catalog row invoker the call site runs; the conversion intrinsic
+-- carries its closed kind tag (__it) and resolves the HOST class, whose
+-- conversion ladder the call site runs. Every other value identifies no class
+-- (nil) and the dynamic call fails closed at its origin.
 local function __dynClass(v)
   if type(v) ~= "table" then return nil end
   if v.__fid ~= nil then return "DEAL_BODY" end
   if v.__mode ~= nil then return "ADAPTER" end
   if v.__kind == "function" then return "HOST" end
   if v.__sid ~= nil then return "HOST" end
+  if v.__it ~= nil then return "HOST" end
   return nil
 end
 -- The declared identity (module path, export name) of one loaded host

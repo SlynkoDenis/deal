@@ -1188,4 +1188,30 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # while a load naming a cell initialized with another identity stays a
   # producing position (the foreign-load negative).
   'fg|=== Running Intrinsic Value Materialization Tests (ISSUE-0676) ===|java -ea -cp build deal.semantic.IntrinsicValueMaterializationTest'
+  # ISSUE-0679 registration: the conversion intrinsic's value call
+  # (conversion-intrinsic-function-values J3/J4 and the first-class
+  # conversion intrinsic contract; function-typed-value-materialization-
+  # and-dispatch M5's intrinsic HOST sub-class): the closed nested
+  # static-callee shape enumeration admits intrinsicFunction for the
+  # CallCallee.Static(IntrinsicFunction) arm while the shape position keeps
+  # its closed discipline (the kind resolves in the closed IntrinsicKind set
+  # and both the kind and the descriptor positions are present, with the
+  # doctored nested payloads still failing R-ENUM and no other nested shape
+  # newly admitted); the indirect call of an IntrinsicFunction registration
+  # records the host cell family — one DEAL_TO_HOST + HOST_PARAMETER cell per
+  # declared parameter (the recorded parameter cells own the argument domain)
+  # and the single HOST_TO_DEAL + HOST_SYNC_RETURN return cell — which the
+  # validator's indirect cell switch pins; the oracle, the LuaJIT artifact
+  # under real luajit, and the JVM artifact under javac --release 25 -proc:none
+  # plus java run the one conversion ladder with the invoking CALL op's own
+  # context and kind label (the pinned texts, including the E8004 range gate,
+  # at the call origin with the invoking op's kind in the FAILURE event), the
+  # dynamic arm resolves the memoized carrier's own kind tag to the HOST class
+  # and runs the same conversion, the direct INTRINSIC_CALL arm keeps its own
+  # kind label and its pinned nullable-overload texts, the corpus
+  # intrinsic-as-function-value and intrinsic-as-callback drives execute
+  # through the production artifacts with their class path and selected cell
+  # asserted, and the landed IntrinsicSeedBindingsTest nested-static-callee
+  # pin is retargeted in the same slice, never deleted.
+  'fg|=== Running Intrinsic Value Call Tests (ISSUE-0679) ===|java -ea -cp build deal.test.IntrinsicValueCallTest'
 )

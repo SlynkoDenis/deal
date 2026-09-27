@@ -469,8 +469,11 @@ public class CanonicalFailureTextParityTest {
         expectJvmInt32Failure("unary(INT32_NEG)", () ->
             JvmRuntime.unary("INT32_NEG", Long.valueOf(Integer.MIN_VALUE),
                 "op", "digest", "parent", originAtom()));
+        // ISSUE-0679 retargeted the ladder helper's signature: the invoking
+        // op's own kind label is the first context parameter (the direct
+        // INTRINSIC_CALL arm passes its own kind).
         expectJvmInt32Failure("intConv out of range", () ->
-            JvmRuntime.intConv(Double.valueOf(2147483648.0), "number",
+            JvmRuntime.intConv(Double.valueOf(2147483648.0), "INTRINSIC_CALL", "number",
                 "op", "digest", "parent", originAtom()));
         expectJvmInt32Failure("absInt(-2147483648)", () ->
             JvmRuntime.stdlib("STDLIB_CALL", "MATH_ABS_INT", "op", "digest", "parent",

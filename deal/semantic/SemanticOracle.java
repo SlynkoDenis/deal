@@ -3873,12 +3873,55 @@ public final class SemanticOracle {
                             hostValue.descriptor(), checkedArgs);
                     case FunctionExecutionBinding.ExternalFunction external ->
                         invokeExternalCall(op, payload, external, checkedArgs);
-                    case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                        throw intrinsicExecutionDefect(intrinsic);
+                    case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                        // The conversion intrinsic's value call (ISSUE-0679;
+                        // design source
+                        // {@code conversion-intrinsic-function-values} J3/J4):
+                        // the one conversion ladder runs with the invoking CALL
+                        // op's own origin and kind, over the value the recorded
+                        // host parameter cells admitted, and the recorded
+                        // HOST_TO_DEAL + HOST_SYNC_RETURN cell runs at the call
+                        // origin (the intrinsic's class is HOST,
+                        // {@link DynamicReturnBoundaryProtocol#kindOf}).
+                        Value converted = invokeIntrinsicValue(op, intrinsic,
+                            checkedArgs);
+                        yield runBoundaryChild(opOf(payload.returnBoundaryOpId()),
+                            converted, BoundaryContext.none());
+                    }
                     case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                         throw dynamicFunctionValueDefect(dynamic);
                 };
             return publish(op, returned);
+        }
+
+        /**
+         * The one conversion ladder at an intrinsic value call (ISSUE-0679;
+         * design source {@code conversion-intrinsic-function-values} J4): the
+         * closed kind's conversion runs through the landed
+         * {@link #convertInt}/{@link #convertNumber} arms — the same algorithm
+         * authority the direct {@code INTRINSIC_CALL} arm runs — with the
+         * invoking op's own origin, so the pinned texts and the FAILURE event
+         * carry the invoking op (the direct arm keeps {@code INTRINSIC_CALL}).
+         * The argument domain is the recorded parameter cells': the value
+         * handed over is the cell-admitted one, so a null or wrong-kind
+         * argument is a parameter-cell projection and never reaches the
+         * ladder.
+         */
+        private Value invokeIntrinsicValue(SemanticOp op,
+                FunctionExecutionBinding.IntrinsicFunction intrinsic,
+                List<Value> checkedArgs) {
+            if (checkedArgs.size() != intrinsic.descriptor().paramTypes().size()) {
+                throw new IllegalStateException("the intrinsic value call " + op.opId()
+                    + " carries " + checkedArgs.size() + " checked arguments for the '"
+                    + intrinsic.kind() + "' intrinsic's "
+                    + intrinsic.descriptor().paramTypes().size() + " declared "
+                    + "parameter(s) (producer defect)");
+            }
+            Value argument = checkedArgs.get(0);
+            return switch (intrinsic.kind()) {
+                case INT_CONVERT -> convertInt(op, argument);
+                case NUMBER_CONVERT -> convertNumber(op, argument);
+            };
         }
 
         /** The parameter boundaries of one call/async/callback op in one-based order. */
@@ -4136,7 +4179,10 @@ public final class SemanticOracle {
                     throw new IllegalStateException("an adapter binding resolves its "
                         + "source before classification (producer defect)");
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicExecutionDefect(intrinsic);
+                    // The intrinsic's HOST class resolves the conversion ladder
+                    // with the invoking op's own origin and kind (ISSUE-0679;
+                    // the same algorithm the direct INTRINSIC_CALL arm runs).
+                    invokeIntrinsicValue(op, intrinsic, args);
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicFunctionValueDefect(dynamic);
             };
@@ -4514,11 +4560,13 @@ public final class SemanticOracle {
 
         /**
          * The fail-closed producer defect of an intrinsic carrier's
-         * execution: this slice registers the closed
-         * {@code IntrinsicFunction} binding only — the carrier's
-         * materialization and its call execution are the function-typed
-         * -value child's, so no produced unit may resolve one at a call
-         * site.
+         * execution at a site with no realization yet: the indirect call of
+         * an {@code IntrinsicFunction} registration runs the conversion ladder
+         * at the call origin (ISSUE-0679 — the static/indirect arm and the
+         * dynamic dispatch's HOST class), while the adapter-over-intrinsic
+         * source invocation, the callback arm and the async forms stay
+         * outside the realized slice (the conversion intrinsics are
+         * synchronous values; such a site is a producer defect).
          */
         private static IllegalStateException intrinsicExecutionDefect(
                 FunctionExecutionBinding.IntrinsicFunction intrinsic) {
@@ -5269,43 +5317,57 @@ public final class SemanticOracle {
             return publish(op, result);
         }
 
-        /** INT_CONVERSION order: null → NaN → infinity → fractional → E8004. */
+        /**
+         * The INT_CONVERSION ladder: null → NaN → infinity → fractional → the
+         * E8004 range gate → the wrong-kind {@code TYPE_DESCRIPTOR} projection.
+         * Each arm throws through its own pinned row template (ISSUE-0679
+         * retargeted the arm selection: the row carries the four ordered
+         * INT_CONVERSION texts, so the per-case template index is the
+         * arm's), so the oracle projects the same texts the shared
+         * {@code SharedValueSemantics} rows and both artifacts project — the
+         * one algorithm authority with the invoking op's own context.
+         */
         private Value convertInt(SemanticOp op, Value input) {
             if (input instanceof Value.NullValue) {
-                throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, "int",
-                    "null", null);
+                throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, 0, "int",
+                    "null");
             }
             if (input instanceof Value.NumValue num) {
                 double value = num.value();
                 if (Double.isNaN(value)) {
-                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, "int",
-                        "NaN", null);
+                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, 1, "int",
+                        "NaN");
                 }
                 if (Double.isInfinite(value)) {
-                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, "int",
-                        "infinity", null);
+                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, 2, "int",
+                        "infinity");
                 }
                 if (value != Math.rint(value)) {
-                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, "int",
-                        "non-integer number", null);
+                    throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, 3, "int",
+                        "non-integer number");
                 }
                 if (value < -2147483648d || value > 2147483647d) {
-                    throw conversionFailure(op, FailurePolicyId.INT32_RESULT, "int",
-                        null, null);
+                    throw conversionFailure(op, FailurePolicyId.INT32_RESULT, 0, "int",
+                        "number");
                 }
                 return new Value.IntValue((long) value);
             }
             if (input instanceof Value.IntValue intValue) {
                 return intValue;
             }
-            throw conversionFailure(op, FailurePolicyId.INT_CONVERSION, "int",
-                canonicalKind(input), null);
+            throw conversionFailure(op, FailurePolicyId.TYPE_DESCRIPTOR, 0, "int",
+                canonicalKind(input));
         }
 
+        /**
+         * The NUMBER_CONVERSION ladder: null first, then the wrong-kind
+         * {@code TYPE_DESCRIPTOR} projection; an int converts to its exact
+         * double and the conversion itself never fails.
+         */
         private Value convertNumber(SemanticOp op, Value input) {
             if (input instanceof Value.NullValue) {
-                throw conversionFailure(op, FailurePolicyId.NUMBER_CONVERSION, "number",
-                    "null", null);
+                throw conversionFailure(op, FailurePolicyId.NUMBER_CONVERSION, 0,
+                    "number", "null");
             }
             if (input instanceof Value.IntValue intValue) {
                 return new Value.NumValue((double) intValue.value());
@@ -5313,8 +5375,8 @@ public final class SemanticOracle {
             if (input instanceof Value.NumValue num) {
                 return num;
             }
-            throw conversionFailure(op, FailurePolicyId.NUMBER_CONVERSION, "number",
-                canonicalKind(input), null);
+            throw conversionFailure(op, FailurePolicyId.TYPE_DESCRIPTOR, 0, "number",
+                canonicalKind(input));
         }
 
         /** The canonical actual-kind token of a runtime value. */
@@ -5340,17 +5402,20 @@ public final class SemanticOracle {
             };
         }
 
+        /**
+         * One conversion-ladder failure from its pinned row template: the
+         * template index selects the case's own text (ISSUE-0679; the
+         * INT_CONVERSION row carries the ordered null/NaN/infinity/fractional
+         * texts, every other row its single template), and the origin is the
+         * invoking op's.
+         */
         private DealFailure conversionFailure(SemanticOp op, FailurePolicyId policy,
-                                              String expected, String actual,
-                                              String messageOverride) {
-            if (messageOverride == null) {
-                BoundaryFailure failure = BoundaryFailure.fromRow(
-                    FailureContractRegistry.row(policy), 0, expected, actual,
-                    new LinkedHashMap<>(), null);
-                return DealFailure.of(failure, op.origin(), List.copyOf(frames));
-            }
-            return new DealFailure("E8001", messageOverride, op.origin(), expected, actual,
-                null, List.copyOf(frames));
+                                              int templateIndex, String expected,
+                                              String actual) {
+            BoundaryFailure failure = BoundaryFailure.fromRow(
+                FailureContractRegistry.row(policy), templateIndex, expected, actual,
+                new LinkedHashMap<>(), null);
+            return DealFailure.of(failure, op.origin(), List.copyOf(frames));
         }
 
         private String executeStdlib(SemanticOp op) {

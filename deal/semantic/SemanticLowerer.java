@@ -10396,18 +10396,20 @@ public final class SemanticLowerer {
         }
 
         /**
-         * The fail-closed producer defect of an invocation that resolves the
-         * not-yet-realized intrinsic function carrier: this slice registers
-         * the closed {@code IntrinsicFunction} binding only — the carrier's
-         * materialization and its call execution are the function-typed-value
-         * child's.
+         * The fail-closed producer defect of an invocation site that has no
+         * realization for the intrinsic function carrier yet: the indirect
+         * call of an {@code IntrinsicFunction} registration is realized
+         * (ISSUE-0679 — the host cell family plus the conversion ladder at the
+         * call site), while the adapter-over-intrinsic source invocation and
+         * the async forms stay outside this slice (the conversion intrinsics
+         * are synchronous values; such a site is a producer defect).
          */
         private static ConstructUnlowered intrinsicCarrierDefect(
                 FunctionExecutionBinding.IntrinsicFunction intrinsic, String site) {
             return new ConstructUnlowered("the '" + intrinsic.kind() + "' intrinsic "
                 + "function value resolved by " + site + " has no call execution in this "
-                + "slice (the intrinsic carrier is the function-typed-value child's — "
-                + "producer defect)");
+                + "slice (the adapter-over-intrinsic invocation and the async forms are "
+                + "outside the realized slice — producer defect)");
         }
 
         /**
@@ -10576,8 +10578,17 @@ public final class SemanticLowerer {
                     }
                 }
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
-                        + "'");
+                    // The conversion intrinsic's value call (ISSUE-0679;
+                    // design source
+                    // {@code conversion-intrinsic-function-values} J3): the
+                    // seeded identity's registration is a boundary-shaped
+                    // callable, so its indirect call records exactly the host
+                    // cell family — one DEAL_TO_HOST + HOST_PARAMETER cell per
+                    // declared parameter (the intrinsic's declared parameter
+                    // descriptor is the argument domain before any conversion
+                    // runs).
+                    hostParameterBoundaries(intrinsic.descriptor(), args, call,
+                        callOpId, parameterBoundaryOps, parameterBoundaryIds);
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicCarrierDefect(dynamic, "the call of '" + calleeName + "'");
             }
@@ -10657,8 +10668,11 @@ public final class SemanticLowerer {
                     }
                 }
                 case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicCarrierDefect(intrinsic, "the call of '" + calleeName
-                        + "'");
+                    // The single HOST_TO_DEAL + HOST_SYNC_RETURN return cell,
+                    // run by the call op (the intrinsic's class is HOST,
+                    // {@link DynamicReturnBoundaryProtocol#kindOf}).
+                    returnBoundaryOpId = emitHostReturnBoundary(intrinsic.descriptor(),
+                        result, call.span(), callOpId);
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicCarrierDefect(dynamic, "the call of '" + calleeName + "'");
             }

@@ -3171,6 +3171,16 @@ public final class JvmSemanticEmitter {
                 emitHostValueCall(op, payload, hostValue, indent);
                 return;
             }
+            // The conversion intrinsic's value call (ISSUE-0679; design source
+            // {@code conversion-intrinsic-function-values} J3/J4): the seeded
+            // identity's registration is a boundary-shaped callable, so the
+            // indirect arm runs the recorded host cell family and the one
+            // conversion ladder with the invoking CALL op's own context and
+            // kind, exactly the landed statically classified rows' discipline.
+            if (binding instanceof FunctionExecutionBinding.IntrinsicFunction intrinsic) {
+                emitIntrinsicValueCall(op, payload, intrinsic, indent);
+                return;
+            }
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
                 SemanticOp boundary = opsById.get(boundaryId);
                 KindPayload.BoundaryPayload boundaryPayload =
@@ -3877,15 +3887,20 @@ public final class JvmSemanticEmitter {
 
         /**
          * The dynamic dispatch's HOST row: the carrier's own HOST sub-class
-         * decides the path (never the checked descriptor). The cataloged stdlib
-         * callable ({@code StdlibFunctionValue}) runs the closed catalog row's
-         * one invoker — {@code JvmRuntime.invokeStdlibCallable} with the
+         * decides the path (never the checked descriptor). The conversion
+         * intrinsic ({@code JvmRuntime.Intrinsic}) runs the closed kind's
+         * conversion ladder with the invoking CALL op's own context and kind
+         * label — one algorithm authority with the direct
+         * {@code INTRINSIC_CALL} arm (ISSUE-0679; design source
+         * {@code conversion-intrinsic-function-values} J3/J4). The cataloged
+         * stdlib callable ({@code StdlibFunctionValue}) runs the closed catalog
+         * row's one invoker — {@code JvmRuntime.invokeStdlibCallable} with the
          * invoking CALL op's context (the row identity plus the op key, contract
          * digest, parent key, origin, and the invoking op's own kind label for
          * its FAILURE event) — one algorithm authority with the direct
          * {@code STDLIB_CALL} arm and the read's callable. A loaded surface entry
          * bridges the emitted per-export wrapper ({@code carrier.fn}) with the
-         * completed production values. Both sub-classes then run the recorded
+         * completed production values. Every sub-class then runs the recorded
          * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell at the call origin
          * (the oracle's {@code invokeResolvedHostRequest} followed by
          * {@code runBoundaryChild}).
@@ -3903,8 +3918,53 @@ public final class JvmSemanticEmitter {
             }
             String hostValue = "__dh" + id;
             out.append(indent(indent)).append("Object ").append(hostValue).append(";\n");
-            out.append(indent(indent)).append("if (").append(carrier)
-                .append(" instanceof JvmRuntime.StdlibFunctionValue) {\n");
+            // The conversion intrinsic's HOST sub-class (ISSUE-0679; design
+            // source {@code conversion-intrinsic-function-values} J3/J4): the
+            // carrier's own kind tag selects the one conversion ladder — never
+            // a spelling, a checked descriptor, or an argument value — with
+            // the invoking CALL op's own context and kind label (the pinned
+            // conversion texts and the FAILURE event carry the invoking op),
+            // over the value the recorded class-independent parameter cells
+            // admitted. The intrinsic's declared arity is one, so a site with
+            // exactly one recorded parameter cell carries the ladder; the tag
+            // still fails closed at any other arity rather than guessing a
+            // conversion.
+            if (payload.parameterBoundaryOpIds().size() == 1) {
+                String declaredKind = javaString(staticKind(
+                    ((KindPayload.BoundaryPayload) opsById.get(
+                        payload.parameterBoundaryOpIds().get(0)).payload()).descriptor()));
+                out.append(indent(indent)).append("if (").append(carrier)
+                    .append(" instanceof JvmRuntime.Intrinsic __iv").append(id)
+                    .append(") {\n");
+                out.append(indent(indent + 1)).append("if (\"INT_CONVERT\".equals(__iv")
+                    .append(id).append(".kind)) {\n");
+                out.append(indent(indent + 2)).append(hostValue)
+                    .append(" = JvmRuntime.intConv(").append(args).append(", ")
+                    .append(javaString(op.kind().name())).append(", ")
+                    .append(declaredKind)
+                    .append(", ").append(javaString(opKey(op.opId()))).append(", ")
+                    .append(javaString(op.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(javaString(originOf(op))).append(");\n");
+                out.append(indent(indent + 1)).append("} else {\n");
+                out.append(indent(indent + 2)).append(hostValue)
+                    .append(" = JvmRuntime.numConv(").append(args).append(", ")
+                    .append(javaString(op.kind().name())).append(", ")
+                    .append(declaredKind)
+                    .append(", ").append(javaString(opKey(op.opId()))).append(", ")
+                    .append(javaString(op.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(javaString(originOf(op))).append(");\n");
+                out.append(indent(indent + 1)).append("}\n");
+                out.append(indent(indent)).append("} else if (").append(carrier)
+                    .append(" instanceof JvmRuntime.StdlibFunctionValue) {\n");
+            } else {
+                out.append(indent(indent)).append("if (").append(carrier)
+                    .append(" instanceof JvmRuntime.Intrinsic) {\n");
+                emitDynamicCarrierFailure(op, carrier, indent + 1);
+                out.append(indent(indent)).append("} else if (").append(carrier)
+                    .append(" instanceof JvmRuntime.StdlibFunctionValue) {\n");
+            }
             out.append(indent(indent + 1)).append(hostValue)
                 .append(" = JvmRuntime.invokeStdlibCallable((JvmRuntime."
                     + "StdlibFunctionValue) ")
@@ -4360,6 +4420,116 @@ public final class JvmSemanticEmitter {
                     indent);
                 String admitted = "__sr_" + op.opId().id();
                 out.append(indent(indent)).append("Object ").append(admitted).append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent + 1)).append(admitted).append(" = __hostCheck(")
+                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                    .append(", ").append(result).append(", false, ")
+                    .append(originArgs(op)).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                out.append(indent(indent + 1)).append("throw __be;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(returnBoundary, admitted,
+                    boundaryPayload.descriptor(), indent);
+                result = admitted;
+            }
+            out.append(indent(indent)).append(slot((ValueId) op.result())).append(" = ")
+                .append(result).append(";\n");
+            emitResultSuccess(op, slot((ValueId) op.result()),
+                (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The conversion intrinsic's value call (ISSUE-0679; design source
+         * {@code conversion-intrinsic-function-values} J3/J4): the seeded
+         * identity's registration is a boundary-shaped callable, so the
+         * indirect arm runs exactly the recorded host cell family — one
+         * {@code DEAL_TO_HOST} + {@code HOST_PARAMETER} cell per declared
+         * parameter through the emitted host-check seam (the argument domain
+         * the cells own; a null or wrong-kind argument is a parameter-cell
+         * projection) — then the one conversion ladder
+         * ({@code JvmRuntime.intConv}/{@code numConv}) with the invoking CALL
+         * op's own context and kind label, then the recorded
+         * {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell at the call
+         * origin. One algorithm authority with the direct
+         * {@code INTRINSIC_CALL} arm, whose kind label stays its own.
+         */
+        private void emitIntrinsicValueCall(SemanticOp op, KindPayload.CallPayload payload,
+                FunctionExecutionBinding.IntrinsicFunction intrinsic, int indent) {
+            List<String> checked = new ArrayList<>();
+            int index = 1;
+            for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
+                SemanticOp boundary = opsById.get(boundaryId);
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) boundary.payload();
+                RuntimeDescriptor descriptor = boundaryPayload.descriptor();
+                if (descriptor instanceof RuntimeDescriptor.Nullable
+                        || descriptor instanceof RuntimeDescriptor.Class
+                        || descriptor instanceof RuntimeDescriptor.Func) {
+                    throw new IllegalStateException("the conversion intrinsic '"
+                        + intrinsic.kind() + "' arrives at " + op.opId()
+                        + " with the parameter position "
+                        + descriptor.canonicalSpecText() + ", whose host-facing "
+                        + "projection is not the identity — a producer defect");
+                }
+                String input = slot(boundaryPayload.input());
+                emitBoundaryStart(boundary, input, descriptor, indent);
+                String name = "__ip_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(name).append(";\n");
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent + 1)).append(name)
+                    .append(" = __hostParamCheck(").append(index).append(", ")
+                    .append(javaString(descriptorText(descriptor))).append(", ")
+                    .append(input).append(", ").append(originArgs(op)).append(");\n");
+                out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__be)", indent + 1);
+                out.append(indent(indent + 1)).append("throw __be;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, name, descriptor, indent);
+                checked.add(name);
+                index++;
+            }
+            if (checked.size() != intrinsic.descriptor().paramTypes().size()) {
+                throw new IllegalStateException("the conversion intrinsic call "
+                    + op.opId() + " records " + checked.size() + " parameter cell(s) for "
+                    + "the '" + intrinsic.kind() + "' intrinsic's "
+                    + intrinsic.descriptor().paramTypes().size() + " declared "
+                    + "parameter(s) (a producer defect)");
+            }
+            // The one conversion ladder at the call site: the invoking CALL op's
+            // context, origin, and kind label (the pinned conversion texts and
+            // the FAILURE event carry the invoking op).
+            String result = "__ic_" + op.opId().id();
+            String helper = intrinsic.kind() == IntrinsicKind.INT_CONVERT
+                ? "JvmRuntime.intConv" : "JvmRuntime.numConv";
+            out.append(indent(indent)).append("Object ").append(result).append(" = ")
+                .append(helper).append("(")
+                .append(String.join(", ", checked)).append(", ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(staticKind(
+                    intrinsic.descriptor().paramTypes().get(0)))).append(", ")
+                .append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(javaString(originOf(op))).append(");\n");
+            // The recorded HOST_TO_DEAL + HOST_SYNC_RETURN cell, run by the call
+            // op exactly once per invocation.
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
+                : opsById.get(payload.returnBoundaryOpId());
+            if (returnBoundary != null) {
+                KindPayload.BoundaryPayload boundaryPayload =
+                    (KindPayload.BoundaryPayload) returnBoundary.payload();
+                emitBoundaryStart(returnBoundary, result, boundaryPayload.descriptor(),
+                    indent);
+                String admitted = "__iac_" + op.opId().id();
+                out.append(indent(indent)).append("Object ").append(admitted)
+                    .append(";\n");
                 out.append(indent(indent)).append("try {\n");
                 out.append(indent(indent + 1)).append(admitted).append(" = __hostCheck(")
                     .append(javaString(descriptorText(boundaryPayload.descriptor())))
@@ -5343,8 +5513,12 @@ public final class JvmSemanticEmitter {
             String kind = staticKind(op.operandTypes().get(0));
             String origin = originOf(op);
             switch (payload.kind()) {
+                // The direct arm keeps its own kind as the invoking op's
+                // label (ISSUE-0679); an intrinsic value call passes the
+                // invoking CALL op's kind through the same ladder.
                 case INT_CONVERT -> out.append(indent(indent)).append(target)
                     .append(" = JvmRuntime.intConv(").append(input).append(", ")
+                    .append(javaString(op.kind().name())).append(", ")
                     .append(javaString(kind)).append(", ")
                     .append(javaString(opKey(op.opId()))).append(", ")
                     .append(javaString(op.contract().canonicalDigest())).append(", ")
@@ -5352,6 +5526,7 @@ public final class JvmSemanticEmitter {
                     .append(javaString(origin)).append(");\n");
                 case NUMBER_CONVERT -> out.append(indent(indent)).append(target)
                     .append(" = JvmRuntime.numConv(").append(input).append(", ")
+                    .append(javaString(op.kind().name())).append(", ")
                     .append(javaString(kind)).append(", ")
                     .append(javaString(opKey(op.opId()))).append(", ")
                     .append(javaString(op.contract().canonicalDigest())).append(", ")

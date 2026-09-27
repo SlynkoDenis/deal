@@ -98,9 +98,14 @@ import java.util.Set;
  * {@code IntrinsicFunction} registration and must not be a
  * {@code HOST_TO_DEAL} crossing input; the {@code (kind, descriptor)} pair
  * must equal the kind's pinned declared signature. R-FUNCTION-BINDING is
- * unaffected (the seeded key is not an op result), and the nested
- * static-callee shape enumeration stays unchanged (an intrinsic is never a
- * {@code CALL} callee shape).</p>
+ * unaffected (the seeded key is not an op result). The nested static-callee
+ * shape enumeration admits the {@code intrinsicFunction} shape since
+ * ISSUE-0679 — the design's {@code CallCallee.Static(IntrinsicFunction)}
+ * payload is the indirect intrinsic call's arm — while the shape position
+ * keeps its closed discipline (the kind resolves in the closed
+ * {@code IntrinsicKind} set and both the kind and the descriptor positions
+ * are present); a doctored nested payload violating either still fails
+ * R-ENUM.</p>
  *
  * <p><b>Anti-hollow.</b> Every assertion reads the produced unit's typed
  * {@code functionBindings} and the {@link SemanticIrDumper} dump; the shape
@@ -637,10 +642,15 @@ public class IntrinsicSeedBindingsTest {
             "the same shape with one seed init and the pinned pair is admitted");
     }
 
-    /** The open IntrinsicKind position and the unchanged nested callee enumeration. */
+    /**
+     * The open IntrinsicKind position and the admitted nested callee shape
+     * (ISSUE-0679 retargeted the landed pin: the nested static-callee shape
+     * enumeration admits {@code intrinsicFunction}, and this incomplete fixture
+     * now fails the later closed condition instead).
+     */
     private static void testOpenPositionNegatives() {
-        System.out.println("-- R-ENUM: the open intrinsic-kind position and the unchanged "
-            + "nested callee shape --");
+        System.out.println("-- R-ENUM: the open intrinsic-kind position and the admitted "
+            + "nested intrinsic callee shape --");
 
         SemanticLowerer.ValidationCoreResult result = validUnit(
             "function main(): null { let a: int = 1; }", "the open-position slice");
@@ -657,8 +667,14 @@ public class IntrinsicSeedBindingsTest {
         assertRule(failure, "R-ENUM", "FOUNDATION_VALUES",
             "an open IntrinsicKind value in a closed position");
 
-        // The nested static-callee shape enumeration is unchanged: an
-        // IntrinsicFunction is never a CALL callee shape.
+        // The nested static-callee shape enumeration admits the intrinsic
+        // function value's shape (ISSUE-0679): the design's
+        // CallCallee.Static(IntrinsicFunction) payload is the indirect
+        // intrinsic call's arm, so R-ENUM no longer rejects the callee shape.
+        // This incomplete fixture carries no recorded host cell family and no
+        // registration for its function-typed result, so it fails a later
+        // closed condition instead of the shape gate (the completed unit's
+        // admission is the value-call battery's).
         FunctionExecutionBinding.IntrinsicFunction intrinsic =
             new FunctionExecutionBinding.IntrinsicFunction(IntrinsicKind.INT_CONVERT,
                 IntrinsicKind.INT_CONVERT.declaredSignature());
@@ -670,8 +686,44 @@ public class IntrinsicSeedBindingsTest {
         LoweredModuleUnit calleeUnit = unit(Map.of(), List.of(call));
         Optional<CompilerDiagnostic> calleeFailure =
             SemanticIrValidator.validate(calleeUnit, comparisonFacts());
-        assertRule(calleeFailure, "R-ENUM", "FOUNDATION_VALUES",
-            "an intrinsic binding in a static CALLEE position");
+        check(calleeFailure.isPresent(), "the incomplete intrinsic callee fixture fails "
+            + "the closed gate");
+        check(calleeFailure.map(d -> !d.message().contains("validatorRule R-ENUM,"))
+                .orElse(true),
+            "the intrinsic binding in a static CALLEE position is admitted by the nested "
+                + "shape enumeration (no R-ENUM on the callee shape); got "
+                + calleeFailure.map(CompilerDiagnostic::message).orElse("admission"));
+        assertRule(calleeFailure, "R-BOUNDARY-TRIPLE", "FOUNDATION_VALUES",
+            "the incomplete fixture (the intrinsic's registration without its recorded "
+                + "host cell family)");
+
+        // The admitted shape keeps the shape position's closed discipline: the
+        // nested kind resolves in the closed IntrinsicKind set and both the
+        // kind and the descriptor positions are present.
+        String calleeText = SemanticIrValidator.toUnitText(calleeUnit);
+        String nestedShape = "\"binding\":{\"descriptor\":\""
+            + IntrinsicKind.INT_CONVERT.declaredSignature().canonicalSpecText()
+            + "\",\"intrinsicKind\":\"INT_CONVERT\",\"type\":\"intrinsicFunction\"}"
+            + ",\"type\":\"static\"";
+        check(calleeText.contains(nestedShape),
+            "the constructed fixture's text carries the nested intrinsic callee shape "
+                + "position");
+        if (calleeText.contains(nestedShape)) {
+            assertRule(SemanticIrValidator.validateText(calleeText.replace(nestedShape,
+                    nestedShape.replace("\"INT_CONVERT\"", "\"INT_OPEN\"")),
+                    comparisonFacts()), "R-ENUM", "FOUNDATION_VALUES",
+                "an open nested intrinsic callee kind");
+            assertRule(SemanticIrValidator.validateText(calleeText.replace(nestedShape,
+                    nestedShape.replace(",\"intrinsicKind\":\"INT_CONVERT\"", "")),
+                    comparisonFacts()), "R-ENUM", "FOUNDATION_VALUES",
+                "a nested intrinsic callee without its kind position");
+            assertRule(SemanticIrValidator.validateText(calleeText.replace(nestedShape,
+                    nestedShape.replace("\"descriptor\":\""
+                        + IntrinsicKind.INT_CONVERT.declaredSignature().canonicalSpecText()
+                        + "\",", "")),
+                    comparisonFacts()), "R-ENUM", "FOUNDATION_VALUES",
+                "a nested intrinsic callee without its descriptor position");
+        }
     }
 
     // =========================================================================
