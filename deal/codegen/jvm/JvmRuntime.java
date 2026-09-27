@@ -870,7 +870,19 @@ public final class JvmRuntime {
      * cause chain (E8003), and the function-signature projection (E8010).
      */
     public static Object bcheck(String desc, String staticKind, Object v) {
-        return bcheck(desc, staticKind, v, false);
+        return bcheck(desc, staticKind, v, false, null);
+    }
+
+    /**
+     * The boundary check of a descriptor carrying a function position: the
+     * trailing argument is the descriptor's canonical spec text, so the
+     * function row projects the pinned canonical signature texts
+     * ({@code function signature mismatch: expected (int)->int, got
+     * (int)->string}) instead of the DEAL carrier's internal spelling.
+     */
+    public static Object bcheck(String desc, String staticKind, Object v,
+                                String canon) {
+        return bcheck(desc, staticKind, v, false, canon);
     }
 
     /**
@@ -881,7 +893,18 @@ public final class JvmRuntime {
      * cell's actual kind ({@link #completionActualOf}).
      */
     public static Object bcheckCompletion(String desc, String staticKind, Object v) {
-        return bcheck(desc, staticKind, v, true);
+        return bcheck(desc, staticKind, v, true, null);
+    }
+
+    /**
+     * The completion cell's check of a descriptor carrying a function
+     * position (an awaited function-typed completion): the canonical
+     * signature projection is the same as {@link #bcheck(String, String,
+     * Object, String)} 's.
+     */
+    public static Object bcheckCompletion(String desc, String staticKind, Object v,
+                                          String canon) {
+        return bcheck(desc, staticKind, v, true, canon);
     }
 
     /**
@@ -896,6 +919,24 @@ public final class JvmRuntime {
 
     private static Object bcheck(String desc, String staticKind, Object v,
             boolean completion) {
+        return bcheck(desc, staticKind, v, completion, null);
+    }
+
+    /**
+     * The inner canonical spec text of one container position (the array's
+     * element or the nullable's inner descriptor), or {@code null} when the
+     * boundary carries no canonical text at all.
+     */
+    private static String innerCanon(String canon, String opener, String closer) {
+        if (canon == null || !canon.startsWith(opener) || !canon.endsWith(closer)
+                || canon.length() < opener.length() + closer.length()) {
+            return null;
+        }
+        return canon.substring(opener.length(), canon.length() - closer.length());
+    }
+
+    private static Object bcheck(String desc, String staticKind, Object v,
+            boolean completion, String canon) {
         String actual = completion ? completionActualOf(staticKind, v)
             : actualOf(staticKind, v);
         if ("null".equals(desc)) {
@@ -988,7 +1029,8 @@ public final class JvmRuntime {
                         elem = MISSING;
                     }
                     try {
-                        bcheck(inner, elem == MISSING ? "missing" : inner, elem);
+                        bcheck(inner, elem == MISSING ? "missing" : inner, elem,
+                            innerCanon(canon, "[", "]"));
                     } catch (DealError leaf) {
                         throw fail("E8003", "array element " + (i + 1)
                             + " type mismatch", "-", inner,
@@ -1005,16 +1047,22 @@ public final class JvmRuntime {
                 return null;
             }
             return bcheck(desc.substring(9, desc.length() - 1), staticKind, v,
-                completion);
+                completion, innerCanon(canon, "?", ""));
         }
         if (desc.startsWith("function(")) {
             if (v instanceof FunctionValue function) {
-                String carried = function.signature == null ? "" : function.signature;
-                if (carried.equals(desc)) {
+                String wanted = canon != null ? canon : desc;
+                String carried = function.spec != null ? function.spec
+                    : (function.signature == null ? "" : function.signature);
+                boolean matches = canon != null && function.spec != null
+                    ? function.spec.equals(canon)
+                    : (function.signature == null ? "" : function.signature)
+                        .equals(desc);
+                if (matches) {
                     return v;
                 }
-                throw fail("E8010", "function signature mismatch: expected " + desc
-                    + ", got " + carried, "-", desc, carried);
+                throw fail("E8010", "function signature mismatch: expected " + wanted
+                    + ", got " + carried, "-", wanted, carried);
             }
             throw fail("E8001", kindMismatch("function", actual, completion), "-",
                 "function", actual);

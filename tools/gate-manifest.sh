@@ -1303,4 +1303,23 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # FUNCTION_PARAMETER cell and zero return boundaries) — with both emitters
   # running the conversion inside the task.
   'fg|=== Running Adapter-over-Intrinsic Async Lowering Tests (ISSUE-0680) ===|java -ea -cp build deal.semantic.AdapterOverIntrinsicLoweringTest'
+  # ISSUE-0683 (the named fixture and origin battery): the corpus pins of
+  # the six named non-bytes fixtures are asserted verbatim (the two failure
+  # rows with their declared-annotation spans — dynamic-nonfunction-to-
+  # function-e8001 E8001 at line 8 column 10 and canonical-sig-mismatch-e8010
+  # E8010 with the two canonical signature texts at line 12 column 10 — and
+  # the four runtime-ok outcomes), and each fixture's text compiles through
+  # the real production entry, lowers with zero diagnostics, passes the closed
+  # schema and bindings gates, and executes on the oracle, the LuaJIT
+  # artifact under real luajit, and the JVM artifact under javac --release 25
+  # -proc:none plus java: the free declaration boundary carries the declared
+  # annotation's span and exactly one FAILURE terminal per consumer (the
+  # three-consumer terminal comparison includes the origin), the returned-
+  # closure fixture dispatches on its runtime-resolved cross-module carrier
+  # and runs its recorded call-owned cell exactly once, and the stdlib
+  # function-value program of test/JsBackendTest.java is reproduced with its
+  # conversion results and its console effect. A sidecar's legacy message tail
+  # or actual-kind token stays the lane cutover's (ISSUE-0628); the shared
+  # function row projects the pinned canonical signature texts.
+  'fg|=== Running Named Fixture and Origin Battery Tests (ISSUE-0683) ===|java -ea -cp build deal.test.NamedFixtureAndOriginBatteryTest'
 )
