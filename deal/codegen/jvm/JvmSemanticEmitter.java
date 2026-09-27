@@ -4262,11 +4262,21 @@ public final class JvmSemanticEmitter {
                 .append(bcheckArgs(boundaryPayload.descriptor(), hostValue))
                 .append(";\n");
             out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+            // The recorded cell's own origin replaces the check engine's
+            // neutral one, exactly the Lua arm's `__chkB.o = <cell origin>`:
+            // the pinned failure framing of a cataloged callee names the
+            // call expression (K2/K15), and the oracle's recorded-cell run
+            // carries the identical origin.
+            out.append(indent(indent + 1))
+                .append("JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                    + "__be.code, __be.msg, ")
+                .append(javaString(originOf(returnBoundary)))
+                .append(", __be.expected, __be.actual, __be.frames, null);\n");
             emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
-                "JvmRuntime.errtext(__be)", indent + 1);
+                "JvmRuntime.errtext(__bre)", indent + 1);
             emitFailureEvent(op.opId(), op.kind().name(), op,
-                "JvmRuntime.errtext(__be)", indent + 1);
-            out.append(indent(indent + 1)).append("throw __be;\n");
+                "JvmRuntime.errtext(__bre)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __bre;\n");
             out.append(indent(indent)).append("}\n");
             emitBoundarySuccess(returnBoundary, checked, boundaryPayload.descriptor(),
                 indent);
@@ -4719,16 +4729,25 @@ public final class JvmSemanticEmitter {
                 String admitted = "__sr_" + op.opId().id();
                 out.append(indent(indent)).append("Object ").append(admitted).append(";\n");
                 out.append(indent(indent)).append("try {\n");
-                out.append(indent(indent + 1)).append(admitted).append(" = __hostCheck(")
-                    .append(javaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ").append(result).append(", false, ")
-                    .append(originArgs(op)).append(");\n");
+                out.append(indent(indent + 1)).append(admitted).append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(), result))
+                    .append(";\n");
                 out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+                // The cataloged result's terminal is the descriptor-kind
+                // projection of the direct STDLIB_RETURN boundary (the int
+                // ladder's pinned E8004 included), never the recorded host
+                // cell's HOST_SYNC_RETURN row; the cell's own origin
+                // replaces the check engine's neutral one.
+                out.append(indent(indent + 1))
+                    .append("JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                        + "__be.code, __be.msg, ")
+                    .append(javaString(originOf(returnBoundary)))
+                    .append(", __be.expected, __be.actual, __be.frames, null);\n");
                 emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
-                    "JvmRuntime.errtext(__be)", indent + 1);
+                    "JvmRuntime.errtext(__bre)", indent + 1);
                 emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "JvmRuntime.errtext(__be)", indent + 1);
-                out.append(indent(indent + 1)).append("throw __be;\n");
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+                out.append(indent(indent + 1)).append("throw __bre;\n");
                 out.append(indent(indent)).append("}\n");
                 emitBoundarySuccess(returnBoundary, admitted,
                     boundaryPayload.descriptor(), indent);
@@ -7536,7 +7555,22 @@ public final class JvmSemanticEmitter {
          * import origin and a second alias of one host module binds
          * nothing new (the entry is idempotent per module).
          * {@code COMPILED}/{@code STDLIB} imports keep the landed no-op
-         * realization.
+         * load realization: their surface entry is the module's own
+         * publication (its {@code EXPORT_PUBLISH} writes, or the chunk-top
+         * cataloged-callable population).</p>
+         *
+         * <p><b>The completion write (K15 items 1-2).</b> After the
+         * kind-specific load the op's payload {@code aliasCells} receive
+         * the module's namespace value — the module-identity-keyed
+         * {@code JvmRuntime.EXPORT_SURFACES} entry through the one
+         * {@code exportSurface} accessor, the surface object the module's
+         * own publication or its single guarded load created, never a
+         * per-alias re-derivation — so {@code let t = time} reads the very
+         * table the direct read/publish arms use and two aliases of one
+         * module observe the identical value. It is the alias cells'
+         * single initializing write (an alias cell never carries a
+         * {@code BINDING_INIT}); the cell-kind switch keeps the
+         * {@code SHARED_CELL} in-place publication discipline.</p>
          */
         private void emitModuleImport(SemanticOp op, int indent) {
             KindPayload.ModuleImportPayload payload =
@@ -7565,7 +7599,38 @@ public final class JvmSemanticEmitter {
                     .append(", ").append(span.startLine()).append(", ")
                     .append(span.startColumn()).append(");\n");
             }
+            emitAliasCellCompletion(payload, indent);
             emitPlainSuccess(op, indent);
+        }
+
+        /**
+         * The {@code MODULE_IMPORT} completion write (K15 item 2): every
+         * alias cell named by the payload receives the module's namespace
+         * value — the module-identity-keyed surface through the one
+         * {@code exportSurface} accessor, the one surface object the
+         * module's publication or its single load created — in the cell's
+         * own publication discipline. The write runs after the
+         * kind-specific load, so a HOST/FFI alias holds the loaded table.
+         */
+        private void emitAliasCellCompletion(KindPayload.ModuleImportPayload payload,
+                                             int indent) {
+            if (payload.aliasCells().isEmpty()) {
+                return;
+            }
+            String surface = "exportSurface("
+                + javaString(payload.resolvedModule().path()) + ")";
+            for (BindingId aliasCell : payload.aliasCells()) {
+                BindingCellKind kind = cellKinds.getOrDefault(aliasCell,
+                    BindingCellKind.DIRECT);
+                if (kind == BindingCellKind.SHARED_CELL) {
+                    out.append(indent(indent)).append("((Object[]) ")
+                        .append(cell(aliasCell, 0)).append(")[0] = ")
+                        .append(surface).append(";\n");
+                } else {
+                    out.append(indent(indent)).append(cell(aliasCell, 0))
+                        .append(" = ").append(surface).append(";\n");
+                }
+            }
         }
 
         /**

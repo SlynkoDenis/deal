@@ -7152,7 +7152,21 @@ public final class LuaSemanticEmitter {
          * extern-C import's op keeps the landed no-op load (the trace
          * session's loaded surface is the scenario seam's).
          * {@code COMPILED}/{@code STDLIB} imports keep the landed no-op
-         * realization.</p>
+         * load realization: their surface entry is the module's own
+         * publication (its {@code EXPORT_PUBLISH} writes, or the chunk-top
+         * cataloged-callable population).</p>
+         *
+         * <p><b>The completion write (K15 items 1-2).</b> After the
+         * kind-specific load the op's payload {@code aliasCells} receive
+         * the module's namespace value — the module-identity-keyed
+         * {@code __exportSurfaces} entry, the one surface object the
+         * module's own publication or its single guarded load created — so
+         * {@code let t = time} reads the very table the direct
+         * {@code EXPORT_READ}/{@code EXPORT_PUBLISH} arms use and two
+         * aliases of one module observe the identical value. It is the
+         * alias cells' single initializing write (an alias cell never
+         * carries a {@code BINDING_INIT}); the cell-kind switch keeps the
+         * {@code SHARED_CELL} in-place publication discipline.</p>
          */
         private void emitModuleImport(SemanticOp op) {
             KindPayload.ModuleImportPayload payload =
@@ -7176,7 +7190,37 @@ public final class LuaSemanticEmitter {
                     emitHostLoad(op, payload, facts);
                 }
             }
+            emitAliasCellCompletion(payload);
             emitPlainSuccess(op);
+        }
+
+        /**
+         * The {@code MODULE_IMPORT} completion write (K15 item 2): every
+         * alias cell named by the payload receives the module's namespace
+         * value — the module-identity-keyed {@code __exportSurfaces}
+         * entry, the one surface object the module's publication or its
+         * single load created, never a per-alias re-derivation — in the
+         * cell's own publication discipline ({@code SHARED_CELL} writes
+         * the captured cell table in place). The write runs after the
+         * kind-specific load, so a HOST/FFI alias holds the loaded table.
+         */
+        private void emitAliasCellCompletion(KindPayload.ModuleImportPayload payload) {
+            if (payload.aliasCells().isEmpty()) {
+                return;
+            }
+            String surface = "__exportSurfaces["
+                + luaString(payload.resolvedModule().path()) + "]";
+            for (BindingId aliasCell : payload.aliasCells()) {
+                BindingCellKind kind = cellKinds.getOrDefault(aliasCell,
+                    BindingCellKind.DIRECT);
+                if (kind == BindingCellKind.SHARED_CELL) {
+                    out.append(cell(aliasCell, 0)).append("[1] = ")
+                        .append(surface).append("\n");
+                } else {
+                    out.append(cell(aliasCell, 0)).append(" = ")
+                        .append(surface).append("\n");
+                }
+            }
         }
 
         /**
@@ -8816,6 +8860,24 @@ local __NULL = setmetatable({}, {__tostring = function() return "null" end})
 -- values with the __NULL sentinel for a present null) reads through
 -- its presence map — present null yields nil and stays distinguishable
 -- from an absent key via the presence map (has()/FIELD_READ).
+-- A module export surface (the K15 namespace value an import alias cell
+-- holds: a compiled module's publication table, a stdlib module's
+-- cataloged-callable table, or the runtime-loaded host/FFI module table)
+-- carries no keyed-table marker — its entries are the module's declared
+-- exports, never nil — so its presence is the non-nil read. A compiled
+-- module's entry is the cross-chunk ABI wrapper ({__kind, sig, f,
+-- __val}), and the member read yields the same published value the direct
+-- __exportValue read resolves (the wrapper's __val), so the two read paths
+-- publish the identical value and the dynamic dispatch resolves the
+-- carrier's own class. A host table entry and a cataloged callable carry
+-- no __val and are returned as they stand.
+local function __nsMemberValue(t, v)
+  if type(v) ~= "table" or v.__val == nil then return v end
+  for _, __surface in pairs(__exportSurfaces) do
+    if __surface == t then return v.__val end
+  end
+  return v
+end
 local function __member(t, k)
   if t.__c then
     if t.__p[k] then
@@ -8825,8 +8887,14 @@ local function __member(t, k)
     end
     return __MISSING
   end
-  if t.__keys[k] then return t[k] end
-  return __MISSING
+  local __keys = t.__keys
+  if __keys ~= nil then
+    if __keys[k] then return t[k] end
+    return __MISSING
+  end
+  local v = t[k]
+  if v == nil then return __MISSING end
+  return __nsMemberValue(t, v)
 end
 local function __esc(s)
   if s == nil then return "" end
@@ -9238,7 +9306,18 @@ local function __bcheck(desc, staticKind, v, csig, completion)
     if type(v) == "string" then return v end
     return fail("string")
   elseif desc == "table" then
-    if type(v) == "table" and v.__t then return v end
+    -- A shared table carrier (__t) and a module export surface (the K15
+    -- namespace value an import alias cell holds: a compiled module's
+    -- publication table, a stdlib module's cataloged-callable table, or
+    -- the runtime-loaded host/FFI module table) both admit. The surface
+    -- is an ordinary table the loader/publication built without the
+    -- carrier markers, so admission follows the actual-kind projection
+    -- (the marked carriers of other kinds keep their own arms and never
+    -- pass a table boundary; the two internal sentinels never do).
+    if type(v) == "table" and v ~= __MISSING and v ~= __NULL
+        and __actualOf(staticKind, v) == "table" then
+      return v
+    end
     return fail("table")
   elseif desc == "@/Error" then
     -- The builtin Error class (the err carrier): an Error table
@@ -9770,12 +9849,24 @@ end
 -- INDEX_DELETE remove the order slot, and a reinsertion appends it.
 -- TABLE_KEYS and JSON_STRINGIFY consume exactly this order.
 local function __orderAdd(t, k)
-  if not t.__keys[k] then
+  local __keys = t.__keys
+  if __keys == nil then
+    -- The first member write of a module export surface (the K15
+    -- namespace value, an ordinary table the loader/publication built
+    -- without the carrier markers) gives it the shared carrier's
+    -- key/order markers, so its insertion order and presence discipline
+    -- match every other table value from then on.
+    __keys = {}
+    t.__keys = __keys
+    t.__order = {}
+  end
+  if not __keys[k] then
     t.__order[#t.__order + 1] = k
   end
-  t.__keys[k] = true
+  __keys[k] = true
 end
 local function __orderRemove(t, k)
+  if t.__keys == nil then return end
   t.__keys[k] = nil
   for i = 1, #t.__order do
     if t.__order[i] == k then

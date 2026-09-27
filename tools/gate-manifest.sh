@@ -344,6 +344,25 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # the repeated dealMain()/cross-chunk idempotence), and the
   # byte-identical repeated emission.
   'fg|=== Running Module Export Surface Tests (ISSUE-0639) ===|java -ea -cp build deal.test.ModuleExportSurfaceTest'
+  # ISSUE-0627 registration: module namespaces used as values (K15 and
+  # the module-namespace contract; K9 item 8's ModuleImportPayload
+  # alias-cell list, K11's member-read registration, K5's dynamic call
+  # shape, K7's cataloged std.time callable, K2's export surfaces, and
+  # C1/C2's alias cells and per-module surfaces): the four Arm A/B/C
+  # programs (the value-position read, the table-alias escape, the
+  # table-parameter passthrough, and the cross-module escape/re-export
+  # chains) executing through the one production pipeline on the oracle,
+  # the LuaJIT artifact, and the JVM artifact with the pinned E8004 int
+  # out of safe range terminal at the dynamic call's origin and zero
+  # STDLIB_TIME_CONFLICT claims; the namespace identity and the surface
+  # contents (a compiled module's published exports in declaration
+  # order, a stdlib module's cataloged callables, a host module's loaded
+  # load_host table, an extern-C module's loaded load_ffi table); the
+  # member read's exactly-one DynamicFunctionValue, the executed class
+  # path and recorded return cell, and the read-site E8010/E8001
+  # projections; and the MODULE_IMPORT completion write as the alias
+  # cells' single initializing write with its fail-closed negative.
+  'fg|=== Running Module Namespace Value Tests (ISSUE-0627) ===|java -ea -cp build deal.test.ModuleNamespaceValueTest'
   # ISSUE-0641 registration: the JVM production project entry
   # (JvmSemanticEmitter.emitProductionProject) — one public final class
   # with public static void main and the dealMain() drive carrying the

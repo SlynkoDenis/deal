@@ -1006,8 +1006,29 @@ public final class SemanticOracle {
          * which a read resolves the named entry. An absent surface or entry
          * is the absent-slot projection ({@link Value.MissingValue}); the
          * registry is never written by a read.
+         *
+         * <p>The map instance of one module is the entry map of that
+         * module's namespace value ({@link #namespaceValues}), so a
+         * publish or a memoized host-loaded entry is visible through the
+         * namespace table an import alias cell holds — one surface per
+         * module per run, never a per-alias copy.</p>
          */
-        final Map<ModuleId, Map<String, Value>> exportSurfaces =
+        final Map<ModuleId, LinkedHashMap<String, Value>> exportSurfaces =
+            new LinkedHashMap<>();
+        /**
+         * The per-run module namespace values (K15 items 1/3/5): one
+         * {@link Value.TableValue} per imported module of the run, created
+         * once by the {@code MODULE_IMPORT} completion and shared by every
+         * alias cell of that module (two aliases of one module read the
+         * identical value). The table's entries are the module's surface
+         * map ({@link #exportSurfaces}): a COMPILED module's entries are
+         * its {@code EXPORT_PUBLISH} writes in declaration order, a
+         * STDLIB module's are its cataloged callables (populated at the
+         * completion), and a HOST/FFI module's are the loaded entries the
+         * seam and the export reads record — the oracle's mirror of the
+         * loaded module table.
+         */
+        final Map<ModuleId, Value.TableValue> namespaceValues =
             new LinkedHashMap<>();
         /**
          * The per-run cataloged-callable registry (M3/M4): one memoized
@@ -3524,6 +3545,19 @@ public final class SemanticOracle {
          * Executes one BOUNDARY child with its own START/terminal events.
          */
         Value runBoundaryChild(SemanticOp boundary, Value input, BoundaryContext context) {
+            return runBoundaryChild(boundary, input, context, boundary.failurePolicy());
+        }
+
+        /**
+         * Executes one BOUNDARY child under an explicit failure policy (the
+         * cataloged-callee terminal, whose cell policy is the direct
+         * {@code STDLIB_RETURN} boundary's descriptor-kind rule rather than
+         * the recorded host cell's {@code HOST_SYNC_RETURN}). The events and
+         * the check engine are the cell's own; only the row the failure
+         * projects through changes.
+         */
+        Value runBoundaryChild(SemanticOp boundary, Value input, BoundaryContext context,
+                               FailurePolicyId policy) {
             List<String> inputs = List.of(atomOf(input));
             emitStart(boundary, inputs);
             KindPayload.BoundaryPayload payload =
@@ -3531,7 +3565,7 @@ public final class SemanticOracle {
             BoundaryValueView view = viewOfValue(input);
             BoundaryOutcome outcome;
             try {
-                outcome = BoundaryExecutor.execute(boundary.failurePolicy(),
+                outcome = BoundaryExecutor.execute(policy,
                     payload.descriptor(), view, context, payload.realization());
             } catch (BoundaryExecutor.Defect defect) {
                 throw new IllegalStateException("boundary " + boundary.opId()
@@ -3550,6 +3584,38 @@ public final class SemanticOracle {
                     throw failure;
                 }
             };
+        }
+
+        /**
+         * Runs the recorded terminal cell of one host-shaped invocation
+         * (the static host call, the adapter's resolved host source, and the
+         * dynamic HOST terminal): a cataloged stdlib callee — a
+         * {@code HostFunction(module, export, descriptor)} naming a closed
+         * {@link StdlibFunctionCatalog} row — runs the cell under the
+         * descriptor-kind rule, exactly the direct {@code STDLIB_CALL}'s
+         * {@code STDLIB_RETURN} projection, so the cataloged algorithms'
+         * failures and the pinned E8004 {@code int out of safe range}
+         * terminal are identical for the direct call, the export-read call,
+         * and the value read through a module namespace (K2's
+         * same-canonical-failures rule; K15 item 4). Every other host binding
+         * runs its own recorded {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN}
+         * policy.
+         */
+        private Value runHostTerminalCell(SemanticOp invocation,
+                                          FunctionExecutionBinding binding, OpId cellId,
+                                          Value value) {
+            SemanticOp cell = opOf(cellId);
+            if (binding instanceof FunctionExecutionBinding.HostFunction host
+                    && stdlibRowOf(host.hostModuleId(), host.exportName(),
+                        host.descriptor()) != null) {
+                RuntimeDescriptor descriptor =
+                    ((KindPayload.BoundaryPayload) cell.payload()).descriptor();
+                FailurePolicyId policy = descriptor instanceof RuntimeDescriptor.Func
+                    ? FailurePolicyId.FUNCTION_SIGNATURE
+                    : FailurePolicyId.TYPE_DESCRIPTOR;
+                return runBoundaryChild(cell, value, BoundaryContext.none(), policy);
+            }
+            return runBoundaryChild(cell, value, BoundaryContext.none());
         }
 
         /** The runtime value → closed boundary view. */
@@ -4163,10 +4229,12 @@ public final class SemanticOracle {
                 case FunctionExecutionBinding.HostFunction host -> {
                     // The cataloged-callable HOST sub-class resolves the closed
                     // catalog row's algorithm (never a host responder); every
-                    // other host binding runs its loaded surface request.
+                    // other host binding runs its loaded surface request. The
+                    // cataloged callee's recorded cell runs the direct
+                    // STDLIB_RETURN projection (K2).
                     Value value = invokeResolvedHostRequest(op, host, leading);
-                    yield runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
-                        BoundaryContext.none());
+                    yield runHostTerminalCell(op, host, payload.returnBoundaryOpId(),
+                        value);
                 }
                 case FunctionExecutionBinding.HostFunctionValue hostValue -> {
                     Value value = invokeHostRequest(op, hostValue.hostModuleId(),
@@ -4243,8 +4311,7 @@ public final class SemanticOracle {
                 }
                 case ReturnBoundarySelection.CallTerminal terminal -> {
                     Value value = invokeResolvedHostRequest(op, binding, checkedArgs);
-                    yield runBoundaryChild(opOf(terminal.boundaryOpId()), value,
-                        BoundaryContext.none());
+                    yield runHostTerminalCell(op, binding, terminal.boundaryOpId(), value);
                 }
                 case ReturnBoundarySelection.None ignored -> executeExternalEntryFor(op,
                     externalEntryOpOf((FunctionExecutionBinding.ExternalFunction) binding,
@@ -4290,8 +4357,8 @@ public final class SemanticOracle {
                 }
                 case ReturnBoundarySelection.CallTerminal terminal -> {
                     Value value = invokeResolvedHostRequest(op, sourceBinding, leading);
-                    yield runBoundaryChild(opOf(terminal.boundaryOpId()), value,
-                        BoundaryContext.none());
+                    yield runHostTerminalCell(op, sourceBinding, terminal.boundaryOpId(),
+                        value);
                 }
                 case ReturnBoundarySelection.None ignored -> executeExternalEntryFor(op,
                     externalEntryOpOf(
@@ -4537,8 +4604,7 @@ public final class SemanticOracle {
                 KindPayload.CallPayload payload,
                 FunctionExecutionBinding.HostFunction host, List<Value> args) {
             Value value = invokeResolvedHostRequest(op, host, args);
-            return runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
-                BoundaryContext.none());
+            return runHostTerminalCell(op, host, payload.returnBoundaryOpId(), value);
         }
 
         /** The external-call terminal per the execution owner. */
@@ -6384,16 +6450,92 @@ public final class SemanticOracle {
         }
 
         /**
-         * MODULE_IMPORT — the load-once initialization record. The tail's
-         * stdlib slice imports {@code std/console} only: the stdlib
+         * MODULE_IMPORT — the load-once initialization record and the
+         * alias cells' completion write (K15 items 1-3; the landed BINDINGS
+         * contract's pinned initializing write). The op's payload names the
+         * import's ordered alias cells; each named cell receives the
+         * module's namespace value — the one per-run
+         * {@link Value.TableValue} of that module (K15 item 5), whose
+         * entries are the module's published export surface — and is marked
+         * initialized, so an alias read is the landed {@code BINDING_LOAD}
+         * of a real table value. No alias cell is ever written twice (the
+         * completion is the single initializing write). The tail's stdlib
          * console algorithm executes inside {@code STDLIB_CALL}
-         * ({@code CONSOLE_LOG}/{@code CONSOLE_ERROR}), so the import
-         * record initializes no run state beyond the op terminal.
+         * ({@code CONSOLE_LOG}/{@code CONSOLE_ERROR}), so the import record
+         * initializes no other run state beyond the op terminal.
          */
         private String executeModuleImport(SemanticOp op) {
             KindPayload.ModuleImportPayload payload =
                 (KindPayload.ModuleImportPayload) op.payload();
+            Value namespace = namespaceValueOf(payload);
+            for (BindingId aliasCell : payload.aliasCells()) {
+                Cell cell = storeCellOf(aliasCell, 0);
+                cell.value = namespace;
+                cell.initialized = true;
+            }
             return null;
+        }
+
+        /**
+         * The module namespace value of one import completion (K15 items
+         * 1/5): the module's one per-run {@link Value.TableValue}. Its
+         * entry map is the module's surface map (so a COMPILED module's
+         * {@code EXPORT_PUBLISH} writes and a HOST module's memoized loaded
+         * entries are visible through it), and a STDLIB module's entries
+         * are populated here with its cataloged callables — the identical
+         * memoized values the direct {@code EXPORT_READ} arm resolves, so
+         * the direct call and the value-read call agree. A repeated
+         * completion (a second import of one module) resolves the same
+         * value.
+         */
+        private Value namespaceValueOf(KindPayload.ModuleImportPayload payload) {
+            Value.TableValue existing = namespaceValues.get(payload.resolvedModule());
+            if (existing != null) {
+                return existing;
+            }
+            LinkedHashMap<String, Value> entries = exportSurfaces.computeIfAbsent(
+                payload.resolvedModule(), ignored -> new LinkedHashMap<>());
+            Value.TableValue namespace = new Value.TableValue(entries);
+            namespaceValues.put(payload.resolvedModule(), namespace);
+            if (payload.kind() == ModuleImportKind.STDLIB) {
+                for (StdlibFunctionCatalog.Entry row : StdlibFunctionCatalog.entries()) {
+                    if (!row.modulePath().equals(payload.resolvedModule().path())) {
+                        continue;
+                    }
+                    entries.putIfAbsent(row.exportName(),
+                        stdlibSurfaceCallable(payload.resolvedModule(), row));
+                }
+            }
+            return namespace;
+        }
+
+        /**
+         * The cataloged callable of one STDLIB module surface entry (K15
+         * item 1): the same memoized {@link Value.StdlibCallableValue} the
+         * direct read's {@link #stdlibCallableOf} resolves for that
+         * {@code (module, name)} — one callable per catalog row per module
+         * per run — keyed in the value-keyed binding map to the row's own
+         * HOST class ({@code HostFunction(module, name, declared
+         * descriptor)}) exactly like the read's registration, so a dynamic
+         * dispatch of an entry read through the namespace value resolves
+         * the boundary-shaped HOST class. The surface population never
+         * replaces a callable a read created first and never re-keys an
+         * existing value-keyed class.
+         */
+        private Value.StdlibCallableValue stdlibSurfaceCallable(ModuleId module,
+                StdlibFunctionCatalog.Entry row) {
+            String key = module.path() + '\u0001' + row.exportName();
+            Value.StdlibCallableValue callable = stdlibCallables.get(key);
+            if (callable == null) {
+                callable = new Value.StdlibCallableValue(row.function(),
+                    row.declaredDescriptor());
+                stdlibCallables.put(key, callable);
+            }
+            if (bindingsByValue.get(callable) == null) {
+                bindingsByValue.put(callable, new FunctionExecutionBinding.HostFunction(
+                    module, row.exportName(), row.declaredDescriptor()));
+            }
+            return callable;
         }
 
         /**
