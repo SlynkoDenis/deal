@@ -937,6 +937,38 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # bound.
   'fg|=== Running FFI Load Emission Tests (ISSUE-0662) ===|java -ea -cp build deal.test.FfiLoadEmissionTest'
 
+  # ISSUE-0685 registration: the compiled-provider entry adaptation and
+  # the end-to-end drive (plan-evaluator-provider-binding-surface P3, the
+  # compiled-provider entry call contract, and Verification 1; sequencing
+  # step 2; ISSUE-0684's compiled-provider admission is the dependency):
+  # an extern-C declaration importing a compiled provider module whose
+  # @c-struct field defaults name the provider's exports (an argument
+  # literal and a zero-argument call) compiles through
+  # ProductionProjectEmission with the compile's production FFI metadata;
+  # the emitted load opens the real native library of the committed FFIGEN
+  # integration fixture (gcc-built per drive) and the published artifact
+  # executes under luajit with exit 0 while the program's own checks
+  # observe the provider's values on the constructed instances, exactly
+  # one evaluator invocation per omitted required-present field per attempt
+  # in class source order (the shared native call counter), the provided
+  # field's suppression of its provider evaluator, the provider body's own
+  # typed int boundary, and the same artifact's native crossing; the
+  # artifact carries the per-alias binding line resolved through the
+  # chunk-global export-surface registry, the generated
+  # <alias>.<export>.f(args, nil, nil, nil) evaluator text, no provider
+  # require, the bindings literal's canonical descriptor and provider
+  # contract digest, the load's import-statement span triplet, one
+  # provider-module EXPORT_PUBLISH publication per referenced export
+  # (captured by identity, no per-alias copy, no surface mutation), and no
+  # ffi./cdef/library text; a provider-raised DEAL error reaches the
+  # construction site unchanged (its own code, message, and recorded
+  # source origin through the deferred module-init entry); and a doctored
+  # generated module whose native-library text names a never-built library
+  # still emits (no compile-time open, no symbol resolution, no evaluator
+  # invocation) while executing it raises FFI_LIBRARY_LOAD at the import
+  # statement (the runtime open is the existence check).
+  'fg|=== Running FFI Compiled-Provider Drive Tests (ISSUE-0685) ===|java -ea -cp build deal.test.FfiCompiledProviderDriveTest'
+
   # ISSUE-0663 registration: the typed FFI crossings and the class-value
   # carrier projection (luajit-ffi-load-emission-and-typed-crossings F3/F4,
   # luajit-ffi-shared-emission-and-jvm-rejection F3, the FFI typed call and
