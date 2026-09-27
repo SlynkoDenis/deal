@@ -39,11 +39,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
@@ -738,16 +740,58 @@ public class FfiLoadEmissionTest {
     }
 
     /**
-     * The retargeted wrapper-incapable pin (ISSUE-0684): the compiled
-     * provider of the superseded fixture became admissible (a session
-     * unit of the lowered closure), so the fixture's provider is a
+     * The provider-gap fixture's entry module: it imports the consuming
+     * module, so the module whose {@code MODULE_IMPORT} carries the
+     * extern-C import is not the entry module — the provider-gap detail
+     * must name the consuming module.
+     */
+    private static final String PROVIDER_GAP_ENTRY = """
+        import * as middle from "./middle"
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The consuming module of the provider-gap fixture: its
+     * {@code MODULE_IMPORT} carries the extern-C import of the declaration
+     * module whose provider the artifact never publishes. The import sits
+     * on the second line, so the detail's origin proves it is the import
+     * statement's own span, never the module's first line.
+     */
+    private static final String PROVIDER_GAP_MIDDLE = """
+        // The consuming module of the provider-gap fixture.
+        import * as native from "native/probe"
+
+        export function touch(): int {
+          return 0;
+        }
+        """;
+
+    /**
+     * The retargeted wrapper-incapable pin (ISSUE-0684/ISSUE-0686): the
+     * compiled provider of the superseded fixture became admissible (a
+     * session unit of the lowered closure), so the fixture's provider is a
      * spec-stdlib module — the declaration surface admits it and the
      * validator resolves it, while no session unit ever loads it, so the
      * artifact cannot publish its surface in the wrapper convention.
+     *
+     * <p>The emission's binding step (the dependent child's predicate and
+     * binding emission) raises the typed provider gap; the production arm
+     * maps it to exactly one E6005 {@code SHARED_EMITTER_COVERAGE} whose
+     * detail names the consuming (emitting) module — never the entry
+     * module — the extern-C import statement's origin (file, line,
+     * column), the import's raw specifier, the resolved declaration
+     * module, and the offending provider alias and module path, with
+     * nothing staged and the prior published artifact set byte-identical.
+     * The compiled provider (the superseded fixture's own shape) stays the
+     * positive control: it still emits with no diagnostic.</p>
      */
     private static void testProviderGapSeed() throws Exception {
         System.out.println("-- a wrapper-incapable provider (a spec-stdlib "
-            + "module) fails the compile closed --");
+            + "module) fails the compile closed with the full detail --");
+        Fixture control = compiledProviderFixture();
         Fixture fixture = compileSource("provider-gap", "probe.d.deal", """
             import * as math from "std/math"
 
@@ -759,13 +803,8 @@ public class FfiLoadEmissionTest {
             }
 
             export function probe(): int;
-            """, "native/probe", """
-            import * as native from "native/probe"
-
-            export function main(): null {
-              return null
-            }
-            """, Map.of());
+            """, "native/probe", PROVIDER_GAP_ENTRY,
+            Map.of("middle.deal", PROVIDER_GAP_MIDDLE));
         try {
             check(!fixture.externCModules().isEmpty(),
                 "the wrapper-incapable fixture publishes its generated "
@@ -782,6 +821,29 @@ public class FfiLoadEmissionTest {
                 }
             }
             Path out = fixture.root().resolve("out-gap");
+
+            // The control (the positive drive's fixture): the compiled
+            // provider emits with no diagnostic, and its published set is
+            // the prior artifact set the failing compile must leave
+            // byte-identical.
+            PublicationStager controlStager = PublicationStager.forRoot(out);
+            ProductionProjectEmission.Result controlResult;
+            try {
+                controlResult = emit(control, controlStager);
+                if (controlResult.emitted()) {
+                    controlStager.publish();
+                }
+            } finally {
+                controlStager.discard();
+            }
+            check(controlResult.emitted()
+                    && controlResult.diagnostics().isEmpty(),
+                "the control: the compiled-provider fixture still emits with "
+                    + "no diagnostic: " + controlResult.diagnostics());
+            Map<String, byte[]> before = snapshotTree(out);
+            check(!before.isEmpty(),
+                "the control publishes the prior artifact set");
+
             PublicationStager stager = PublicationStager.forRoot(out);
             ProductionProjectEmission.Result result;
             try {
@@ -800,17 +862,86 @@ public class FfiLoadEmissionTest {
             check(result.firstDiagnostic() != null
                     && "E6005".equals(result.firstDiagnostic().code())
                     && message.contains("SHARED_EMITTER_COVERAGE")
-                    && message.contains("'math'")
-                    && message.contains("std.math")
+                    && message.contains(ProductionProjectEmission.FFI_PROVIDER_GAP),
+                "the provider gap is E6005 SHARED_EMITTER_COVERAGE with the "
+                    + "stable provider-gap token: " + result.diagnostics());
+            check(message.startsWith("Common semantic lowering failed: module "
+                        + "'middle'")
+                    && message.contains("validatorRule SHARED_EMITTER_COVERAGE"),
+                "the diagnostic is the registry-owned E6005 message carrying "
+                    + "the detail: " + message);
+            check(result.firstDiagnostic().range() != null
+                    && result.firstDiagnostic().range().isCanonicalSynthetic(),
+                "the diagnostic keeps the canonical synthetic range (no "
+                    + "fabricated source span)");
+            check(message.contains("module 'middle'"),
+                "the detail names the consuming (emitting) module: " + message);
+            check(!message.contains("module 'provider-gap'"),
+                "the detail does not name the entry module as the consuming "
+                    + "module: " + message);
+            String origin = fixture.sourceRoot().resolve("middle.deal")
+                .toAbsolutePath() + ":2:1";
+            check(message.contains(origin),
+                "the detail names the import statement's own origin (file, "
+                    + "line, column): " + message);
+            check(message.contains("'native/probe'"),
+                "the detail names the import's raw specifier: " + message);
+            check(message.contains("'native.probe'"),
+                "the detail names the resolved declaration module: " + message);
+            check(message.contains("provider alias 'math'"),
+                "the detail names the offending provider alias: " + message);
+            check(message.contains("'std.math'")
                     && message.contains("wrapper convention"),
-                "the provider gap is E6005 SHARED_EMITTER_COVERAGE naming the "
-                    + "provider: " + result.diagnostics());
-            check(message.contains("import 'native/probe'")
-                    && message.contains("provider-gap.deal:1:1"),
-                "the provider gap names the extern-C import origin (the raw "
-                    + "specifier and the import statement's span): " + message);
+                "the detail names the provider module and the wrapper "
+                    + "convention it does not publish: " + message);
+
+            // The prior artifact set is byte-identical after the failed
+            // compile (the emission fails before the publication
+            // transaction; no retry and no fallback exist).
+            Map<String, byte[]> after = snapshotTree(out);
+            checkTreeBytesIdentical(before, after,
+                "the prior artifact set stays byte-identical");
+
+            // The combined step: the lowering carries both the consuming and
+            // the entry module, and the emission's binding step itself raises
+            // the typed provider gap.
+            SemanticLowerer.ProjectLoweringResult lowered = lower(fixture);
+            check(lowered.project() != null,
+                "the provider-gap closure lowers: " + lowered.diagnostics());
+            if (lowered.project() != null) {
+                check(lowered.project().modules()
+                        .containsKey(new ModuleId("middle"))
+                        && lowered.project().modules()
+                            .containsKey(new ModuleId("provider-gap")),
+                    "the consuming module and the entry module are both "
+                        + "closure units: "
+                        + lowered.project().modules().keySet());
+                boolean threw = false;
+                try {
+                    LuaSemanticEmitter.emitProductionProject(
+                        lowered.project(), lowered.tables(),
+                        lowered.registries(), fixture.surface(),
+                        new FfiEmissionInput(fixture.externCModules(),
+                            fixture.sourceRoot().toString()));
+                } catch (LuaSemanticEmitter.FfiProviderGap gap) {
+                    threw = true;
+                    checkEq("middle", gap.consumingModulePath(),
+                        "the typed provider gap names the consuming module");
+                    check(gap.getMessage().contains("'native/probe'")
+                            && gap.getMessage().contains("'native.probe'")
+                            && gap.getMessage().contains("provider alias 'math'")
+                            && gap.getMessage().contains("'std.math'")
+                            && gap.getMessage().contains("wrapper convention"),
+                        "the typed provider gap carries the full detail: "
+                            + gap.getMessage());
+                }
+                check(threw,
+                    "the emission's binding step raises the typed provider "
+                        + "gap");
+            }
         } finally {
             deleteRecursively(fixture.root());
+            deleteRecursively(control.root());
         }
     }
 
@@ -1392,6 +1523,36 @@ public class FfiLoadEmissionTest {
             count++;
         }
         return count;
+    }
+
+    /**
+     * One publication tree's live files by canonical relative path (the
+     * byte-identity snapshot of the prior artifact set).
+     */
+    private static Map<String, byte[]> snapshotTree(Path root) throws Exception {
+        Map<String, byte[]> snapshot = new TreeMap<>();
+        if (!Files.exists(root)) {
+            return snapshot;
+        }
+        try (Stream<Path> walk = Files.walk(root)) {
+            for (Path path : walk.filter(Files::isRegularFile).toList()) {
+                snapshot.put(
+                    root.relativize(path).toString().replace('\\', '/'),
+                    Files.readAllBytes(path));
+            }
+        }
+        return snapshot;
+    }
+
+    /** Asserts two publication-tree snapshots carry identical paths and bytes. */
+    private static void checkTreeBytesIdentical(Map<String, byte[]> before,
+            Map<String, byte[]> after, String what) {
+        checkEq(before.keySet(), after.keySet(), what + ": the path set");
+        for (Map.Entry<String, byte[]> entry : before.entrySet()) {
+            byte[] other = after.get(entry.getKey());
+            check(other != null && Arrays.equals(entry.getValue(), other),
+                what + ": the bytes of " + entry.getKey());
+        }
     }
 
     private static void deleteRecursively(Path dir) {

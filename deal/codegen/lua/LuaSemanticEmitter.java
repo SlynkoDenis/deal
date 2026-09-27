@@ -297,6 +297,39 @@ public final class LuaSemanticEmitter {
         return new Session(unit, table, false, entryModule).emit();
     }
 
+    /**
+     * The typed provider gap of the extern-C load emission's binding step
+     * (design source {@code plan-evaluator-provider-binding-surface} P4 and
+     * the provider-gap fail-closed contract): a provider the emitting
+     * artifact does not publish in the wrapper convention before the
+     * binding position, or one import alias the declaration facts bind to
+     * two provider modules. The message carries the producing facts — the
+     * extern-C import's raw specifier and statement origin, the resolved
+     * declaration module, and the offending provider alias and module —
+     * and {@link #consumingModulePath()} is the module whose
+     * {@code MODULE_IMPORT} carries the extern-C import. The production arm
+     * maps this signal to exactly one E6005 {@code SHARED_EMITTER_COVERAGE}
+     * whose detail names the consuming module and those facts; the emitter
+     * never renders a bare generic gap for it.
+     */
+    public static final class FfiProviderGap extends IllegalStateException {
+        private static final long serialVersionUID = 1L;
+
+        /** The module whose MODULE_IMPORT carries the extern-C import. */
+        private final String consumingModulePath;
+
+        FfiProviderGap(String consumingModulePath, String detail) {
+            super(detail);
+            this.consumingModulePath = Objects.requireNonNull(
+                consumingModulePath, "consumingModulePath must not be null");
+        }
+
+        /** The consuming (emitting) module of the extern-C import. */
+        public String consumingModulePath() {
+            return consumingModulePath;
+        }
+    }
+
     // =========================================================================
     // Session
     // =========================================================================
@@ -7189,10 +7222,14 @@ public final class LuaSemanticEmitter {
          * declaration module whose load the artifact does not emit or
          * emits after the binding position, and any module outside the
          * closure and the declaration facts — is wrapper-incapable and
-         * fails the compile closed (a producer defect the production arm
-         * maps to E6005 {@code SHARED_EMITTER_COVERAGE}, staging
-         * nothing). An alias that names two provider modules is the same
-         * fail-closed producer defect, never a silent first-wins. The
+         * fails the compile closed through the typed {@link FfiProviderGap}
+         * — the production arm maps it to exactly one E6005
+         * {@code SHARED_EMITTER_COVERAGE} whose detail names the consuming
+         * (emitting) module, the extern-C import statement's origin, the
+         * import's raw specifier, the resolved declaration module, and the
+         * offending provider alias and module — staging nothing. An alias
+         * that names two provider modules is the same fail-closed producer
+         * defect, never a silent first-wins. The
          * registry entry is written with the landed idempotent {@code or}
          * guard, so two aliases of one module share the one loaded table
          * and no second open runs. Nothing here evaluates a plan default,
@@ -7222,10 +7259,13 @@ public final class LuaSemanticEmitter {
                         module.bindings())) {
                 ModuleId providerId = new ModuleId(provider.importedModulePath());
                 if (!isWrapperCapableProvider(providerId)) {
-                    throw new IllegalStateException("the extern-C module '"
-                        + moduleId.path() + "' (import '"
-                        + payload.rawSpecifier() + "' at "
-                        + importOriginText(op) + ") binds the provider alias '"
+                    String consuming = consumingModulePathOf(op);
+                    throw new FfiProviderGap(consuming,
+                        "the extern-C import '" + payload.rawSpecifier()
+                        + "' in the consuming module '" + consuming + "' at "
+                        + importOriginText(op)
+                        + " resolves the declaration module '"
+                        + moduleId.path() + "' and binds the provider alias '"
                         + provider.importAlias() + "' to the module '"
                         + provider.importedModulePath() + "', which the"
                         + " artifact does not publish in the wrapper"
@@ -7312,10 +7352,13 @@ public final class LuaSemanticEmitter {
             String bound = aliasProviders.putIfAbsent(importAlias,
                 importedModulePath);
             if (bound != null && !bound.equals(importedModulePath)) {
-                throw new IllegalStateException("the extern-C module '"
-                    + moduleId.path() + "' (import '"
-                    + payload.rawSpecifier() + "' at "
-                    + importOriginText(op) + ") binds the provider alias '"
+                String consuming = consumingModulePathOf(op);
+                throw new FfiProviderGap(consuming,
+                    "the extern-C import '" + payload.rawSpecifier()
+                    + "' in the consuming module '" + consuming + "' at "
+                    + importOriginText(op)
+                    + " resolves the declaration module '"
+                    + moduleId.path() + "' and binds the provider alias '"
                     + importAlias + "' to two provider modules ('" + bound
                     + "' and '" + importedModulePath + "'): one import"
                     + " alias resolves exactly one provider module (a"
@@ -7324,15 +7367,36 @@ public final class LuaSemanticEmitter {
         }
 
         /**
+         * The consuming (emitting) module of one extern-C import op: the
+         * module whose {@code MODULE_IMPORT} carries the extern-C import —
+         * the module a provider-gap detail names.
+         */
+        private String consumingModulePathOf(SemanticOp op) {
+            ModuleId owner = opModule.get(op.opId());
+            if (owner == null) {
+                throw new IllegalStateException("the extern-C import op "
+                    + op.opId() + " carries no owning module: the provider"
+                    + " gap cannot name its consuming module (a producer"
+                    + " defect)");
+            }
+            return owner.path();
+        }
+
+        /**
          * The text of one import statement's origin (file, line, column)
          * for a fail-closed provider-gap message: the same origin the
          * load's own {@code FFI_LIBRARY_LOAD}/{@code FFI_SYMBOL_MISSING}
-         * failures name.
+         * failures name. A span-less import op cannot name a real origin
+         * and is a producer defect (the load's own origin requires the
+         * import statement's span too).
          */
         private static String importOriginText(SemanticOp op) {
             SourceSpan span = op.origin().span();
             if (span == null) {
-                return op.origin().sourceId() + ":0:0";
+                throw new IllegalStateException("the extern-C import "
+                    + op.opId() + " carries no source span: the provider-gap"
+                    + " origin needs the import statement's own origin (a"
+                    + " producer defect)");
             }
             return op.origin().sourceId() + ":" + span.startLine() + ":"
                 + span.startColumn();
