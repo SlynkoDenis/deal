@@ -59,11 +59,12 @@ import java.util.Set;
  * the production LuaJIT artifact under real {@code luajit}, and the
  * production JVM artifact under {@code javac --release 25 -proc:none} plus
  * {@code java}), asserting the executed class path, the selected recorded
- * return cell, and the trace events. It then drives the function-typed
- * completion, the dynamic cross-module corpus fixtures, the K12
- * reference-identity anchor, and the fault battery, and it re-asserts that
- * the closed op-kind, boundary-kind, failure-policy, and payload-record
- * sets are unchanged.</p>
+ * return cell, and the trace events — the sync class drives and the
+ * dynamic-await drives for the DEAL-body, adapter, host and external async
+ * classes. It then drives the function-typed completion, the dynamic
+ * cross-module corpus fixtures, the K12 reference-identity anchor, and the
+ * fault battery, and it re-asserts that the closed op-kind, boundary-kind,
+ * failure-policy, and payload-record sets are unchanged.</p>
  */
 public class DynamicDispatchBatteryTest {
 
@@ -187,6 +188,234 @@ public class DynamicDispatchBatteryTest {
           return null;
         }
         """;
+
+    // =========================================================================
+    // The dynamic-await class-drive fixtures (M7 item 2)
+    // =========================================================================
+
+    /**
+     * The DEAL-body async class drive: a function-typed parameter callee
+     * holding the {@code async} body {@code value}, awaited on the callee
+     * value's own class.
+     */
+    private static final String DEAL_BODY_ASYNC_SOURCE = """
+        async function value(): int {
+          return 42
+        }
+
+        async function drive(f: async () => int): int {
+          let v: int = await f()
+          return v
+        }
+
+        export async function probe(): int {
+          return await drive(value)
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The adapter async class drive: a function-typed parameter callee
+     * whose runtime carrier is an arity-extension adapter over an async
+     * DEAL body, awaited on the adapter's own tag.
+     */
+    private static final String ADAPTER_ASYNC_SOURCE = """
+        async function inc(x: int): int {
+          return x + 1
+        }
+
+        async function drive(f: async (a: int, b: int) => int, x: int, y: int): int {
+          let v: int = await f(x, y)
+          return v
+        }
+
+        export async function probe(): int {
+          let adapted: async (a: int, b: int) => int = inc
+          return await drive(adapted, 41, 9)
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The shared-body external async class drive: the identity-resolved
+     * callee arm (M4: no value-carried external tag exists), the caller's
+     * await running the callee unit's async {@code EXTERNAL_ENTRY} under
+     * its own module context.
+     */
+    private static final String EXTERNAL_ASYNC_LIB_SOURCE = """
+        export async function fetch(): int {
+          return 40
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static final String EXTERNAL_ASYNC_APP_SOURCE = """
+        import * as lib from "./lib"
+
+        export async function probe(): int {
+          return await lib.fetch()
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    /**
+     * The host async class drive (M7 item 2): a function-typed parameter
+     * callee holding a loaded declared async host export, awaited through
+     * the host operation handle.
+     */
+    private static final String HOST_ASYNC_SOURCE = """
+        import * as host from "host/battery_async"
+
+        async function drive(f: async () => int): int {
+          let v: int = await f()
+          return v
+        }
+
+        export async function probe(): int {
+          return await drive(host.fetchValue)
+        }
+
+        export function main(): null {
+          return null
+        }
+        """;
+
+    private static final String HOST_ASYNC_DECLARATION = """
+        export async function fetchValue(): int;
+        """;
+
+    private static final String HOST_ASYNC_LUA = """
+        local rt = require("deal.runtime")
+
+        return {
+          fetchValue = function()
+            print("HOST-START")
+            return rt.async_start(function() return 42 end)
+          end,
+        }
+        """;
+
+    private static String hostAsyncJava(String hostClass) {
+        return """
+            import java.util.concurrent.CompletableFuture;
+
+            public final class %s {
+              public static Object fetchValue() {
+                System.out.println("HOST-START");
+                return CompletableFuture.completedFuture(
+                    java.lang.Long.valueOf(42L));
+              }
+            }
+            """.formatted(hostClass);
+    }
+
+    /**
+     * Drives one async project (no host modules) through the three-consumer
+     * async-entry matrix (the oracle's {@code invokeAsyncEntry} surface, the
+     * shared LuaJIT artifacts' async-entry dispatch, and the shared JVM
+     * artifacts' static dispatch entry under the real toolchains) with the
+     * pinned {@code probe} export. Returns the drive facts, or null when the
+     * drive could not run.
+     */
+    private static AsyncDrive launchAsyncDrive(String what, Map<String, String> sources,
+            String resultAtom) throws Exception {
+        Fixture fixture = compileProject(sources);
+        if (fixture == null) {
+            return null;
+        }
+        SemanticLowerer.ProjectLoweringResult result;
+        try {
+            result = lower(fixture);
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+        check(result.project() != null, what + " lowers and passes the closed "
+            + "gate: " + result.diagnostics());
+        if (result.project() == null) {
+            return null;
+        }
+        Path workspace = Files.createTempDirectory("battery-async");
+        SemanticDifferentialHarness.Verdict verdict;
+        try {
+            verdict = SemanticDifferentialHarness.runAsyncEntry(result.project(),
+                result.tables(), "probe", List.of(),
+                SemanticDifferentialHarness.Expectation.success(what, List.of(),
+                    resultAtom), workspace, null);
+        } finally {
+            deleteRecursively(workspace);
+        }
+        checkEq(3, verdict.runs().size(), what + " produced all three consumer runs: "
+            + verdict.failures());
+        check(verdict.pass(), what + " executes with the pinned outcome on all three "
+            + "consumers: " + verdict.report());
+        return new AsyncDrive(result.project(), result, verdict);
+    }
+
+    /** One launched dynamic-await drive: the project, its lowering facts, the verdict. */
+    private record AsyncDrive(ExecutableLoweredProject project,
+                              SemanticLowerer.ProjectLoweringResult result,
+                              SemanticDifferentialHarness.Verdict verdict) {
+    }
+
+    /** Asserts the three async-entry traces equal the oracle's event-for-event. */
+    private static void assertAsyncTracesEqual(String what,
+            SemanticDifferentialHarness.Verdict verdict) {
+        if (verdict.runs().size() != 3) {
+            return;
+        }
+        List<String> oracle = traceLines(verdict.runs().get(0));
+        check(!oracle.isEmpty(), what + ": the oracle produced events");
+        for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+            checkEq(oracle, traceLines(run), what + ": the " + run.consumer()
+                + " async-entry trace equals the oracle's event-for-event");
+        }
+    }
+
+    /** Asserts one recorded cell runs exactly once per invocation per consumer. */
+    private static void assertSingleCellExecution(String what,
+            SemanticDifferentialHarness.Verdict verdict, OpId cell, String role) {
+        for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+            checkEq(1, eventCount(run, cell, SemanticRuntimeModel.Phase.START),
+                what + ": " + run.consumer() + " runs the " + role + " exactly once");
+            checkEq(1, eventCount(run, cell, SemanticRuntimeModel.Phase.SUCCESS),
+                what + ": " + run.consumer() + " admits the " + role + " value "
+                    + "exactly once");
+        }
+    }
+
+    /**
+     * Asserts the resolved body's own cell runs inside the body before the
+     * call-owned task cell runs in the caller-side task wrapper (M6: the
+     * invocation site executes the call-owned record after the resolved
+     * body returns and before the token completes).
+     */
+    private static void assertTaskCellAfterBodyCell(String what,
+            SemanticDifferentialHarness.Verdict verdict, OpId bodyCell, OpId taskCell) {
+        for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+            int bodyStart = eventIndex(run, bodyCell, SemanticRuntimeModel.Phase.START);
+            int bodySuccess = eventIndex(run, bodyCell, SemanticRuntimeModel.Phase.SUCCESS);
+            int taskStart = eventIndex(run, taskCell, SemanticRuntimeModel.Phase.START);
+            int taskSuccess = eventIndex(run, taskCell, SemanticRuntimeModel.Phase.SUCCESS);
+            check(bodyStart >= 0 && bodySuccess > bodyStart && taskStart > bodySuccess
+                    && taskSuccess > taskStart,
+                what + ": " + run.consumer() + " runs the resolved body's own cell "
+                    + "inside the body before the call-owned task cell runs in the "
+                    + "task wrapper (" + bodyStart + " < " + bodySuccess + " < "
+                    + taskStart + " < " + taskSuccess + ")");
+        }
+    }
 
     /**
      * Drives one sync single-module project (no host modules) through the
@@ -421,6 +650,190 @@ public class DynamicDispatchBatteryTest {
         }
     }
 
+    // =========================================================================
+    // The dynamic-await class drives (M7 item 2)
+    // =========================================================================
+
+    /**
+     * The DEAL-body async class drive (M7 item 2): the awaited parameter
+     * callee's runtime carrier is the {@code value} async body, so the
+     * dispatch starts that body's task under its module context and the
+     * recorded call-owned task cell runs in the caller-side task wrapper
+     * exactly once after the resolved body's own RETURN cell.
+     */
+    private static void testDealBodyAsyncClass() throws Exception {
+        System.out.println("-- the DEAL-body class, awaited: a function-typed parameter "
+            + "callee holding an async body dispatches on the carrier's own tag and the "
+            + "recorded call-owned task cell runs exactly once in the task wrapper --");
+        AsyncDrive drive = launchAsyncDrive("deal body async class",
+            Map.of("src/app.deal", DEAL_BODY_ASYNC_SOURCE), "int:42");
+        if (drive == null) {
+            return;
+        }
+        LoweredModuleUnit app = drive.project().modules().get(APP);
+        SemanticOp start = dynamicAsyncStart(app);
+        check(start != null, "the deal-body async drive produces the dynamic "
+            + "ASYNC_START shape");
+        if (start == null) {
+            return;
+        }
+        KindPayload.AsyncStartPayload payload =
+            (KindPayload.AsyncStartPayload) start.payload();
+        KindPayload.CallCallee.Dynamic callee =
+            (KindPayload.CallCallee.Dynamic) payload.callee();
+        check(registrationOf(app, callee.callee())
+                instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the awaited parameter callee registers the producer rule's dynamic "
+                + "materialization");
+        FunctionExecutionBinding carrier = carrierRegistration(app, 0);
+        check(carrier instanceof FunctionExecutionBinding.LoweredBody,
+            "the passed callee value registers its LoweredBody class: " + carrier);
+        if (!(carrier instanceof FunctionExecutionBinding.LoweredBody body)) {
+            return;
+        }
+        SemanticOp taskCell = payload.returnBoundaryOpId() == null
+            ? null : opOf(app, payload.returnBoundaryOpId());
+        check(taskCell != null && callOwnedCell(app, taskCell),
+            "a runtime-resolved callee records the call-owned task cell: " + taskCell);
+        SemanticOp bodyCell = bodyReturnCell(app, body);
+        check(bodyCell != null, "the resolved body carries its own RETURN cell: "
+            + bodyCell);
+        if (taskCell == null || bodyCell == null) {
+            return;
+        }
+        assertAsyncTracesEqual("deal body async class", drive.verdict());
+        assertSingleCellExecution("deal body async class", drive.verdict(),
+            taskCell.opId(), "call-owned task cell");
+        assertSingleCellExecution("deal body async class", drive.verdict(),
+            bodyCell.opId(), "resolved body's own cell");
+        assertTaskCellAfterBodyCell("deal body async class", drive.verdict(),
+            bodyCell.opId(), taskCell.opId());
+    }
+
+    /**
+     * The adapter async class drive (M7 item 2): the awaited parameter's
+     * runtime carrier is a {@code FUNCTION_ADAPT} value over an async DEAL
+     * body, so the D15 source resolution starts the source body's task and
+     * the adapter's recorded call-owned task cell runs exactly once in the
+     * task wrapper.
+     */
+    private static void testAdapterAsyncClass() throws Exception {
+        System.out.println("-- the adapter class, awaited: the D15 source resolution "
+            + "starts the source body task and the recorded call-owned task cell runs "
+            + "exactly once in the caller-side task wrapper --");
+        AsyncDrive drive = launchAsyncDrive("adapter async class",
+            Map.of("src/app.deal", ADAPTER_ASYNC_SOURCE), "int:42");
+        if (drive == null) {
+            return;
+        }
+        LoweredModuleUnit app = drive.project().modules().get(APP);
+        SemanticOp start = dynamicAsyncStart(app);
+        check(start != null, "the adapter async drive produces the dynamic ASYNC_START "
+            + "shape");
+        if (start == null) {
+            return;
+        }
+        KindPayload.AsyncStartPayload payload =
+            (KindPayload.AsyncStartPayload) start.payload();
+        KindPayload.CallCallee.Dynamic callee =
+            (KindPayload.CallCallee.Dynamic) payload.callee();
+        check(registrationOf(app, callee.callee())
+                instanceof FunctionExecutionBinding.DynamicFunctionValue,
+            "the awaited parameter callee registers the producer rule's dynamic "
+                + "materialization");
+        FunctionExecutionBinding carrier = carrierRegistration(app, 0);
+        check(carrier instanceof FunctionExecutionBinding.AdapterBinding adapter
+                && adapter.sourceSignature().paramTypes().size() == 1,
+            "the passed callee value registers its AdapterBinding with the leading-M "
+                + "source arity: " + carrier);
+        SemanticOp taskCell = payload.returnBoundaryOpId() == null
+            ? null : opOf(app, payload.returnBoundaryOpId());
+        check(taskCell != null && callOwnedCell(app, taskCell),
+            "a runtime-resolved adapter callee records the call-owned task cell: "
+                + taskCell);
+        if (taskCell == null) {
+            return;
+        }
+        assertAsyncTracesEqual("adapter async class", drive.verdict());
+        assertSingleCellExecution("adapter async class", drive.verdict(),
+            taskCell.opId(), "call-owned task cell");
+        FunctionExecutionBinding sourceBinding = asyncBodyRegistration(app);
+        check(sourceBinding instanceof FunctionExecutionBinding.LoweredBody,
+            "the adapter's source body resolves its DEAL-body registration: "
+                + sourceBinding);
+        if (sourceBinding instanceof FunctionExecutionBinding.LoweredBody sourceBody) {
+            SemanticOp sourceCell = bodyReturnCell(app, sourceBody);
+            check(sourceCell != null, "the adapter's source body carries its own "
+                + "RETURN cell: " + sourceCell);
+            if (sourceCell != null) {
+                assertSingleCellExecution("adapter async class", drive.verdict(),
+                    sourceCell.opId(), "resolved source body's own cell");
+            }
+        }
+    }
+
+    /**
+     * The shared-body external async class drive (M7 item 2, the
+     * identity-resolved callee arm M4 pins for this class): the caller's
+     * await starts the callee unit's async {@code EXTERNAL_ENTRY} task under
+     * its own module context, whose single {@code FUNCTION_RETURN} cell runs
+     * exactly once per invocation; the caller records zero caller-side
+     * return boundaries.
+     */
+    private static void testSharedBodyExternalAsyncClass() throws Exception {
+        System.out.println("-- the shared-body external class, awaited: the "
+            + "identity-resolved cross-module await runs the callee unit's async "
+            + "EXTERNAL_ENTRY and its FUNCTION_RETURN cell exactly once --");
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("src/lib.deal", EXTERNAL_ASYNC_LIB_SOURCE);
+        sources.put("src/app.deal", EXTERNAL_ASYNC_APP_SOURCE);
+        AsyncDrive drive = launchAsyncDrive("shared body external async class",
+            sources, "int:40");
+        if (drive == null) {
+            return;
+        }
+        LoweredModuleUnit app = drive.project().modules().get(APP);
+        LoweredModuleUnit lib = drive.project().modules().get(LIB);
+        check(lib != null, "the external async closure carries the callee module");
+        SemanticOp start = null;
+        for (SemanticOp op : app.ops()) {
+            if (op.payload() instanceof KindPayload.AsyncStartPayload payload
+                    && payload.callee() instanceof KindPayload.CallCallee.Static
+                        staticCallee
+                    && staticCallee.binding()
+                        instanceof FunctionExecutionBinding.ExternalFunction) {
+                start = op;
+                break;
+            }
+        }
+        check(start != null, "the external async drive produces the identity-resolved "
+            + "ASYNC_START shape");
+        if (start == null || lib == null) {
+            return;
+        }
+        KindPayload.AsyncStartPayload payload =
+            (KindPayload.AsyncStartPayload) start.payload();
+        check(payload.externalAsyncLink() != null,
+            "the identity-resolved external await records its external async link");
+        check(payload.returnBoundaryOpId() == null,
+            "an external async resolution records zero caller-side return boundaries");
+        OpId entryId = asyncEntryOpId(lib, "fetch");
+        check(entryId != null, "the callee unit records its async EXTERNAL_ENTRY");
+        if (entryId == null) {
+            return;
+        }
+        SemanticOp entry = opOf(lib, entryId);
+        OpId entryCell = ((KindPayload.ExternalEntryPayload) entry.payload())
+            .returnBoundaryOpId();
+        assertAsyncTracesEqual("shared body external async class", drive.verdict());
+        assertSingleCellExecution("shared body external async class", drive.verdict(),
+            entryCell, "callee unit's async EXTERNAL_ENTRY return cell");
+        for (SemanticRuntimeModel.ConsumerRun run : drive.verdict().runs()) {
+            check(touchedModule(run, LIB), "shared body external async class: "
+                + run.consumer() + " executed the callee unit's EXTERNAL_ENTRY");
+        }
+    }
+
     /** The single indirect call of one unit resolving the given binding shape. */
     private static SemanticOp indirectCallOn(LoweredModuleUnit unit,
             Class<? extends FunctionExecutionBinding> shape) {
@@ -639,6 +1052,93 @@ public class DynamicDispatchBatteryTest {
             }
         }
         return null;
+    }
+
+    /** The single dynamic {@code ASYNC_START} op of the unit, or null. */
+    private static SemanticOp dynamicAsyncStart(LoweredModuleUnit unit) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.payload() instanceof KindPayload.AsyncStartPayload start
+                    && start.callee() instanceof KindPayload.CallCallee.Dynamic) {
+                return op;
+            }
+        }
+        return null;
+    }
+
+    /** The async {@code EXTERNAL_ENTRY} op id of one export, or null. */
+    private static OpId asyncEntryOpId(LoweredModuleUnit unit, String exportName) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                    && op.payload() instanceof KindPayload.ExternalEntryPayload payload
+                    && payload.async() && payload.exportName().equals(exportName)) {
+                return op.opId();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether one recorded cell is the call-owned form (M6): its parent is
+     * an unattached record {@code RETURN} naming the invocation — a RETURN
+     * whose function resolves to no lowered body of the unit.
+     */
+    private static boolean callOwnedCell(LoweredModuleUnit unit, SemanticOp cell) {
+        OpId parentId = cell.origin().parentOpId();
+        SemanticOp parent = parentId == null ? null : opOf(unit, parentId);
+        return parent != null
+            && parent.kind() == SemanticOpKind.RETURN
+            && parent.payload() instanceof KindPayload.ReturnPayload returned
+            && !unit.functions().containsKey(returned.function());
+    }
+
+    /** The body's own RETURN-recorded return cell of one lowered body, or null. */
+    private static SemanticOp bodyReturnCell(LoweredModuleUnit unit,
+            FunctionExecutionBinding.LoweredBody body) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.RETURN
+                    && op.payload() instanceof KindPayload.ReturnPayload returned
+                    && returned.function().equals(body.functionId())
+                    && returned.returnBoundaryOpId() != null) {
+                return opOf(unit, returned.returnBoundaryOpId());
+            }
+        }
+        return null;
+    }
+
+    /** The single async lowered-body registration of the unit, or null. */
+    private static FunctionExecutionBinding asyncBodyRegistration(LoweredModuleUnit unit) {
+        for (FunctionExecutionBinding binding : unit.functionBindings().values()) {
+            if (binding instanceof FunctionExecutionBinding.LoweredBody body) {
+                var function = unit.functions().get(body.functionId());
+                if (function != null && function.descriptor().isAsync()) {
+                    return binding;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The single AWAIT op of the unit, or null. */
+    private static SemanticOp awaitOf(LoweredModuleUnit unit) {
+        for (SemanticOp op : unit.ops()) {
+            if (op.kind() == SemanticOpKind.AWAIT) {
+                return op;
+            }
+        }
+        return null;
+    }
+
+    /** The first trace position of one op and phase, or -1. */
+    private static int eventIndex(SemanticRuntimeModel.ConsumerRun run, OpId op,
+                                  SemanticRuntimeModel.Phase phase) {
+        int found = -1;
+        List<SemanticRuntimeModel.TraceEvent> trace = run.trace();
+        for (int i = 0; i < trace.size(); i++) {
+            if (trace.get(i).op().equals(op) && trace.get(i).phase() == phase) {
+                found = i;
+            }
+        }
+        return found;
     }
 
     /** The single function-typed {@code AWAIT} op of the unit, or null. */
@@ -1402,6 +1902,259 @@ public class DynamicDispatchBatteryTest {
     }
 
     // =========================================================================
+    // The host async class drive (M7 item 2)
+    // =========================================================================
+
+    /**
+     * The host async class drive (M7 item 2): a function-typed parameter
+     * callee holding a loaded declared async host export, awaited through
+     * the host operation handle. The oracle runs the scripted async host
+     * seam; both production artifacts run the deployed host implementation
+     * under the real toolchains, and the loaded async export records its own
+     * invocation so the executed HOST class path is asserted, not inferred.
+     */
+    private static void testHostAsyncClass() throws Exception {
+        System.out.println("-- the host class, awaited: a function-typed parameter "
+            + "callee holding a loaded async host export runs the host operation "
+            + "handle on the oracle and both production artifacts --");
+        String hostClass = JvmBackend.classNameFor("host/battery_async");
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("src/app.deal", HOST_ASYNC_SOURCE);
+        String declarationPath = "src/battery_async.d.deal";
+        sources.put(declarationPath, HOST_ASYNC_DECLARATION);
+        Fixture fixture = compileProject(sources,
+            Map.of("host/battery_async", declarationPath));
+        if (fixture == null) {
+            return;
+        }
+        try {
+            SemanticLowerer.ProjectLoweringResult result = lower(fixture);
+            check(result.project() != null, "host async class lowers and passes the "
+                + "closed gate: " + result.diagnostics());
+            if (result.project() == null) {
+                return;
+            }
+            ExecutableLoweredProject project = result.project();
+            LoweredModuleUnit app = project.modules().get(APP);
+            SemanticOp start = dynamicAsyncStart(app);
+            check(start != null, "the host async drive produces the dynamic "
+                + "ASYNC_START shape");
+            if (start == null) {
+                return;
+            }
+            KindPayload.AsyncStartPayload payload =
+                (KindPayload.AsyncStartPayload) start.payload();
+            KindPayload.CallCallee.Dynamic callee =
+                (KindPayload.CallCallee.Dynamic) payload.callee();
+            check(registrationOf(app, callee.callee())
+                    instanceof FunctionExecutionBinding.DynamicFunctionValue,
+                "the awaited parameter callee registers the producer rule's dynamic "
+                    + "materialization");
+            FunctionExecutionBinding carrier = carrierRegistration(app, 0);
+            check(carrier instanceof FunctionExecutionBinding.HostFunction host
+                    && "host.battery_async".equals(host.hostModuleId().path())
+                    && "fetchValue".equals(host.exportName()),
+                "the host read registers the loaded async entry's HostFunction class: "
+                    + carrier);
+            SemanticOp taskCell = payload.returnBoundaryOpId() == null
+                ? null : opOf(app, payload.returnBoundaryOpId());
+            check(taskCell != null && callOwnedCell(app, taskCell),
+                "the runtime-resolved host callee records the call-owned task cell: "
+                    + taskCell);
+            SemanticOp await = awaitOf(app);
+            check(await != null, "the host async drive records its AWAIT");
+
+            // The oracle with the scripted async host seam.
+            SemanticRuntimeModel.ConsumerRun oracle = SemanticOracle.invokeAsyncEntry(
+                project, result.tables(),
+                new SemanticOracle.HostResponder() {
+                    @Override
+                    public SemanticOracle.Value loadedExport(ModuleId module,
+                            String export, RuntimeDescriptor descriptor) {
+                        return new SemanticOracle.Value.HostEntryValue(
+                            (RuntimeDescriptor.Func) descriptor);
+                    }
+
+                    @Override
+                    public String startAsync(ModuleId module, String export,
+                            RuntimeDescriptor.Func descriptor,
+                            List<SemanticOracle.Value> args, String operationLabel) {
+                        return operationLabel;
+                    }
+
+                    @Override
+                    public SyncOutcome completeAsync(String operationLabel) {
+                        return new SyncOutcome.Returned(
+                            new SemanticOracle.Value.IntValue(42));
+                    }
+                },
+                project.entryModule(), "probe", List.of());
+            check(oracle.terminal() instanceof SemanticRuntimeModel.Terminal.Success success
+                    && "int:42".equals(success.resultAtom()),
+                "the host async class completes runtime-ok in the oracle: "
+                    + oracle.terminal() + "\n" + oracle.comparisonReport());
+            boolean started = false;
+            for (SemanticRuntimeModel.EffectEvent effect : oracle.effects()) {
+                if (effect.kind() == SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP
+                        && effect.text().contains("host.battery_async.fetchValue")) {
+                    started = true;
+                }
+            }
+            check(started, "the oracle's dynamic HOST resolution starts the declared "
+                + "async export under its operation label");
+            if (await != null) {
+                OpId completion = ((KindPayload.AwaitPayload) await.payload())
+                    .completionBoundaryOpId();
+                checkEq(1, eventCount(oracle, completion,
+                        SemanticRuntimeModel.Phase.START),
+                    "the AWAIT's single ASYNC_COMPLETION boundary admits the host "
+                        + "completion exactly once");
+            }
+            if (taskCell != null) {
+                checkEq(0, eventCount(oracle, taskCell.opId(),
+                        SemanticRuntimeModel.Phase.START),
+                    "a HOST resolution executes zero caller-side recorded task cells");
+            }
+
+            runHostAsyncLua(project, result, fixture.surface());
+            runHostAsyncJvm(project, result, fixture.surface(), hostClass,
+                hostAsyncJava(hostClass));
+        } finally {
+            deleteRecursively(fixture.root());
+        }
+    }
+
+    /** The LuaJIT production artifact of the host async class drive. */
+    private static void runHostAsyncLua(ExecutableLoweredProject project,
+            SemanticLowerer.ProjectLoweringResult result, HostDeclarationSurface surface)
+            throws Exception {
+        Path workspace = Files.createTempDirectory("battery-host-async-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(project,
+                result.tables(), result.registries(), surface), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path host = workspace.resolve("host/battery_async.lua");
+            Files.createDirectories(host.getParent());
+            Files.writeString(host, HOST_ASYNC_LUA, StandardCharsets.UTF_8);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, """
+                dofile("%s")
+                local ok, err = __dealMain()
+                if not ok then
+                  if type(err) == "table" and err.__d then
+                    print("ERR:" .. err.code .. "|" .. tostring(err.m))
+                  else
+                    print("ERR:" .. tostring(err))
+                  end
+                  os.exit(0)
+                end
+                local okE, resE = pcall(__asyncEntries["%s#probe"], "-", true)
+                if not okE then
+                  if type(resE) == "table" and resE.__d then
+                    print("ERR:" .. resE.code .. "|" .. tostring(resE.m))
+                  else
+                    print("ERR:" .. tostring(resE))
+                  end
+                  os.exit(0)
+                end
+                print("OK VALUE:" .. tostring(resE))
+                """.formatted(artifact.toAbsolutePath().toString(),
+                    project.entryModule().path()), StandardCharsets.UTF_8);
+            ProcessBuilder builder = new ProcessBuilder("luajit",
+                probe.toAbsolutePath().toString());
+            builder.directory(workspace.toFile());
+            builder.environment().put("DEAL_DEFER_MAIN", "1");
+            Path stderrFile = Files.createTempFile(workspace, "stderr", ".txt");
+            builder.redirectError(stderrFile.toFile());
+            Process process = builder.start();
+            String stdout = new String(process.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+            int exit = process.waitFor();
+            String stderr = Files.readString(stderrFile, StandardCharsets.UTF_8);
+            checkEq(0, exit, "host async class: the LuaJIT production artifact "
+                + "executes: " + stdout + stderr);
+            check(stdout.contains("HOST-START"),
+                "host async class: the LuaJIT artifact's dynamic HOST class path "
+                    + "invoked the loaded async export: "
+                    + stdout.replace("\n", "\\n"));
+            check(stdout.contains("OK VALUE:42"),
+                "host async class: the LuaJIT production artifact completes with the "
+                    + "pinned awaited value: " + stdout.replace("\n", "\\n"));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The JVM production artifact of the host async class drive. */
+    private static void runHostAsyncJvm(ExecutableLoweredProject project,
+            SemanticLowerer.ProjectLoweringResult result, HostDeclarationSurface surface,
+            String hostClass, String hostJava) throws Exception {
+        Path workspace = Files.createTempDirectory("battery-host-async-jvm");
+        try {
+            String className = JvmBackend.classNameFor(project.entryModule().path());
+            JvmSemanticEmitter.EmissionResult emission =
+                JvmSemanticEmitter.emitProductionProject(project, result.tables(),
+                    result.registries(), className, surface);
+            Files.writeString(workspace.resolve(className + ".java"),
+                emission.source(), StandardCharsets.UTF_8);
+            Files.writeString(workspace.resolve(hostClass + ".java"), hostJava,
+                StandardCharsets.UTF_8);
+            OpId entry = asyncEntryOpId(project.modules().get(project.entryModule()),
+                "probe");
+            check(entry != null, "host async class: the unit records the async probe "
+                + "entry");
+            if (entry == null) {
+                return;
+            }
+            Files.writeString(workspace.resolve("AsyncHostProbe.java"), """
+                final class AsyncHostProbe {
+                  public static void main(String[] args) {
+                    try {
+                      %s.dealMain();
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                      System.out.println("ERR:" + error.code + "|" + error.msg);
+                      return;
+                    }
+                    try {
+                      java.lang.Object value = %s.ae%s("-", true,
+                          new java.lang.Object[]{ });
+                      System.out.println("OK VALUE:" + value);
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                      System.out.println("ERR:" + error.code + "|" + error.msg);
+                    }
+                  }
+                }
+                """.formatted(className, className, entry.id()), StandardCharsets.UTF_8);
+            Path classes = workspace.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            Outcome javac = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                className + ".java", hostClass + ".java", "AsyncHostProbe.java"),
+                workspace);
+            checkEq(0, javac.exitCode(), "host async class: the JVM production "
+                + "artifact compiles: " + javac.output());
+            if (javac.exitCode() != 0) {
+                return;
+            }
+            Outcome run = runProcess(List.of("java", "-cp",
+                classpath + java.io.File.pathSeparator + classes, "AsyncHostProbe"),
+                workspace);
+            checkEq(0, run.exitCode(), "host async class: the JVM production artifact "
+                + "executes: " + run.output());
+            check(run.stdout().contains("HOST-START"),
+                "host async class: the JVM artifact's dynamic HOST class path invoked "
+                    + "the loaded async export: " + run.stdout().replace("\n", "\\n"));
+            check(run.stdout().contains("OK VALUE:42"),
+                "host async class: the JVM production artifact completes with the "
+                    + "pinned awaited value: " + run.stdout().replace("\n", "\\n"));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    // =========================================================================
     // The fault drives
     // =========================================================================
 
@@ -1568,17 +2321,66 @@ public class DynamicDispatchBatteryTest {
     /** Rebuilds one lowered unit with a replaced op list (the doctoring seam). */
     private static LoweredModuleUnit corrupted(LoweredModuleUnit unit,
             List<SemanticOp> ops) {
+        return corrupted(unit, ops, unit.functionBindings());
+    }
+
+    private static LoweredModuleUnit corrupted(LoweredModuleUnit unit,
+            List<SemanticOp> ops,
+            Map<FunctionAllocationIdentity, FunctionExecutionBinding> bindings) {
         return new LoweredModuleUnit(unit.formatVersion(), unit.semanticProfile(),
             unit.moduleId(), unit.interfaceHash(), unit.loweringContextHash(),
             unit.requiredCapabilities(), unit.constructCoverage(), unit.classLayouts(),
-            unit.functions(), unit.moduleInit(), unit.exportPlan(),
-            unit.functionBindings(), ops);
+            unit.functions(), unit.moduleInit(), unit.exportPlan(), bindings, ops);
+    }
+
+    /**
+     * One op rebuilt as a {@code CONST} of a string under the same op id and
+     * result identity (the untagged-carrier doctor).
+     */
+    private static SemanticOp constOp(SemanticOp op, String value) {
+        KindPayload payload = new KindPayload.ConstPayload(
+            new deal.semantic.ir.ScalarValue.String(value));
+        List<RuntimeDescriptor> operandTypes = List.of();
+        deal.semantic.ir.OperationContractSnapshot placeholder =
+            new deal.semantic.ir.OperationContractSnapshot(
+                deal.semantic.ir.OperationContractSnapshot.VERSION,
+                SemanticOpKind.CONST, RuntimeDescriptor.String.INSTANCE, operandTypes,
+                null, payload, deal.semantic.ir.FailurePolicyId.NO_DEAL_FAILURE,
+                List.of(), "placeholder");
+        String digest =
+            deal.semantic.ir.ContractSnapshotCanonicalizer.digest(placeholder);
+        return new SemanticOp(op.opId(), SemanticOpKind.CONST, op.origin(), op.result(),
+            RuntimeDescriptor.String.INSTANCE, List.of(), operandTypes, payload,
+            deal.semantic.ir.FailurePolicyId.NO_DEAL_FAILURE,
+            new deal.semantic.ir.OperationContractSnapshot(
+                deal.semantic.ir.OperationContractSnapshot.VERSION,
+                SemanticOpKind.CONST, RuntimeDescriptor.String.INSTANCE, operandTypes,
+                null, payload, deal.semantic.ir.FailurePolicyId.NO_DEAL_FAILURE,
+                List.of(), digest));
+    }
+
+    /** Replaces one unit of a project closure with a doctored unit. */
+    private static ExecutableLoweredProject projectWithUnit(
+            ExecutableLoweredProject project, LoweredModuleUnit unit) {
+        Map<ModuleId, LoweredModuleUnit> modules = new LinkedHashMap<>(project.modules());
+        modules.put(unit.moduleId(), unit);
+        return new ExecutableLoweredProject(project.semanticProfile(),
+            project.interfaceIndex(), modules, project.entryModule());
     }
 
     private static String validateUnit(LoweredModuleUnit unit) {
         return SemanticIrValidator.validate(unit, new SemanticIrValidator.ComparisonFacts(
             unit.interfaceHash(), SemanticProfile.DEAL_V1_2_INT32,
-            "0000000000000000000000000000000000000000000000000000000000000000"))
+            productionInvocation().capabilityRegistryHash()))
+            .map(deal.diagnostics.CompilerDiagnostic::message).orElse(null);
+    }
+
+    private static String validateProject(ExecutableLoweredProject project) {
+        LoweredModuleUnit entry = project.modules().get(project.entryModule());
+        return SemanticIrValidator.validate(project,
+            new SemanticIrValidator.ComparisonFacts(entry.interfaceHash(),
+                SemanticProfile.DEAL_V1_2_INT32,
+                productionInvocation().capabilityRegistryHash()))
             .map(deal.diagnostics.CompilerDiagnostic::message).orElse(null);
     }
 
@@ -1602,7 +2404,8 @@ public class DynamicDispatchBatteryTest {
             "(int)->int", "(int)->string");
 
         // 3. A swapped recorded cell form: the DEAL-body entry is not the
-        //    closed FUNCTION_RETURN cell.
+        //    closed FUNCTION_RETURN cell. The drive pin is the exact rule
+        //    name and the exact DEAL-body cell clause.
         Fixture variant = compileProject(Map.of("src/app.deal", DEAL_BODY_SOURCE));
         if (variant != null) {
             try {
@@ -1630,17 +2433,22 @@ public class DynamicDispatchBatteryTest {
                         }
                     }
                     String verdict = validateUnit(corrupted(app, ops));
-                    check(verdict != null && verdict.contains("DEAL-body"),
-                        "a swapped recorded cell form fails the closed gate with the "
-                            + "pinned cell rule: " + verdict);
+                    check(verdict != null
+                            && verdict.contains("validatorRule R-BOUNDARY-TRIPLE,")
+                            && verdict.contains("the DYNAMIC CALL's DEAL-body return "
+                                + "boundary must be FUNCTION_RETURN"),
+                        "a swapped recorded cell form fails the closed gate with exactly "
+                            + "R-BOUNDARY-TRIPLE and its pinned DEAL-body cell clause: "
+                            + verdict);
                 }
             } finally {
                 deleteRecursively(variant.root());
             }
         }
 
-        // 4. A dynamicFunctionValue-registered value named as the indirect
-        //    callee of a CALL is a producer defect.
+        // 4a. A DynamicFunctionValue-registered value named inline in a
+        //     CallCallee.Static payload: the closed nested shape set rejects
+        //     the dynamic shape at the static callee position (R-ENUM).
         Fixture staticCallee = compileProject(Map.of("src/app.deal", DEAL_BODY_SOURCE));
         if (staticCallee != null) {
             try {
@@ -1653,35 +2461,108 @@ public class DynamicDispatchBatteryTest {
                     KindPayload.CallCallee.Dynamic callee =
                         (KindPayload.CallCallee.Dynamic)
                             ((KindPayload.CallPayload) call.payload()).callee();
-                    List<SemanticOp> ops = new ArrayList<>();
-                    for (SemanticOp op : app.ops()) {
-                        if (op.opId().equals(call.opId())
-                                && op.payload() instanceof KindPayload.CallPayload payload) {
-                            KindPayload.CallPayload replaced =
-                                new KindPayload.CallPayload(deal.semantic.ir.CallMode.INDIRECT,
-                                    new KindPayload.CallCallee.Indirect(callee.callee()),
-                                    payload.signature(), payload.parameterBoundaryOpIds(),
-                                    payload.dynamicReturnBoundary()
-                                        .dealBodyBoundaryOpId(),
-                                    null, null, null);
-                            ops.add(rebuildOp(op, replaced));
-                        } else {
-                            ops.add(op);
+                    FunctionExecutionBinding binding =
+                        registrationOf(app, callee.callee());
+                    check(binding instanceof FunctionExecutionBinding
+                            .DynamicFunctionValue,
+                        "the static-callee drive names the registered dynamic value: "
+                            + binding);
+                    if (binding != null) {
+                        List<SemanticOp> ops = new ArrayList<>();
+                        for (SemanticOp op : app.ops()) {
+                            if (op.opId().equals(call.opId())
+                                    && op.payload() instanceof KindPayload.CallPayload
+                                        payload) {
+                                KindPayload.CallPayload replaced =
+                                    new KindPayload.CallPayload(payload.mode(),
+                                        new KindPayload.CallCallee.Static(binding),
+                                        payload.signature(),
+                                        payload.parameterBoundaryOpIds(), null, null,
+                                        payload.bodyBlock(), payload.externalEntryRef());
+                                ops.add(rebuildOp(op, replaced));
+                            } else {
+                                ops.add(op);
+                            }
                         }
+                        String verdict = validateUnit(corrupted(app, ops));
+                        check(verdict != null
+                                && verdict.contains("validatorRule R-ENUM,")
+                                && verdict.contains("dynamicFunctionValue")
+                                && verdict.contains("in a closed "
+                                    + "FunctionExecutionBinding shape position"),
+                            "a DynamicFunctionValue-registered value named inline as a "
+                                + "static callee fails the closed gate with R-ENUM: "
+                                + verdict);
                     }
-                    String verdict = validateUnit(corrupted(app, ops));
-                    check(verdict != null, "a DynamicFunctionValue-registered value named "
-                        + "as an indirect callee fails the closed gate");
                 }
             } finally {
                 deleteRecursively(staticCallee.root());
             }
         }
 
-        // 5. An untagged carrier at a dynamic call: the emitted dispatch keeps
-        //    its fail-closed residue branch with the pinned E8001 projection at
-        //    the call origin on both targets (the runtime residue drive is
-        //    DynamicDispatchEmissionTest's; this drive pins the emitted shape).
+        // 4b. The same registration reached through an Indirect callee
+        //     identity: the re-recorded single return boundary replaces the
+        //     dynamic cell set, so the callee-position exclusivity clause is
+        //     the failing rule (R-FUNCTION-BINDING).
+        Fixture indirectCallee = compileProject(Map.of("src/app.deal", DEAL_BODY_SOURCE));
+        if (indirectCallee != null) {
+            try {
+                SemanticLowerer.ProjectLoweringResult result = lower(indirectCallee);
+                check(result.project() != null, "the indirect-callee drive lowers: "
+                    + result.diagnostics());
+                if (result.project() != null) {
+                    LoweredModuleUnit app = result.project().modules().get(APP);
+                    SemanticOp call = dynamicCall(app);
+                    KindPayload.CallCallee.Dynamic callee =
+                        (KindPayload.CallCallee.Dynamic)
+                            ((KindPayload.CallPayload) call.payload()).callee();
+                    KindPayload.DynamicReturnBoundary dynamic =
+                        ((KindPayload.CallPayload) call.payload())
+                            .dynamicReturnBoundary();
+                    List<SemanticOp> ops = new ArrayList<>();
+                    for (SemanticOp op : app.ops()) {
+                        if (op.opId().equals(call.opId())
+                                && op.payload() instanceof KindPayload.CallPayload
+                                    payload) {
+                            KindPayload.CallPayload replaced =
+                                new KindPayload.CallPayload(
+                                    deal.semantic.ir.CallMode.INDIRECT,
+                                    new KindPayload.CallCallee.Indirect(callee.callee()),
+                                    payload.signature(),
+                                    payload.parameterBoundaryOpIds(),
+                                    dynamic.dealBodyBoundaryOpId(), null, null, null);
+                            ops.add(rebuildOp(op, replaced));
+                        } else if (op.opId().equals(dynamic.hostBoundaryOpId())
+                                || op.opId().equals(dynamic.externalBoundaryOpId())) {
+                            // The re-recorded indirect call carries the single
+                            // DEAL-body return boundary; the other two dynamic
+                            // cells are no longer part of any invocation shape.
+                            continue;
+                        } else {
+                            ops.add(op);
+                        }
+                    }
+                    String verdict = validateUnit(corrupted(app, ops));
+                    check(verdict != null
+                            && verdict.contains("validatorRule R-FUNCTION-BINDING,")
+                            && verdict.contains("resolves its callee to a "
+                                + "DynamicFunctionValue registration"),
+                        "a DynamicFunctionValue registration reached through an Indirect "
+                            + "callee identity fails the callee-position exclusivity "
+                            + "clause (R-FUNCTION-BINDING): " + verdict);
+                }
+            } finally {
+                deleteRecursively(indirectCallee.root());
+            }
+        }
+
+        // 5. An untagged carrier at a dynamic call: the carrier-producing op
+        //    is replaced by a non-function CONST and the registration is
+        //    removed, so the dispatch reads no class tag. The oracle fails
+        //    closed as a producer defect; the real LuaJIT and javac/java
+        //    artifacts project the pinned E8001 expected-function row at the
+        //    call origin with the carrier's actual kind and the
+        //    expected/actual fields.
         Fixture residue = compileProject(Map.of("src/app.deal", DEAL_BODY_SOURCE));
         if (residue != null) {
             try {
@@ -1691,28 +2572,148 @@ public class DynamicDispatchBatteryTest {
                 if (result.project() != null) {
                     LoweredModuleUnit app = result.project().modules().get(APP);
                     SemanticOp call = dynamicCall(app);
+                    ValueId calleeValue = ((KindPayload.CallCallee.Dynamic)
+                        ((KindPayload.CallPayload) call.payload()).callee()).callee();
                     String origin = SemanticRuntimeModel.originAtom(
                         call.origin().sourceId(), call.origin().span().startLine(),
                         call.origin().span().startColumn());
-                    String lua = LuaSemanticEmitter.emitProductionProject(
-                        result.project(), result.tables(), result.registries(),
-                        residue.surface());
-                    String jvm = JvmSemanticEmitter.emitProductionProject(
-                        result.project(), result.tables(), result.registries(),
-                        JvmBackend.classNameFor(result.project().entryModule().path()),
-                        residue.surface()).source();
-                    check(lua.contains("expected function, got ")
-                            && lua.contains(origin),
-                        "the LuaJIT dispatch retains its fail-closed residue with the "
-                            + "pinned E8001 projection at the call origin");
-                    check(jvm.contains("expected function, got ")
-                            && jvm.contains(origin),
-                        "the JVM dispatch retains its fail-closed residue with the "
-                            + "pinned E8001 projection at the call origin");
+                    List<SemanticOp> ops = new ArrayList<>();
+                    for (SemanticOp op : app.ops()) {
+                        if (calleeValue.equals(resultValueOf(op))) {
+                            ops.add(constOp(op, "carrier"));
+                        } else {
+                            ops.add(op);
+                        }
+                    }
+                    Map<FunctionAllocationIdentity, FunctionExecutionBinding> bindings =
+                        new LinkedHashMap<>(app.functionBindings());
+                    bindings.remove(new FunctionAllocationIdentity(calleeValue.id()));
+                    LoweredModuleUnit doctored = corrupted(app, ops, bindings);
+                    ExecutableLoweredProject doctoredProject =
+                        projectWithUnit(result.project(), doctored);
+                    String gate = validateProject(doctoredProject);
+                    check(gate == null, "the closed gate accepts the residue drive: "
+                        + gate);
+                    if (gate == null) {
+                        String oracleFailure = null;
+                        try {
+                            SemanticOracle.executeProjectInits(doctoredProject,
+                                result.tables(), result.registries(), null);
+                        } catch (RuntimeException rejected) {
+                            oracleFailure = rejected.getClass().getSimpleName() + ": "
+                                + rejected.getMessage();
+                        }
+                        check(oracleFailure != null && oracleFailure.contains(
+                                "has no registered FunctionExecutionBinding (producer "
+                                    + "defect)"),
+                            "the oracle fails closed on the unresolvable carrier as a "
+                                + "producer defect naming the missing registration: "
+                                + oracleFailure);
+                        runResidueLua(doctoredProject, result, residue.surface(), origin);
+                        runResidueJvm(doctoredProject, result, residue.surface(), origin);
+                    }
                 }
             } finally {
                 deleteRecursively(residue.root());
             }
+        }
+    }
+
+    /** The real LuaJIT artifact of the untagged-carrier residue drive. */
+    private static void runResidueLua(ExecutableLoweredProject project,
+            SemanticLowerer.ProjectLoweringResult result, HostDeclarationSurface surface,
+            String origin) throws Exception {
+        Path workspace = Files.createTempDirectory("battery-residue-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(project,
+                result.tables(), result.registries(), surface), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, """
+                dofile("%s")
+                local ok, err = __dealMain()
+                if ok then print("OK") os.exit(0) end
+                if type(err) == "table" and err.__d then
+                  print("ERR:" .. err.code .. "|" .. tostring(err.m) .. "|"
+                    .. tostring(err.o) .. "|" .. tostring(err.e or "-") .. "|"
+                    .. tostring(err.a or "-"))
+                else
+                  print("ERR:" .. tostring(err))
+                end
+                """.formatted(artifact.toAbsolutePath().toString()),
+                StandardCharsets.UTF_8);
+            ProcessBuilder builder = new ProcessBuilder("luajit",
+                probe.toAbsolutePath().toString());
+            builder.directory(workspace.toFile());
+            builder.environment().put("DEAL_DEFER_MAIN", "1");
+            Path stderrFile = Files.createTempFile(workspace, "stderr", ".txt");
+            builder.redirectError(stderrFile.toFile());
+            Process process = builder.start();
+            String stdout = new String(process.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+            int exit = process.waitFor();
+            String stderr = Files.readString(stderrFile, StandardCharsets.UTF_8);
+            checkEq(0, exit, "the residue LuaJIT artifact executes: " + stdout + stderr);
+            check(stdout.contains("ERR:E8001|expected function, got string|" + origin
+                    + "|function|string"),
+                "the residue LuaJIT artifact projects the pinned E8001 "
+                    + "\"expected function, got string\" row with the expected/actual "
+                    + "fields at the call origin: " + stdout.replace("\n", "\\n"));
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The real javac/java artifact of the untagged-carrier residue drive. */
+    private static void runResidueJvm(ExecutableLoweredProject project,
+            SemanticLowerer.ProjectLoweringResult result, HostDeclarationSurface surface,
+            String origin) throws Exception {
+        Path workspace = Files.createTempDirectory("battery-residue-jvm");
+        try {
+            String className = JvmBackend.classNameFor(project.entryModule().path());
+            JvmSemanticEmitter.EmissionResult emission =
+                JvmSemanticEmitter.emitProductionProject(project, result.tables(),
+                    result.registries(), className, surface);
+            Files.writeString(workspace.resolve(className + ".java"),
+                emission.source(), StandardCharsets.UTF_8);
+            Files.writeString(workspace.resolve("ResidueProbe.java"), """
+                final class ResidueProbe {
+                  public static void main(String[] args) {
+                    try {
+                      %s.dealMain();
+                      System.out.println("OK");
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError error) {
+                      System.out.println("ERR:" + error.code + "|" + error.msg + "|"
+                          + error.origin + "|" + error.expected + "|"
+                          + error.actual);
+                    }
+                  }
+                }
+                """.formatted(className), StandardCharsets.UTF_8);
+            Path classes = workspace.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            Outcome javac = runProcess(List.of("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                className + ".java", "ResidueProbe.java"), workspace);
+            checkEq(0, javac.exitCode(), "the residue JVM artifact compiles: "
+                + javac.output());
+            if (javac.exitCode() != 0) {
+                return;
+            }
+            Outcome run = runProcess(List.of("java", "-cp",
+                classpath + java.io.File.pathSeparator + classes, "ResidueProbe"),
+                workspace);
+            checkEq(0, run.exitCode(), "the residue JVM artifact executes: "
+                + run.output());
+            check(run.stdout().contains("ERR:E8001|expected function, got string|"
+                    + origin + "|function|string"),
+                "the residue JVM artifact projects the pinned E8001 "
+                    + "\"expected function, got string\" row with the expected/actual "
+                    + "fields at the call origin: " + run.stdout().replace("\n", "\\n"));
+        } finally {
+            deleteRecursively(workspace);
         }
     }
 
@@ -1749,12 +2750,16 @@ public class DynamicDispatchBatteryTest {
         testFunctionTypedCompletion();
         testCrossModuleFixtures();
         testDealBodyClass();
+        testDealBodyAsyncClass();
         testAdapterClass();
+        testAdapterAsyncClass();
         testStdlibCallableClass();
         testIntrinsicConversionClass();
         testSharedBodyExternalClass();
+        testSharedBodyExternalAsyncClass();
         testHostClass();
         testHostMaterializedValueClass();
+        testHostAsyncClass();
         testFaultDrives();
         testNoExtension();
         System.out.println();
