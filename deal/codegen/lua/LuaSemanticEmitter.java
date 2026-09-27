@@ -2931,7 +2931,13 @@ public final class LuaSemanticEmitter {
         private void emitFunctionAdapt(SemanticOp op) {
             KindPayload.FunctionAdaptPayload payload =
                 (KindPayload.FunctionAdaptPayload) op.payload();
-            emitStart(op);
+            // The VALUE operand's carrier expression: for the seeded
+            // intrinsic identity no slot holds it before this creation, so
+            // the START's operand atom and the wrapper's own field read the
+            // one carrier expression (never a nil slot read).
+            String valueExpr = payload.source() instanceof AdaptSourceRef.Value value
+                ? adaptValueExpr(value) : null;
+            emitAdaptStart(op, payload, valueExpr);
             String target = slot((ValueId) op.result());
             out.append(target).append(" = {__mode = ");
             switch (payload.mode()) {
@@ -2948,14 +2954,8 @@ public final class LuaSemanticEmitter {
                 .append(luaString(payload.targetSignature().canonicalSpecText()))
                 .append(", __fid = nil");
             switch (payload.source()) {
-                case AdaptSourceRef.Value value -> {
-                    String sourceExpr = intrinsicCarrierExpr(value.value());
-                    if (sourceExpr == null) {
-                        sourceExpr = hasProducer(value.value())
-                            ? slot(value.value()) : exportPlaceholderCarrier();
-                    }
-                    out.append(", __value = ").append(sourceExpr);
-                }
+                case AdaptSourceRef.Value ignored ->
+                    out.append(", __value = ").append(valueExpr);
                 case AdaptSourceRef.SharedCell cell ->
                     out.append(", __cell = ")
                         .append(cell(cell.binding(), cell.generation()));
@@ -2965,6 +2965,42 @@ public final class LuaSemanticEmitter {
             out.append("}\n");
             out.append(target).append(".__fn = __adaptInvoke\n");
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * The carrier expression of one adapter VALUE source: the memoized
+         * intrinsic carrier when the identity carries the seeded
+         * {@code IntrinsicFunction} registration (J2), the operand's own
+         * slot for a produced identity, and the landed placeholder otherwise.
+         */
+        private String adaptValueExpr(AdaptSourceRef.Value value) {
+            String sourceExpr = intrinsicCarrierExpr(value.value());
+            if (sourceExpr == null) {
+                sourceExpr = hasProducer(value.value())
+                    ? slot(value.value()) : exportPlaceholderCarrier();
+            }
+            return sourceExpr;
+        }
+
+        /**
+         * The FUNCTION_ADAPT START (E6): the VALUE operand's atom is the
+         * operand's own carrier expression ({@code valueExpr}) exactly when
+         * the op records that operand (the oracle atomizes its operand list);
+         * the SHARED_CELL and REEVALUATE_THUNK modes carry zero operand atoms
+         * (their operands are empty by construction).
+         */
+        private void emitAdaptStart(SemanticOp op,
+                KindPayload.FunctionAdaptPayload payload, String valueExpr) {
+            out.append("__ev(").append(luaString(opKey(op.opId()))).append(", \"START\", ")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", {");
+            if (valueExpr != null && !op.operands().isEmpty()) {
+                out.append("__atom(")
+                    .append(luaString(staticKind(payload.sourceSignature())))
+                    .append(", ").append(valueExpr).append(")");
+            }
+            out.append("}, nil, nil)\n");
         }
 
         /**
@@ -3321,7 +3357,16 @@ public final class LuaSemanticEmitter {
                     // only — every N target-signature parameter boundary
                     // already ran above. The adapter protocol pushes the
                     // source body's frame itself; the identical
-                    // completion error propagates unchanged.
+                    // completion error propagates unchanged. An adapter
+                    // whose recorded source is the seeded intrinsic
+                    // identity runs the same order at this call site with
+                    // the conversion ladder as its source invocation
+                    // (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J5).
+                    if (adapterIntrinsicKind(adapter) != null) {
+                        emitAdapterOverIntrinsicRun(op, payload, adapter);
+                        break;
+                    }
                     String adapterSlot =
                         slot((ValueId) opsById.get(adapter.adaptOpId()).result());
                     StringBuilder args = new StringBuilder();
@@ -3874,6 +3919,122 @@ public final class LuaSemanticEmitter {
         }
 
         /**
+         * The intrinsic kind of one adapter's statically fixed recorded
+         * source, or {@code null} (ISSUE-0680; design source
+         * {@code conversion-intrinsic-function-values} J5): a VALUE source
+         * operand whose identity carries the seeded {@code IntrinsicFunction}
+         * registration under the identity-preserving-load predicate — the
+         * same resolution the adapter's creation operand publishes, so the
+         * call site and the creation site agree on the source class, and an
+         * operand of any other binding or class keeps the landed
+         * {@code __adaptInvoke} protocol.
+         */
+        private IntrinsicKind adapterIntrinsicKind(
+                FunctionExecutionBinding.AdapterBinding adapter) {
+            if (!(adapter.sourceRef() instanceof AdaptSourceRef.Value value)) {
+                return null;
+            }
+            return intrinsicKindOf(value.value());
+        }
+
+        /**
+         * The one conversion ladder at one DEAL call site (ISSUE-0679 J4;
+         * ISSUE-0680 for the adapter-over-intrinsic path): the closed kind's
+         * conversion over the cell-admitted argument with the invoking op's
+         * own context, kind label, and origin — the pinned texts and the
+         * FAILURE event carry the invoking op. One algorithm authority with
+         * the direct {@code INTRINSIC_CALL} arm, whose kind label stays its
+         * own.
+         */
+        private void emitIntrinsicLadder(SemanticOp op, IntrinsicKind kind, String input,
+                                         String indent) {
+            String helper = kind == IntrinsicKind.INT_CONVERT ? "__intConv" : "__numConv";
+            out.append(indent).append("__resT = ").append(helper).append("(")
+                .append(input).append(", ").append(luaString(op.kind().name()))
+                .append(", ")
+                .append(luaString(staticKind(kind.declaredSignature().paramTypes().get(0))))
+                .append(", ").append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op))).append(")\n");
+        }
+
+        /**
+         * The one conversion ladder inside a task closure (ISSUE-0680): the
+         * task body's pcall over the closed kind's conversion with the
+         * invoking op's own context and kind label; the closure re-raises
+         * the captured conversion error unchanged, so a conversion failure
+         * surfaces at the owning AWAIT exactly as the task protocol
+         * prescribes (the async form's single completion position).
+         */
+        private void emitIntrinsicLadderPcall(SemanticOp op, IntrinsicKind kind,
+                                              String input, String indent) {
+            String helper = kind == IntrinsicKind.INT_CONVERT ? "__intConv" : "__numConv";
+            out.append(indent).append("__okA, __resA = pcall(").append(helper)
+                .append(", ").append(input).append(", ")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(staticKind(kind.declaredSignature().paramTypes().get(0))))
+                .append(", ").append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op))).append(")\n");
+        }
+
+        /**
+         * The adapter-over-intrinsic invocation at a statically classified
+         * call site (ISSUE-0680; design source
+         * {@code conversion-intrinsic-function-values} J5): the landed D15
+         * order with the seeded intrinsic identity as the recorded source —
+         * (1) the source resolution per the recorded capture mode (VALUE
+         * retains the memoized carrier the adapter creation published),
+         * (2) the carried canonical spec checked against the recorded source
+         * signature (the pinned E8010 at this CALL's origin), (3) the
+         * leading-M argument projection over the recorded target-cell values,
+         * (4) the one conversion ladder with the invoking CALL op's own
+         * context and kind, and (5) the recorded {@code HOST_TO_DEAL} +
+         * {@code HOST_SYNC_RETURN} cell — the source class is HOST, so the
+         * call op runs exactly the cell the intrinsic's own indirect arm
+         * records. The checked value is left in {@code __resT}.
+         */
+        private void emitAdapterOverIntrinsicRun(SemanticOp op,
+                KindPayload.CallPayload payload,
+                FunctionExecutionBinding.AdapterBinding adapter) {
+            IntrinsicKind kind = adapterIntrinsicKind(adapter);
+            if (kind == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " records an adapter whose source is not the seeded intrinsic "
+                    + "identity (producer defect)");
+            }
+            RuntimeDescriptor.Func declared = kind.declaredSignature();
+            String adapterSlot = slot((ValueId) opsById.get(adapter.adaptOpId()).result());
+            String origin = originOf(op);
+            out.append("__dynS = __adaptSource(").append(adapterSlot).append(")\n");
+            out.append("__okB, __chkB = pcall(__fncheck, __dynS, ")
+                .append(luaString(adapter.sourceSignature().canonicalSpecText()))
+                .append(", ").append(luaString(origin)).append(")\n");
+            out.append("if not __okB then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            int m = adapter.sourceSignature().paramTypes().size();
+            if (m != declared.paramTypes().size()
+                    || m > payload.parameterBoundaryOpIds().size()) {
+                throw new IllegalStateException("the adapter-over-intrinsic call "
+                    + op.opId() + " projects " + m + " leading source argument(s) "
+                    + "onto the '" + kind + "' intrinsic's "
+                    + declared.paramTypes().size() + " declared parameter(s) with "
+                    + payload.parameterBoundaryOpIds().size()
+                    + " recorded target cell(s) (producer defect)");
+            }
+            SemanticOp leading = opsById.get(payload.parameterBoundaryOpIds().get(0));
+            String input = slot(((KindPayload.BoundaryPayload) leading.payload()).input());
+            emitIntrinsicLadder(op, kind, input, "");
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null
+                ? null : opsById.get(payload.returnBoundaryOpId());
+            emitHostReturnCellRun(op, returnBoundary, "__atom");
+        }
+
+        /**
          * The cataloged-callable sub-class of one host-shaped call: the read's
          * own registration resolved the closed catalog row, so the invocation is
          * the row's one invoker with the invoking call's own context — never the
@@ -4186,17 +4347,50 @@ public final class LuaSemanticEmitter {
             out.append("    table.remove(__frames, 1)\n");
             out.append("    __module = __modStack[#__modStack]\n");
             out.append("    __modStack[#__modStack] = nil\n");
+            out.append("    if not __okT then\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
+            out.append("      error(__resT, 0)\n");
+            out.append("    end\n");
+            if (callOwnedDealCell) {
+                emitRecordedCellRun(op, recordedDealCell, "__resT", "    ");
+            }
+            // The runtime adapter branch's intrinsic source (ISSUE-0680;
+            // design source {@code conversion-intrinsic-function-values}
+            // J5): the resolved source value is the memoized intrinsic
+            // carrier, so the same D15 sequence runs here — the leading-M
+            // recorded argument through the one conversion ladder with the
+            // invoking CALL op's context and kind, then the recorded
+            // HOST_TO_DEAL + HOST_SYNC_RETURN cell of the dynamic set (the
+            // source class is HOST). Non-intrinsic source values keep the
+            // landed fail-closed residue.
+            out.append("  elseif __dynS.__it ~= nil then\n");
+            if (payload.parameterBoundaryOpIds().isEmpty()) {
+                // The leading-M projection of the runtime intrinsic source has
+                // no argument to convert (the intrinsic declares one
+                // parameter): the carrier fails closed at the call origin.
+                out.append("    __dynC = __dynS\n");
+                emitDynamicCarrierFailure(op, origin);
+            } else {
+                SemanticOp dynamicLeading =
+                    opsById.get(payload.parameterBoundaryOpIds().get(0));
+                String dynamicInput =
+                    slot(((KindPayload.BoundaryPayload) dynamicLeading.payload()).input());
+                out.append("    if __dynS.__it == \"INT_CONVERT\" then\n");
+                emitIntrinsicLadder(op, IntrinsicKind.INT_CONVERT, dynamicInput,
+                    "      ");
+                out.append("    elseif __dynS.__it == \"NUMBER_CONVERT\" then\n");
+                emitIntrinsicLadder(op, IntrinsicKind.NUMBER_CONVERT, dynamicInput,
+                    "      ");
+                out.append("    else\n");
+                out.append("      __dynC = __dynS\n");
+                emitDynamicCarrierFailure(op, origin);
+                out.append("    end\n");
+                emitHostReturnCellRun(op, hostCell, "__atom");
+            }
             out.append("  else\n");
             out.append("    __dynC = __dynS\n");
             emitDynamicCarrierFailure(op, origin);
             out.append("  end\n");
-            out.append("  if not __okT then\n");
-            emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__resT)");
-            out.append("    error(__resT, 0)\n");
-            out.append("  end\n");
-            if (callOwnedDealCell) {
-                emitRecordedCellRun(op, recordedDealCell, "__resT", "  ");
-            }
             // HOST: the loaded surface entry (the carrier itself) and the
             // recorded HOST_TO_DEAL + HOST_SYNC_RETURN cell.
             out.append("elseif __dynK == \"HOST\" then\n");
@@ -4481,10 +4675,42 @@ public final class LuaSemanticEmitter {
             out.append("    error(__chkB, 0)\n");
             out.append("  end\n");
             out.append("  __dynS = __chkB\n");
-            out.append("  if __dynClass(__dynS) ~= \"DEAL_BODY\" then\n");
+            // The runtime adapter branch's intrinsic source (ISSUE-0680;
+            // design source {@code conversion-intrinsic-function-values}
+            // J5): the resolved source value is the memoized intrinsic
+            // carrier, so the task is the closed DEAL_BODY task running the
+            // one conversion ladder with this op's context and kind over the
+            // leading-M recorded argument and completing immediately with
+            // the converted value; the single AWAIT runs the landed
+            // ASYNC_COMPLETION cell. Every other non-DEAL_BODY source keeps
+            // the landed fail-closed residue.
+            out.append("  if __dynS.__it ~= nil then\n");
+            if (recordedArgCount(payload, op) == 0) {
+                // The leading-M projection of the runtime intrinsic source has
+                // no argument to convert (the intrinsic declares one
+                // parameter): the carrier fails closed at the start origin.
+                out.append("    __dynC = __dynS\n");
+                emitDynamicCarrierFailure(op, origin);
+            } else {
+            out.append("    __asyncStartTask(").append(token.tokenId())
+                .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+            out.append("      local __okA, __resA\n");
+            out.append("      if __dynS.__it == \"INT_CONVERT\" then\n");
+            emitIntrinsicLadderPcall(op, IntrinsicKind.INT_CONVERT,
+                carrierArgs + "[1]", "        ");
+            out.append("      else\n");
+            emitIntrinsicLadderPcall(op, IntrinsicKind.NUMBER_CONVERT,
+                carrierArgs + "[1]", "        ");
+            out.append("      end\n");
+            out.append("      if not __okA then error(__resA, 0) end\n");
+            out.append("      return __resA\n");
+            out.append("    end), ")
+                .append(carrierArgs).append(")\n");
+            }
+            out.append("  elseif __dynClass(__dynS) ~= \"DEAL_BODY\" then\n");
             out.append("    __dynC = __dynS\n");
             emitDynamicCarrierFailure(op, origin);
-            out.append("  end\n");
+            out.append("  else\n");
             out.append("  __dynM = __fnModules[__dynS.__fid]\n");
             out.append("  if __dynM == nil then\n");
             out.append("    __dynC = __dynS\n");
@@ -4506,6 +4732,7 @@ public final class LuaSemanticEmitter {
             }
             out.append("    return __resA\n");
             out.append("  end), ").append(carrierArgs).append(")\n");
+            out.append("  end\n");
             // HOST: the carrier is a loaded host surface entry, so the
             // declared host export's async start runs through the same host
             // calling convention and the same ASYNC_OPERATION_HANDLE terminal
@@ -6383,12 +6610,27 @@ public final class LuaSemanticEmitter {
                 }
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitAsyncExternalStart(op, token, payload.externalAsyncLink());
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw new IllegalStateException("ASYNC_START " + op.opId()
-                        + " resolves the intrinsic function carrier " + intrinsic.kind()
-                        + " (the intrinsic carrier's async execution is the "
-                        + "function-value child's; the conversion intrinsics are "
-                        + "synchronous values — producer defect)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The intrinsic's async form (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J3: the
+                    // conversion intrinsics are synchronous values, so an
+                    // async use is a checker rejection — this arm is the
+                    // deterministic closed treatment of a doctored site): the
+                    // closed DEAL_BODY task runs the one conversion ladder
+                    // inside the task closure with this op's context and kind
+                    // over the recorded argument carrier and completes
+                    // immediately with the converted value; the single AWAIT
+                    // runs the landed ASYNC_COMPLETION cell on the completion
+                    // (zero return boundaries).
+                    String carrier = "S.__sa" + op.opId().id() + "[1]";
+                    out.append("__asyncStartTask(").append(token.tokenId())
+                        .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
+                    out.append("  local __okA, __resA\n");
+                    emitIntrinsicLadderPcall(op, intrinsic.kind(), carrier, "  ");
+                    out.append("  if not __okA then error(__resA, 0) end\n");
+                    out.append("  return __resA\n");
+                    out.append("end), S.__sa").append(op.opId().id()).append(")\n");
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw new IllegalStateException("ASYNC_START " + op.opId()
                         + " resolves the dynamic function value produced by "

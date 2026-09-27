@@ -4043,8 +4043,20 @@ public final class SemanticOracle {
                 case FunctionExecutionBinding.AdapterBinding nested ->
                     throw new IllegalStateException("adapter-of-adapter invocation is "
                         + "outside the statically-resolved slice (ISSUE-0531)");
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicExecutionDefect(intrinsic);
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The adapter-over-intrinsic D15 path (ISSUE-0680; design
+                    // source {@code conversion-intrinsic-function-values} J5):
+                    // the adapter's recorded source is the seeded intrinsic
+                    // identity whose class is HOST
+                    // ({@link DynamicReturnBoundaryProtocol#kindOf}), so the
+                    // leading-M arguments run the one conversion ladder with
+                    // this call op's context and kind, and the recorded
+                    // HOST_TO_DEAL + HOST_SYNC_RETURN cell runs by the call op
+                    // — exactly the intrinsic's own indirect arm.
+                    Value value = invokeIntrinsicValue(op, intrinsic, leading);
+                    yield runBoundaryChild(opOf(payload.returnBoundaryOpId()), value,
+                        BoundaryContext.none());
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicFunctionValueDefect(dynamic);
             };
@@ -4560,12 +4572,14 @@ public final class SemanticOracle {
 
         /**
          * The fail-closed producer defect of an intrinsic carrier's
-         * execution at a site with no realization yet: the indirect call of
-         * an {@code IntrinsicFunction} registration runs the conversion ladder
-         * at the call origin (ISSUE-0679 — the static/indirect arm and the
-         * dynamic dispatch's HOST class), while the adapter-over-intrinsic
-         * source invocation, the callback arm and the async forms stay
-         * outside the realized slice (the conversion intrinsics are
+         * execution at the host-driven callback arm, which has no realization
+         * yet: the indirect call of an {@code IntrinsicFunction} registration
+         * runs the conversion ladder at the call origin (ISSUE-0679 — the
+         * static/indirect arm and the dynamic dispatch's HOST class), and the
+         * adapter-over-intrinsic source invocation, both emitters' async forms
+         * and the runtime adapter branch run it too (ISSUE-0680), while a
+         * host-driven {@code CALLBACK_INVOKE} of an intrinsic value stays
+         * outside the checked corpus (the conversion intrinsics are
          * synchronous values; such a site is a producer defect).
          */
         private static IllegalStateException intrinsicExecutionDefect(
@@ -4740,8 +4754,29 @@ public final class SemanticOracle {
                     SemanticOp entry = opOf(new OpId(external.moduleId(), calleeTokenId));
                     executeAsyncEntry(entry, op.opId(), checkedArgs, calleeTokenId);
                 }
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicExecutionDefect(intrinsic);
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The intrinsic's async form (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J3: the
+                    // conversion intrinsics are synchronous values, so an
+                    // async use is a checker rejection — this arm is the
+                    // deterministic closed treatment of a doctored site): the
+                    // closed DEAL_BODY task runs the one conversion ladder
+                    // over the checked arguments and completes immediately
+                    // with the converted value; the single AWAIT runs the
+                    // landed ASYNC_COMPLETION cell on the completion (zero
+                    // return boundaries).
+                    if (checkedArgs.size() != intrinsic.descriptor().paramTypes().size()) {
+                        throw new IllegalStateException("the async intrinsic start "
+                            + op.opId() + " carries " + checkedArgs.size()
+                            + " checked argument(s) for the '" + intrinsic.kind()
+                            + "' intrinsic's "
+                            + intrinsic.descriptor().paramTypes().size()
+                            + " declared parameter(s) (producer defect)");
+                    }
+                    tasks.put(token.tokenId(), new Task(token,
+                        () -> invokeIntrinsicValue(op, intrinsic, checkedArgs)));
+                    readyQueue.add(token.tokenId());
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicFunctionValueDefect(dynamic);
             }
@@ -4852,6 +4887,29 @@ public final class SemanticOracle {
                     readyQueue.add(token.tokenId());
                 }
                 case HOST -> {
+                    if (sourceBinding
+                            instanceof FunctionExecutionBinding.IntrinsicFunction intrinsic) {
+                        // The runtime adapter branch over an intrinsic carrier
+                        // (ISSUE-0680): the intrinsic's HOST sub-class is the
+                        // synchronous conversion, so the task completes
+                        // immediately with the converted value and the single
+                        // AWAIT runs the landed ASYNC_COMPLETION cell (zero
+                        // caller-side return boundaries).
+                        if (leading.size() != intrinsic.descriptor()
+                                .paramTypes().size()) {
+                            throw new IllegalStateException("the runtime adapter "
+                                + "branch's intrinsic source at ASYNC_START "
+                                + op.opId() + " projects " + leading.size()
+                                + " leading argument(s) onto the '" + intrinsic.kind()
+                                + "' intrinsic's "
+                                + intrinsic.descriptor().paramTypes().size()
+                                + " declared parameter(s) (producer defect)");
+                        }
+                        tasks.put(token.tokenId(), new Task(token,
+                            () -> invokeIntrinsicValue(op, intrinsic, leading)));
+                        readyQueue.add(token.tokenId());
+                        return;
+                    }
                     requireHostResponder();
                     ModuleId module;
                     String export;

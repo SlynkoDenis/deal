@@ -10396,23 +10396,6 @@ public final class SemanticLowerer {
         }
 
         /**
-         * The fail-closed producer defect of an invocation site that has no
-         * realization for the intrinsic function carrier yet: the indirect
-         * call of an {@code IntrinsicFunction} registration is realized
-         * (ISSUE-0679 — the host cell family plus the conversion ladder at the
-         * call site), while the adapter-over-intrinsic source invocation and
-         * the async forms stay outside this slice (the conversion intrinsics
-         * are synchronous values; such a site is a producer defect).
-         */
-        private static ConstructUnlowered intrinsicCarrierDefect(
-                FunctionExecutionBinding.IntrinsicFunction intrinsic, String site) {
-            return new ConstructUnlowered("the '" + intrinsic.kind() + "' intrinsic "
-                + "function value resolved by " + site + " has no call execution in this "
-                + "slice (the adapter-over-intrinsic invocation and the async forms are "
-                + "outside the realized slice — producer defect)");
-        }
-
-        /**
          * The fail-closed producer defect of a dynamic function value
          * resolved by a statically classified site: this slice registers
          * the closed {@code DynamicFunctionValue} binding only — a call or
@@ -10642,8 +10625,19 @@ public final class SemanticLowerer {
                             }
                         }
                         case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                            throw intrinsicCarrierDefect(intrinsic, "the adapted call "
-                                + "of '" + calleeName + "'");
+                            // The adapter-over-intrinsic D15 path (ISSUE-0680;
+                            // design source
+                            // {@code conversion-intrinsic-function-values} J5):
+                            // the adapter's recorded source is the seeded
+                            // intrinsic identity whose class is HOST
+                            // ({@link DynamicReturnBoundaryProtocol#kindOf}),
+                            // so the adapted call records the same single
+                            // return cell its own indirect arm records — the
+                            // HOST_TO_DEAL + HOST_SYNC_RETURN cell run by the
+                            // call op (the adapter's xN target-signature
+                            // FUNCTION_PARAMETER cells were recorded above).
+                            returnBoundaryOpId = emitHostReturnBoundary(
+                                intrinsic.descriptor(), result, call.span(), callOpId);
                         case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                             throw dynamicCarrierDefect(dynamic, "the adapted call of '"
                                 + calleeName + "'");
@@ -11322,8 +11316,39 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.AdapterBinding adapter ->
                     throw new ConstructUnlowered("adapter-over-async lower via "
                         + "lowerAdapterOverAsync (producer defect)");
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicCarrierDefect(intrinsic, "the await call");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The intrinsic's async form (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J3: the
+                    // conversion intrinsics are synchronous values, so an
+                    // async use is a checker rejection — E3013 — and this arm
+                    // is the deterministic closed treatment of a doctored
+                    // site): the closed DEAL_BODY task runs the one conversion
+                    // ladder over the checked arguments and completes
+                    // immediately with the converted value; the single AWAIT
+                    // runs the landed ASYNC_COMPLETION cell on the completion
+                    // (zero return boundaries — never a fail-closed producer
+                    // defect).
+                    source = AsyncStartSource.DEAL_BODY;
+                    startOpId = ids.nextOpId(module, nextOrdinal++, 0);
+                    token = new AsyncTokenId.Canonical(
+                        ids.nextTokenId(module, nextOrdinal++, 0),
+                        AsyncTokenOwner.DEAL_BODY_TASK);
+                    if (args.size() != intrinsic.descriptor().paramTypes().size()) {
+                        throw new ConstructUnlowered("async intrinsic call with "
+                            + args.size() + " arguments for the '" + intrinsic.kind()
+                            + "' intrinsic's "
+                            + intrinsic.descriptor().paramTypes().size()
+                            + " declared parameter(s) (producer defect)");
+                    }
+                    for (int i = 0; i < args.size(); i++) {
+                        SemanticOp boundary = buildChildBoundary(
+                            BoundaryKind.FUNCTION_PARAMETER,
+                            intrinsic.descriptor().paramTypes().get(i), args.get(i),
+                            call.span(), startOpId);
+                        parameterBoundaryOps.add(boundary);
+                        parameterBoundaryIds.add(boundary.opId());
+                    }
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicCarrierDefect(dynamic, "the await call");
             }
@@ -11446,9 +11471,34 @@ public final class SemanticLowerer {
                 case FunctionExecutionBinding.AdapterBinding nestedAdapter ->
                     throw new ConstructUnlowered("nested adapter source of '" + calleeName
                         + "' (adapter-of-adapter invocation is ISSUE-0531's)");
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw intrinsicCarrierDefect(intrinsic, "the adapter-over-async call "
-                        + "of '" + calleeName + "'");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The adapter-over-async site over the seeded intrinsic
+                    // identity (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J5): the
+                    // conversion intrinsics are synchronous boundary-shaped
+                    // callables, so the nested source start is the closed
+                    // DEAL_BODY task whose task body is the one conversion
+                    // ladder over the leading-M recorded operands — the task
+                    // completes immediately with the converted value and the
+                    // single AWAIT runs the landed ASYNC_COMPLETION cell on
+                    // the completion (the async table runs zero return
+                    // boundaries here; never a fail-closed producer defect).
+                    if (sourceSignature.paramTypes().size()
+                            != intrinsic.descriptor().paramTypes().size()) {
+                        throw new ConstructUnlowered("the adapter-over-async source of '"
+                            + calleeName + "' records "
+                            + sourceSignature.paramTypes().size()
+                            + " source parameter(s) for the '" + intrinsic.kind()
+                            + "' intrinsic's "
+                            + intrinsic.descriptor().paramTypes().size()
+                            + " declared parameter(s) (producer defect)");
+                    }
+                    nestedOpId = ids.nextOpId(module, nextOrdinal++, 0);
+                    nestedSource = AsyncStartSource.DEAL_BODY;
+                    sourceToken = new AsyncTokenId.Canonical(
+                        ids.nextTokenId(module, nextOrdinal++, 0),
+                        AsyncTokenOwner.DEAL_BODY_TASK);
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw dynamicCarrierDefect(dynamic, "the adapter-over-async call of '"
                         + calleeName + "'");

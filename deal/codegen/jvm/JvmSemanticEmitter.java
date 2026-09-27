@@ -750,12 +750,20 @@ public final class JvmSemanticEmitter {
             }
             out.append("    return null;\n");
             out.append("  }\n");
-            // Slots and cells (every module; ids are globally unique).
+            // Slots and cells (every module; ids are globally unique). A
+            // value slot is declared per op result and per op operand: an
+            // operand whose identity no op of the closure produces (the
+            // producer-less seeded intrinsic identity) is still read by its
+            // consuming op's START atom and by the enclosing body's
+            // re-entrant state snapshot, so its field must exist.
             java.util.LinkedHashSet<String> fields = new java.util.LinkedHashSet<>();
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 for (SemanticOp op : moduleUnit.ops()) {
                     if (op.result() instanceof ValueId valueId) {
                         fields.add(slot(valueId));
+                    }
+                    for (ValueId operand : op.operands()) {
+                        fields.add(slot(operand));
                     }
                     switch (op.payload()) {
                         case KindPayload.BindingAllocPayload payload ->
@@ -2865,7 +2873,18 @@ public final class JvmSemanticEmitter {
         private void emitFunctionAdapt(SemanticOp op, int indent) {
             KindPayload.FunctionAdaptPayload payload =
                 (KindPayload.FunctionAdaptPayload) op.payload();
-            emitStart(op, indent);
+            // The VALUE operand's carrier expression: for the seeded
+            // intrinsic identity no field holds it before this creation, so
+            // the START's operand atom and the adapter's own value field read
+            // the one local the creation materializes (never an undeclared
+            // slot).
+            String valueLocal = null;
+            if (payload.source() instanceof AdaptSourceRef.Value value) {
+                valueLocal = "__iav_" + op.opId().id();
+                out.append(indent(indent)).append("Object ").append(valueLocal)
+                    .append(" = ").append(adaptValueExpr(value)).append(";\n");
+            }
+            emitAdaptStart(op, payload, valueLocal, indent);
             String target = slot((ValueId) op.result());
             out.append(indent(indent)).append(target)
                 .append(" = new JvmRuntime.AdapterValue(__a -> { throw new "
@@ -2881,14 +2900,8 @@ public final class JvmSemanticEmitter {
                 case REEVALUATE_THUNK -> out.append("2");
             }
             switch (payload.source()) {
-                case AdaptSourceRef.Value value -> {
-                    String sourceExpr = intrinsicCarrierExpr(value.value());
-                    if (sourceExpr == null) {
-                        sourceExpr = hasProducer(value.value())
-                            ? slot(value.value()) : exportPlaceholderCarrier();
-                    }
-                    out.append(", ").append(sourceExpr).append(", null, null");
-                }
+                case AdaptSourceRef.Value ignored ->
+                    out.append(", ").append(valueLocal).append(", null, null");
                 case AdaptSourceRef.SharedCell cell ->
                     out.append(", null, (Object[]) ")
                         .append(cell(cell.binding(), cell.generation()))
@@ -2902,6 +2915,48 @@ public final class JvmSemanticEmitter {
                 .append(javaString(payload.sourceSignature().canonicalSpecText()))
                 .append(");\n");
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * The carrier expression of one adapter VALUE source: the memoized
+         * intrinsic carrier when the identity carries the seeded
+         * {@code IntrinsicFunction} registration (J2), the operand's own
+         * slot for a produced identity, and the landed placeholder otherwise.
+         */
+        private String adaptValueExpr(AdaptSourceRef.Value value) {
+            String sourceExpr = intrinsicCarrierExpr(value.value());
+            if (sourceExpr == null) {
+                sourceExpr = hasProducer(value.value())
+                    ? slot(value.value()) : exportPlaceholderCarrier();
+            }
+            return sourceExpr;
+        }
+
+        /**
+         * The FUNCTION_ADAPT START (E6): the VALUE operand's atom is the
+         * creation's own value local ({@code valueLocal}) exactly when the op
+         * records that operand (the oracle atomizes its operand list); the
+         * SHARED_CELL and REEVALUATE_THUNK modes carry zero operand atoms
+         * (their operands are empty by construction).
+         */
+        private void emitAdaptStart(SemanticOp op,
+                KindPayload.FunctionAdaptPayload payload, String valueLocal,
+                int indent) {
+            if (!trace) {
+                return;
+            }
+            StringBuilder inputs = new StringBuilder();
+            if (valueLocal != null && !op.operands().isEmpty()) {
+                inputs.append("JvmRuntime.atom(").append(valueLocal).append(", ")
+                    .append(javaString(staticKind(payload.sourceSignature())))
+                    .append(")");
+            }
+            out.append(indent(indent)).append("JvmRuntime.ev(MODULE, ")
+                .append(javaString(opKey(op.opId()))).append(", \"START\", ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId())))
+                .append(", List.of(").append(inputs).append("), null, null);\n");
         }
 
         /**
@@ -3269,7 +3324,16 @@ public final class JvmSemanticEmitter {
                     // only — every N target-signature parameter boundary
                     // already ran above. The adapter protocol pushes the
                     // source body's frame itself; the identical
-                    // completion error propagates unchanged.
+                    // completion error propagates unchanged. An adapter
+                    // whose recorded source is the seeded intrinsic
+                    // identity runs the same order at this call site with
+                    // the conversion ladder as its source invocation
+                    // (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J5).
+                    if (adapterIntrinsicKind(adapter) != null) {
+                        emitAdapterOverIntrinsicRun(op, payload, adapter, indent);
+                        break;
+                    }
                     String adapterSlot =
                         slot((ValueId) opsById.get(adapter.adaptOpId()).result());
                     StringBuilder args = new StringBuilder();
@@ -3808,6 +3872,46 @@ public final class JvmSemanticEmitter {
                 .append(id).append("), __ad").append(id).append(".sourceSpec, ")
                 .append(javaString(originOf(op))).append(");\n");
             out.append(indent(indent + 1)).append("if (__src").append(id)
+                .append(" instanceof JvmRuntime.Intrinsic __ii").append(id)
+                .append(") {\n");
+            // The runtime adapter branch's intrinsic source (ISSUE-0680;
+            // design source {@code conversion-intrinsic-function-values} J5):
+            // the resolved source value is the memoized intrinsic carrier, so
+            // the same D15 sequence runs here — the leading-M recorded
+            // argument through the one conversion ladder with the invoking
+            // CALL op's context and kind, then the recorded HOST_TO_DEAL +
+            // HOST_SYNC_RETURN cell of the dynamic set (the source class is
+            // HOST). Non-intrinsic source values keep the landed arms.
+            if (payload.parameterBoundaryOpIds().isEmpty()) {
+                // The leading-M projection of the runtime intrinsic source has
+                // no argument to convert (the intrinsic declares one
+                // parameter): the carrier fails closed at the call origin.
+                emitDynamicCarrierFailure(op, carrier, indent + 2);
+            } else {
+                String dynamicArg = slot(((KindPayload.BoundaryPayload)
+                    opsById.get(payload.parameterBoundaryOpIds().get(0)).payload())
+                    .input());
+                String converted = "__di" + id;
+                out.append(indent(indent + 2)).append("Object ").append(converted)
+                    .append(";\n");
+                out.append(indent(indent + 2)).append("if (\"INT_CONVERT\".equals("
+                    + "__ii").append(id).append(".kind)) {\n");
+                out.append(indent(indent + 3)).append(converted)
+                    .append(" = JvmRuntime.intConv(").append(dynamicArg).append(", ")
+                    .append(javaString(op.kind().name())).append(", \"number\", ")
+                    .append(intrinsicContextArgs(op)).append(");\n");
+                out.append(indent(indent + 2)).append("} else {\n");
+                out.append(indent(indent + 3)).append(converted)
+                    .append(" = JvmRuntime.numConv(").append(dynamicArg).append(", ")
+                    .append(javaString(op.kind().name())).append(", \"int\", ")
+                    .append(intrinsicContextArgs(op)).append(");\n");
+                out.append(indent(indent + 2)).append("}\n");
+                String dynamicAdmitted = emitHostCellRun(op, hostCell, converted,
+                    indent + 2);
+                out.append(indent(indent + 2)).append(result).append(" = ")
+                    .append(dynamicAdmitted).append(";\n");
+            }
+            out.append(indent(indent + 1)).append("} else if (__src").append(id)
                 .append(" instanceof JvmRuntime.FunctionValue) {\n");
             emitDynamicBodyInvoke(op, "__src" + id, result,
                 "java.util.Arrays.copyOfRange(new Object[]{ " + argList
@@ -4147,6 +4251,34 @@ public final class JvmSemanticEmitter {
                 .append(adapter).append("), ").append(adapter)
                 .append(".sourceSpec, ").append(javaString(originOf(op)))
                 .append(");\n");
+            // The runtime adapter branch's intrinsic source (ISSUE-0680;
+            // design source {@code conversion-intrinsic-function-values} J5):
+            // the resolved source value is the memoized intrinsic carrier, so
+            // the task is the closed DEAL_BODY task running the one conversion
+            // ladder with this op's context and kind over the leading-M
+            // recorded argument and completing immediately with the converted
+            // value; the single AWAIT runs the landed ASYNC_COMPLETION cell.
+            // Every other source value keeps the landed arms.
+            out.append(indent(indent + 1)).append("if (").append(source)
+                .append(" instanceof JvmRuntime.Intrinsic __ii").append(id)
+                .append(") {\n");
+            if (args.isEmpty()) {
+                // The leading-M projection of the runtime intrinsic source has
+                // no argument to convert (the intrinsic declares one
+                // parameter): the carrier fails closed at the start origin.
+                emitDynamicCarrierFailure(op, source, indent + 2);
+            } else {
+                out.append(indent(indent + 2)).append("JvmRuntime.startBodyTask(")
+                    .append(token.tokenId()).append(", \"DEAL_BODY_TASK\", () -> ")
+                    .append("\"INT_CONVERT\".equals(__ii").append(id)
+                    .append(".kind) ? JvmRuntime.intConv(").append(args.get(0))
+                    .append(", ").append(javaString(op.kind().name()))
+                    .append(", \"number\", ").append(intrinsicContextArgs(op))
+                    .append(") : JvmRuntime.numConv(").append(args.get(0)).append(", ")
+                    .append(javaString(op.kind().name())).append(", \"int\", ")
+                    .append(intrinsicContextArgs(op)).append("));\n");
+            }
+            out.append(indent(indent + 1)).append("} else {\n");
             out.append(indent(indent + 1)).append("if (!(").append(source)
                 .append(" instanceof JvmRuntime.FunctionValue) || "
                     + "((JvmRuntime.FunctionValue) ").append(source)
@@ -4194,6 +4326,7 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent + 3)).append("JvmRuntime.setModule(__prevM);\n");
             out.append(indent(indent + 2)).append("}\n");
             out.append(indent(indent + 1)).append("});\n");
+            out.append(indent(indent + 1)).append("}\n");
             // DEAL_BODY: the carrier's own invoker under the callee's
             // module; the frame and the module context are restored on
             // every path.
@@ -4553,6 +4686,141 @@ public final class JvmSemanticEmitter {
         }
 
         /**
+         * The intrinsic kind of one adapter's statically fixed recorded
+         * source, or {@code null} (ISSUE-0680; design source
+         * {@code conversion-intrinsic-function-values} J5): a VALUE source
+         * operand whose identity carries the seeded {@code IntrinsicFunction}
+         * registration under the identity-preserving-load predicate — the
+         * same resolution the adapter's creation operand publishes, so the
+         * call site and the creation site agree on the source class, and an
+         * operand of any other binding or class keeps the landed
+         * {@code JvmRuntime.invokeAdapter} protocol.
+         */
+        private IntrinsicKind adapterIntrinsicKind(
+                FunctionExecutionBinding.AdapterBinding adapter) {
+            if (!(adapter.sourceRef() instanceof AdaptSourceRef.Value value)) {
+                return null;
+            }
+            return intrinsicKindOf(value.value());
+        }
+
+        /**
+         * The adapter-over-intrinsic invocation at a statically classified
+         * call site (ISSUE-0680; design source
+         * {@code conversion-intrinsic-function-values} J5): the landed D15
+         * order with the seeded intrinsic identity as the recorded source —
+         * (1) the source resolution per the recorded capture mode (VALUE
+         * retains the memoized carrier the adapter creation published),
+         * (2) the carried canonical spec checked against the recorded source
+         * signature (the pinned E8010 at this CALL's origin), (3) the
+         * leading-M argument projection over the recorded target-cell values,
+         * (4) the one conversion ladder with the invoking CALL op's own
+         * context and kind, and (5) the recorded {@code HOST_TO_DEAL} +
+         * {@code HOST_SYNC_RETURN} cell — the source class is HOST, so the
+         * call op runs exactly the cell the intrinsic's own indirect arm
+         * records.
+         */
+        private void emitAdapterOverIntrinsicRun(SemanticOp op,
+                KindPayload.CallPayload payload,
+                FunctionExecutionBinding.AdapterBinding adapter, int indent) {
+            IntrinsicKind kind = adapterIntrinsicKind(adapter);
+            if (kind == null) {
+                throw new IllegalStateException("CALL " + op.opId()
+                    + " records an adapter whose source is not the seeded intrinsic "
+                    + "identity (producer defect)");
+            }
+            RuntimeDescriptor.Func declared = kind.declaredSignature();
+            String adapterSlot = slot((ValueId) opsById.get(adapter.adaptOpId()).result());
+            // The source-signature check runs under the call op's FAILURE
+            // terminal (the landed adapter arm's discipline): a source-signature
+            // failure has no ladder event of its own, so the CALL op publishes
+            // it and propagates the identical error value. The conversion's own
+            // failure event already carries the invoking CALL op's key and kind
+            // (J4), so it is not duplicated here.
+            String source = "__ais" + op.opId().id();
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append("Object ").append(source)
+                .append(" = JvmRuntime.fnCheck(JvmRuntime.adapterSource("
+                    + "(JvmRuntime.AdapterValue) ")
+                .append(adapterSlot).append("), ")
+                .append(javaString(adapter.sourceSignature().canonicalSpecText()))
+                .append(", ").append(javaString(originOf(op))).append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __e) {\n");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__e)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __e;\n");
+            out.append(indent(indent)).append("}\n");
+            int m = adapter.sourceSignature().paramTypes().size();
+            if (m != declared.paramTypes().size()
+                    || m > payload.parameterBoundaryOpIds().size()) {
+                throw new IllegalStateException("the adapter-over-intrinsic call "
+                    + op.opId() + " projects " + m + " leading source argument(s) "
+                    + "onto the '" + kind + "' intrinsic's "
+                    + declared.paramTypes().size() + " declared parameter(s) with "
+                    + payload.parameterBoundaryOpIds().size()
+                    + " recorded target cell(s) (producer defect)");
+            }
+            SemanticOp leading = opsById.get(payload.parameterBoundaryOpIds().get(0));
+            String input = slot(((KindPayload.BoundaryPayload) leading.payload()).input());
+            String helper = kind == IntrinsicKind.INT_CONVERT
+                ? "JvmRuntime.intConv" : "JvmRuntime.numConv";
+            String converted = "__aiv" + op.opId().id();
+            out.append(indent(indent)).append("Object ").append(converted)
+                .append(" = ").append(helper).append("(").append(input).append(", ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(staticKind(declared.paramTypes().get(0))))
+                .append(", ").append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(javaString(originOf(op))).append(");\n");
+            // The recorded HOST_TO_DEAL + HOST_SYNC_RETURN cell, run by the
+            // call op exactly once per invocation (the source class HOST).
+            SemanticOp returnBoundary = payload.returnBoundaryOpId() == null ? null
+                : opsById.get(payload.returnBoundaryOpId());
+            String admitted = emitHostCellRun(op, returnBoundary, converted, indent);
+            out.append(indent(indent)).append(slot((ValueId) op.result())).append(" = ")
+                .append(admitted).append(";\n");
+        }
+
+        /**
+         * One recorded {@code HOST_TO_DEAL} + {@code HOST_SYNC_RETURN} cell
+         * run by the invoking call op (ISSUE-0680; the landed intrinsic
+         * value-call return cell's shared form): the boundary START, the
+         * host-check seam over the cell's declared descriptor, the boundary
+         * FAILURE with the call op's own terminal on a check failure, and
+         * the boundary SUCCESS. Returns the expression holding the admitted
+         * value (the input expression when the op records no cell).
+         */
+        private String emitHostCellRun(SemanticOp op, SemanticOp returnBoundary,
+                                       String valueExpr, int indent) {
+            if (returnBoundary == null) {
+                return valueExpr;
+            }
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) returnBoundary.payload();
+            emitBoundaryStart(returnBoundary, valueExpr, boundaryPayload.descriptor(),
+                indent);
+            String admitted = "__iacc_" + returnBoundary.opId().id();
+            out.append(indent(indent)).append("Object ").append(admitted)
+                .append(";\n");
+            out.append(indent(indent)).append("try {\n");
+            out.append(indent(indent + 1)).append(admitted).append(" = __hostCheck(")
+                .append(javaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ").append(valueExpr).append(", false, ")
+                .append(originArgs(op)).append(");\n");
+            out.append(indent(indent)).append("} catch (JvmRuntime.DealError __be) {\n");
+            emitFailureEvent(returnBoundary.opId(), "BOUNDARY", returnBoundary,
+                "JvmRuntime.errtext(__be)", indent + 1);
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "JvmRuntime.errtext(__be)", indent + 1);
+            out.append(indent(indent + 1)).append("throw __be;\n");
+            out.append(indent(indent)).append("}\n");
+            emitBoundarySuccess(returnBoundary, admitted,
+                boundaryPayload.descriptor(), indent);
+            return admitted;
+        }
+
+        /**
          * The {@code HostFunctionValue} indirect call arm: the value
          * materialized at its producing host crossing ({@code
          * host-module-load-and-host-call-realization} H3/H5/H7) is
@@ -4842,6 +5110,19 @@ public final class JvmSemanticEmitter {
             }
             return javaString(op.origin().sourceId()) + ", " + span.startLine()
                 + ", " + span.startColumn();
+        }
+
+        /**
+         * The conversion ladder's invoking-op context arguments (ISSUE-0679
+         * J4): the op key, the contract digest, the parent key, and the
+         * origin — one algorithm authority with the direct
+         * {@code INTRINSIC_CALL} arm and the static intrinsic value call.
+         */
+        private String intrinsicContextArgs(SemanticOp op) {
+            return javaString(opKey(op.opId())) + ", "
+                + javaString(op.contract().canonicalDigest()) + ", "
+                + javaString(parentKey(op.origin().parentOpId())) + ", "
+                + javaString(originOf(op));
         }
 
         /**
@@ -6712,12 +6993,37 @@ public final class JvmSemanticEmitter {
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitAsyncExternalStart(op, indent, token, payload.externalAsyncLink(),
                         args);
-                case FunctionExecutionBinding.IntrinsicFunction intrinsic ->
-                    throw new IllegalStateException("ASYNC_START " + op.opId()
-                        + " resolves the intrinsic function carrier " + intrinsic.kind()
-                        + " (the intrinsic carrier's async execution is the "
-                        + "function-value child's; the conversion intrinsics are "
-                        + "synchronous values — producer defect)");
+                case FunctionExecutionBinding.IntrinsicFunction intrinsic -> {
+                    // The intrinsic's async form (ISSUE-0680; design source
+                    // {@code conversion-intrinsic-function-values} J3: the
+                    // conversion intrinsics are synchronous values, so an
+                    // async use is a checker rejection — this arm is the
+                    // deterministic closed treatment of a doctored site): the
+                    // closed DEAL_BODY task runs the one conversion ladder
+                    // inside the task body with this op's context and kind
+                    // over the recorded argument carrier and completes
+                    // immediately with the converted value; the single AWAIT
+                    // runs the landed ASYNC_COMPLETION cell on the completion
+                    // (zero return boundaries).
+                    if (args.size() != intrinsic.descriptor().paramTypes().size()) {
+                        throw new IllegalStateException("ASYNC_START " + op.opId()
+                            + " carries " + args.size() + " argument(s) for the '"
+                            + intrinsic.kind() + "' intrinsic's "
+                            + intrinsic.descriptor().paramTypes().size()
+                            + " declared parameter(s) (producer defect)");
+                    }
+                    out.append(indent(indent)).append("JvmRuntime.startBodyTask(")
+                        .append(token.tokenId())
+                        .append(", \"DEAL_BODY_TASK\", () -> ")
+                        .append(intrinsic.kind() == IntrinsicKind.INT_CONVERT
+                            ? "JvmRuntime.intConv(" : "JvmRuntime.numConv(")
+                        .append(args.get(0)).append(", ")
+                        .append(javaString(op.kind().name())).append(", ")
+                        .append(javaString(staticKind(
+                            intrinsic.descriptor().paramTypes().get(0))))
+                        .append(", ").append(intrinsicContextArgs(op))
+                        .append("));\n");
+                }
                 case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
                     throw new IllegalStateException("ASYNC_START " + op.opId()
                         + " resolves the dynamic function value produced by "

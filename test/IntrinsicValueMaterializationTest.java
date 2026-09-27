@@ -791,10 +791,13 @@ public class IntrinsicValueMaterializationTest {
         check(!lua.contains("__value = S.v" + seed),
             "the LuaJIT combined artifact's adapter VALUE operand is never a slot "
                 + "read of the seeded identity");
-        check(jvm.contains("JvmRuntime.intrinsic(\"INT_CONVERT\", "
-                + "\"function(number;int)\", \"(number)->int\"), null, null"),
+        check(jvm.contains("= JvmRuntime.intrinsic(\"INT_CONVERT\", "
+                + "\"function(number;int)\", \"(number)->int\")"),
             "the JVM combined artifact's adapter VALUE operand publishes the "
                 + "memoized carrier");
+        check(jvm.contains(", __iav_") && jvm.contains(", null, null, "),
+            "the JVM combined artifact's adapter takes the one carrier local its "
+                + "START atom and value field share");
         check(!jvm.contains("v" + seed + ", null, null"),
             "the JVM combined artifact's adapter VALUE operand is never a slot read "
                 + "of the seeded identity");
@@ -1054,10 +1057,13 @@ public class IntrinsicValueMaterializationTest {
         check(!lua.contains("__value = S.v" + seed),
             "the LuaJIT adapter's VALUE operand is never a slot read of the seeded "
                 + "identity");
-        check(jvm.contains("JvmRuntime.intrinsic(\"INT_CONVERT\", \"function(number;int)\", "
-                + "\"(number)->int\"), null, null"),
+        check(jvm.contains("= JvmRuntime.intrinsic(\"INT_CONVERT\", "
+                + "\"function(number;int)\", \"(number)->int\")"),
             "the JVM adapter's producer-less VALUE operand publishes the memoized "
                 + "carrier");
+        check(jvm.contains(", __iav_"),
+            "the JVM adapter takes the one carrier local its START atom and value "
+                + "field share");
         check(!jvm.contains("hasProducer") && !jvm.contains("v" + seed + ", null, null"),
             "the JVM adapter's VALUE operand is never a slot read of the seeded "
                 + "identity");

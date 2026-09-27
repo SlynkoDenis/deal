@@ -1243,4 +1243,32 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # construction; the JS backend keeps its import-site E6006 arm; and the
   # JVM production entry keeps its pinned five-input list.
   'fg|=== Running FFI JVM E6006 Rejection and Declaration Negatives Tests (ISSUE-0669) ===|java -ea -cp build deal.test.FfiJvmRejectionAndNegativesTest'
+  # ISSUE-0680 (the adapter-over-intrinsic D15 path): the adapted call whose
+  # recorded source is the seeded intrinsic identity records the adapter's xN
+  # target-signature FUNCTION_PARAMETER cells and the single HOST_TO_DEAL +
+  # HOST_SYNC_RETURN return cell (the source class HOST) with the creation
+  # shape unchanged (the seeded identity operand, no load, no proof); the
+  # oracle, the LuaJIT artifact under real luajit, and the JVM artifact under
+  # javac --release 25 -proc:none plus java run the landed D15 order — the
+  # source resolution, the carried canonical spec checked against the recorded
+  # source signature (the pinned E8010 at the call origin), the leading-M
+  # projection, the one conversion ladder with the invoking CALL op's context
+  # and kind, and the recorded host return cell — for the corpus
+  # intrinsic-arity-extension fixture and for a runtime-resolved adapter whose
+  # source value is an intrinsic carrier, and a unit carrying both a
+  # value-position intrinsic use and the adapted declaration passes
+  # ADAPTER_SOURCE_SHAPE and REGISTRY_ONE_TO_ONE.
+  'fg|=== Running Adapter-over-Intrinsic D15 Path Tests (ISSUE-0680) ===|java -ea -cp build deal.test.AdapterOverIntrinsicTest'
+  # ISSUE-0680 (the adapter-over-intrinsic asynchronous lowering sites): the
+  # checker admits no async use of a conversion intrinsic (E3013; J3), so the
+  # drive lowers the two async sites directly and pins the closed shape each
+  # records — the awaited adapted declaration over the intrinsic (the outer
+  # adapter-over-async task with its xN target-signature FUNCTION_PARAMETER
+  # cells, the ADAPTER_INNER alias token, and the nested source ASYNC_START
+  # carrying the IntrinsicFunction callee, ELIDED_BY_ADAPTER, the leading-M
+  # operand, and zero return boundaries) and the intrinsic's own registration
+  # awaited (the closed DEAL_BODY start with its declared-signature
+  # FUNCTION_PARAMETER cell and zero return boundaries) — with both emitters
+  # running the conversion inside the task.
+  'fg|=== Running Adapter-over-Intrinsic Async Lowering Tests (ISSUE-0680) ===|java -ea -cp build deal.semantic.AdapterOverIntrinsicLoweringTest'
 )
