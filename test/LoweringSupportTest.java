@@ -1574,21 +1574,22 @@ public class LoweringSupportTest {
 
         Path tmp = Files.createTempDirectory("deal-manifest-e10-bytes");
         try {
-            RequirementManifestResult result = compileAndCompute(tmp,
-                Map.of("main.deal", """
-                    export function test_bytes_length(): null {
-                      let n: int = 3;
-                      let b: bytes = bytes(n);
-                      if (b.length !== 3) {
-                        throw { code: "TEST_FAIL", message: "bytes: length mismatch" };
-                      }
-                      return null;
-                    }
+            String bytesFixture = """
+                export function test_bytes_length(): null {
+                  let n: int = 3;
+                  let b: bytes = bytes(n);
+                  if (b.length !== 3) {
+                    throw { code: "TEST_FAIL", message: "bytes: length mismatch" };
+                  }
+                  return null;
+                }
 
-                    export function main(): null {
-                      return null;
-                    }
-                    """), "main.deal");
+                export function main(): null {
+                  return null;
+                }
+                """;
+            RequirementManifestResult result = compileAndCompute(tmp,
+                Map.of("main.deal", bytesFixture), "main.deal");
             if (result == null) {
                 return;
             }
@@ -1597,6 +1598,14 @@ public class LoweringSupportTest {
                 "the bytes(...) call and the bytes .length read claim "
                     + "CONTAINERS_AND_STRINGS (ISSUE-0158 boundary, never E6005): "
                     + manifestOf(result, "main").capabilities());
+            // ISSUE-0626: the bytes-bearing fixture's Error half landed with
+            // ISSUE-0619 and its bytes element contract is production-covered
+            // in this slice, so the same source compiles through the
+            // release-owned production pipeline to its one project artifact
+            // and the artifact executes under its real toolchain.
+            productionAccept(tmp.resolve("production"),
+                Map.of("main.deal", bytesFixture), "main.deal",
+                "the bytes-bearing E10 arm", null);
         } finally {
             deleteRecursively(tmp);
         }
@@ -1888,6 +1897,14 @@ public class LoweringSupportTest {
                   return null;
                 }
                 """;
+            // ISSUE-0626: the bytes-bearing fixture (its Error half landed
+            // with ISSUE-0619) compiles through the release-owned production
+            // pipeline to its one project artifact and the artifact executes
+            // under its real toolchain — the plan-time marker's module is the
+            // production-covered module.
+            productionAccept(tmp.resolve("production"),
+                Map.of("main.deal", bytesSource), "main.deal",
+                "the bytes-bearing marker arm", null);
             RequirementManifestResult first = compileAndCompute(tmp.resolve("first"),
                 Map.of("main.deal", bytesSource), "main.deal");
             RequirementManifestResult second = compileAndCompute(tmp.resolve("second"),
