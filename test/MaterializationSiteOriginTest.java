@@ -951,10 +951,15 @@ public class MaterializationSiteOriginTest {
             Map.of(MODULE, new ClassFactoryRegistry(Map.of())), null);
         assertBoundaryTerminal("semantic-oracle", oracle, boundary.opId(), readChild.opId(),
             expectedOrigin, "E8001");
+        // ISSUE-0626 retargeted this pin: the descriptor-kind row projects
+        // the fixed kind token the unchanged reference runtime and every
+        // shared producer print; the composite descriptor's own [D] text is
+        // the nested-element (E8003) projection's spelling, never the kind
+        // row's (the production assertions below already carry `array`).
         check(oracle.terminal() instanceof SemanticRuntimeModel.Terminal.DealFailure
-                failure && "[int]".equals(failure.error().expected())
+                failure && "array".equals(failure.error().expected())
                 && "string".equals(failure.error().actual()),
-            "the oracle's descriptor-kind row carries the descriptor text and the "
+            "the oracle's descriptor-kind row carries the kind token and the "
                 + "shared actual-kind classification: " + oracle.terminal());
 
         // The trace-mode artifacts (the per-consumer terminal/origin comparison;
