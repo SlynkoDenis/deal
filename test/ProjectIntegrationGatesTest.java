@@ -141,48 +141,6 @@ public class ProjectIntegrationGatesTest {
     }
 
     /**
-     * The production-invocation fail-closed assertion of one fixture
-     * whose construct is owned by a later slice (ISSUE-0643 P10 item 2):
-     * the release-owned {@code deal.Main} compile exits nonzero with one
-     * E6005 {@code SHARED_EMITTER_COVERAGE} carrying the expected stable
-     * token and stages no artifact.
-     *
-     * @param args          the CLI arguments of the fixture
-     * @param expectedToken the stable guard detail token the failure must
-     *                      carry ({@code HOST_MODULE_IMPORT} — the
-     *                      retained host-import guard token; after
-     *                      ISSUE-0662 both landed call sites of this
-     *                      helper are retargeted: the extern-C import is
-     *                      admitted and the ffigen valid project fails on
-     *                      the bytes value), or null when the fixture
-     *                      fails through the emission arm (no stable
-     *                      token)
-     * @param artifactDir   the fixture's output directory (must not exist
-     *                      after the failed compile); may be null
-     * @param context       the assertion context
-     */
-    private static void checkProductionFailClosed(String[] args,
-            String expectedToken, Path artifactDir, String context)
-            throws IOException {
-        String[] run = runProductionCliCapturingErr(args);
-        check(!"0".equals(run[0]),
-            context + ": the release-owned production invocation fails"
-                + " closed (exit " + run[0] + "): " + run[1]);
-        check(run[1].contains("E6005")
-                && run[1].contains("SHARED_EMITTER_COVERAGE")
-                && (expectedToken == null
-                    || run[1].contains(expectedToken)),
-            context + ": the production failure is E6005"
-                + " SHARED_EMITTER_COVERAGE (" + expectedToken + "): "
-                + run[1]);
-        if (artifactDir != null) {
-            check(!Files.exists(artifactDir),
-                context + ": the production failure stages no artifact"
-                    + " under " + artifactDir);
-        }
-    }
-
-    /**
      * The production-invocation emitted-and-staged assertion of one
      * fixture the realized production arm covers (ISSUE-0654): the
      * release-owned {@code deal.Main} compile exits 0, reports no emitter
@@ -836,25 +794,26 @@ public class ProjectIntegrationGatesTest {
                 "valid carries the pinned resolved-absolute loader text "
                     + fixtureLoader);
 
-            // The extern-C admission slice (ISSUE-0662): the release-owned
-            // production invocation of the committed ffigen valid project
-            // admits the extern-C declaration import (no HOST_MODULE_IMPORT
-            // guard outcome) and fails closed on the fixture's bytes value
-            // (CONSTRUCT_UNLOWERED — the bytes-value child's), staging
-            // nothing.
+            // The extern-C admission slice (ISSUE-0662, retargeted by
+            // ISSUE-0626): the release-owned production invocation of the
+            // committed ffigen valid project admits the extern-C
+            // declaration import (no HOST_MODULE_IMPORT guard outcome)
+            // and — now that the bytes constructs the fixture carries
+            // ({@code bytes(2)}, the element write, and the typed FFI
+            // call) lower through the one production pipeline — compiles
+            // and publishes its one project artifact.
             String[] prodValidRun = runProductionCliCapturingErr(new String[]{
                 "compile", Path.of("test/fixtures/ffigen/valid/src/main.deal")
                     .toAbsolutePath().toString(), "--backend", "lua",
                 "--output", base.resolve("prod_valid").toString()});
-            check(!"0".equals(prodValidRun[0])
-                    && prodValidRun[1].contains("E6005")
-                    && prodValidRun[1].contains("CONSTRUCT_UNLOWERED")
+            check("0".equals(prodValidRun[0])
+                    && !prodValidRun[1].contains("E6005")
                     && !prodValidRun[1].contains("HOST_MODULE_IMPORT"),
                 "ffigen valid project: the production compile admits the"
-                    + " extern-C import and fails closed on the bytes value"
-                    + " (the bytes child's): " + prodValidRun[1]);
-            check(!Files.exists(base.resolve("prod_valid")),
-                "ffigen valid project: the production failure stages no"
+                    + " extern-C import and lowers the fixture's bytes value: "
+                    + prodValidRun[1]);
+            check(Files.exists(base.resolve("prod_valid").resolve("main.lua")),
+                "ffigen valid project: the production compile stages its"
                     + " artifact under " + base.resolve("prod_valid"));
 
         } finally {

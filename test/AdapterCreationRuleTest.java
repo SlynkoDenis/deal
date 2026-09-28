@@ -760,13 +760,14 @@ public class AdapterCreationRuleTest {
      * The classifier's closed position set: no adaptation arm exists
      * for any {@link BoundaryKind} other than
      * {@code VARIABLE_DECLARATION}/{@code VARIABLE_ASSIGNMENT} —
-     * asserted over all 25 closed kinds; a mismatched function-typed
+     * asserted over all 27 closed kinds (the two bytes element cells of
+     * ISSUE-0626 included); a mismatched function-typed
      * pair (including {@code M < N}) at every boundary position
      * classifies {@code BOUNDARY_DIRECT} with the recorded E8010
      * expectation, and an exact pair records none.
      */
     static void testClassifierClosedPositionSetNeverAdaptsOutsideVariablePositions() {
-        System.out.println("-- closed position set: boundaries never adapt (all 25 "
+        System.out.println("-- closed position set: boundaries never adapt (all 27 "
             + "BoundaryKinds) --");
 
         int variableKinds = 0;
@@ -818,8 +819,8 @@ public class AdapterCreationRuleTest {
                         + "recorded expectation");
             }
         }
-        check(variableKinds == 2 && boundaryKinds == 23,
-            "the closed position set counts 2 variable positions and 23 typed boundary "
+        check(variableKinds == 2 && boundaryKinds == 25,
+            "the closed position set counts 2 variable positions and 25 typed boundary "
                 + "positions; got " + variableKinds + "/" + boundaryKinds);
     }
 

@@ -338,6 +338,20 @@ public class ProductionProjectEmissionTest {
                 "src/app.deal", BYTES_APP_SOURCE)), Map.of());
     }
 
+    /** The fail-closed source: a nested function declaration (CALLS family). */
+    private static final String NESTED_DECLARATION_APP_SOURCE = """
+        export function main(): null {
+          function inner(): int { return 1; }
+          let x: int = inner();
+          return null
+        }
+        """;
+
+    private static Fixture nestedDeclarationFixture() throws Exception {
+        return compileProject(new LinkedHashMap<>(Map.of(
+                "src/app.deal", NESTED_DECLARATION_APP_SOURCE)), Map.of());
+    }
+
     private static Fixture asyncFixture(String libSource, String appSource)
             throws Exception {
         return compileProject(new LinkedHashMap<>(Map.of(
@@ -678,11 +692,38 @@ public class ProductionProjectEmissionTest {
             + "previous artifact set; the cross-module sync call emits and "
             + "stages --");
 
-        // The failing lowering: the bytes-bearing fixture (a later slice's
-        // construct) fails CONSTRUCT_UNLOWERED. The live root is
-        // pre-populated with a previous artifact set.
+        // ISSUE-0626: the bytes allocation now lowers and emits through
+        // the one production pipeline (the bytes coverage slice), so the
+        // bytes-bearing run stages its one project artifact.
         Fixture bytes = bytesFixture();
-        Path out = bytes.root().resolve("out-arm");
+        Path bytesOut = bytes.root().resolve("out-arm");
+        try {
+            PublicationStager stager = PublicationStager.forRoot(bytesOut);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(bytes, Backend.LUAJIT, stager, false);
+                check(result.emitted(), "the bytes-bearing run emits: "
+                    + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the bytes allocation carries no diagnostic: "
+                        + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the bytes-bearing run stages the entry module's chunk");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the bytes-bearing run stages its one project artifact");
+            } finally {
+                stager.discard();
+            }
+        } finally {
+            deleteRecursively(bytes.root());
+        }
+
+        // The failing lowering: a nested function declaration (a sibling
+        // slice's construct — the CALLS family's nested-declaration arm)
+        // fails CONSTRUCT_UNLOWERED. The live root is pre-populated with a
+        // previous artifact set.
+        Fixture failing = nestedDeclarationFixture();
+        Path out = failing.root().resolve("out-arm");
         try {
             writeFileIn(out, "app.lua", "-- previous artifact\n");
             writeFileIn(out, "lib.lua", "-- previous sibling\n");
@@ -691,31 +732,32 @@ public class ProductionProjectEmissionTest {
             PublicationStager stager = PublicationStager.forRoot(out);
             ProductionProjectEmission.Result result;
             try {
-                result = emit(bytes, Backend.LUAJIT, stager, false);
+                result = emit(failing, Backend.LUAJIT, stager, false);
             } finally {
                 stager.discard();
             }
-            check(!result.emitted(), "the bytes-bearing run fails closed");
+            check(!result.emitted(), "the fail-closed run emits nothing");
             check(result.firstDiagnostic() != null
                     && "E6005".equals(result.firstDiagnostic().code()),
                 "the failing lowering merges the first E6005: "
                     + result.diagnostics());
             check(result.firstDiagnostic() != null
                     && result.firstDiagnostic().message().contains("CONSTRUCT_UNLOWERED"),
-                "the bytes construct is the named fail-closed rule: "
+                "the nested-declaration construct is the named fail-closed rule: "
                     + result.diagnostics());
             checkEq(before, snapshotTree(out),
                 "the failing lowering leaves the previous artifact set byte-identical");
         } finally {
-            deleteRecursively(bytes.root());
+            deleteRecursively(failing.root());
         }
 
         // ISSUE-0654: a cross-module sync call now emits through the
         // realized CALL(EXTERNAL) SHARED_BODY arm — the callee unit's
         // EXTERNAL_ENTRY runs inside the one project artifact — so the
         // production run stages its one artifact over the previous set
-        // (the atomic staging property stays covered by the bytes-lowering
-        // case above, whose lowering fails before any emission).
+        // (the atomic staging property stays covered by the nested-
+        // declaration case above, whose lowering fails before any
+        // emission).
         Fixture sync = twoModuleFixture(SYNC_CALL_APP_SOURCE);
         Path syncOut = sync.root().resolve("out-arm");
         try {

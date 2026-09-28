@@ -138,6 +138,15 @@ public class IntrinsicSeedBindingsTest {
 
     private static final ModuleId MODULE = new ModuleId("main");
     private static final String SOURCE_ID = "test.deal";
+    /**
+     * The seeded first-class intrinsic kinds (K14): the two conversion
+     * intrinsics. {@code BYTES_NEW} is the allocation intrinsic of K6 item
+     * 1 — it is produced by {@code INTRINSIC_CALL(BYTES_NEW)} at the
+     * {@code bytes(n)} allocation site and carries no
+     * {@code IntrinsicFunction} seed registration (ISSUE-0626).
+     */
+    private static final List<IntrinsicKind> SEEDED_INTRINSICS =
+        List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT);
     private static final String REGISTRY_HASH =
         CapabilityRegistry.releaseRegistry().capabilityRegistryHash();
     private static final String INTERFACE_HASH = new ProjectInterfaceIndex(
@@ -274,7 +283,7 @@ public class IntrinsicSeedBindingsTest {
         }
         check(intrinsic.size() == 2, "the unit carries exactly one IntrinsicFunction "
             + "registration per conversion intrinsic; got " + intrinsic.size());
-        for (IntrinsicKind kind : IntrinsicKind.values()) {
+        for (IntrinsicKind kind : SEEDED_INTRINSICS) {
             List<Map.Entry<FunctionAllocationIdentity,
                 FunctionExecutionBinding.IntrinsicFunction>> matches = new ArrayList<>();
             for (Map.Entry<FunctionAllocationIdentity,
@@ -352,7 +361,7 @@ public class IntrinsicSeedBindingsTest {
         String dump = SemanticIrDumper.dumpModuleText(unit);
         check(dump.split("\"type\":\"intrinsicFunction\"", -1).length - 1 == 2,
             "the unit dump records exactly two intrinsicFunction bindings");
-        for (IntrinsicKind kind : IntrinsicKind.values()) {
+        for (IntrinsicKind kind : SEEDED_INTRINSICS) {
             String expectedText = kind.declaredSignature().canonicalSpecText();
             check(dump.contains("\"intrinsicKind\":\"" + kind.name() + "\""),
                 "the dump carries the intrinsic kind " + kind);
@@ -361,6 +370,16 @@ public class IntrinsicSeedBindingsTest {
                     + "\",\"type\":\"intrinsicFunction\"}"),
                 "the dump carries the closed intrinsicFunction binding object of " + kind);
         }
+        // The allocation intrinsic (ISSUE-0626, K6 item 1) is never a
+        // registration: its declared signature text is pinned by
+        // IntrinsicKind and no binding object of it appears in the dump.
+        check(IntrinsicKind.BYTES_NEW.declaredSignature().canonicalSpecText()
+                .equals("(int)->bytes"),
+            "BYTES_NEW's declared signature text is (int)->bytes; got "
+                + IntrinsicKind.BYTES_NEW.declaredSignature().canonicalSpecText());
+        check(!dump.contains("\"intrinsicKind\":\"BYTES_NEW\""),
+            "the dump carries no intrinsicFunction binding object of the allocation "
+                + "intrinsic BYTES_NEW (the seed set is the two conversion intrinsics)");
     }
 
     private static SemanticLowerer.BindingCoreBinding bindingFact(
@@ -398,7 +417,7 @@ public class IntrinsicSeedBindingsTest {
         }
         check(rawIntrinsic.size() == 2, "the raw model carries exactly two "
             + "intrinsicFunction bindings; got " + rawIntrinsic.size());
-        for (IntrinsicKind kind : IntrinsicKind.values()) {
+        for (IntrinsicKind kind : SEEDED_INTRINSICS) {
             RawBinding binding = rawIntrinsic.get(kind.name());
             check(binding != null, "the raw model carries the " + kind + " binding");
             if (binding == null) {

@@ -2504,8 +2504,9 @@ public class DynamicDispatchEmissionTest {
     // =========================================================================
 
     private static void testNoExtension() {
-        System.out.println("-- no extension: the closed op-kind, boundary-kind, "
-            + "failure-policy, and payload sets are unchanged --");
+        System.out.println("-- no extension: the closed op-kind and payload sets are "
+            + "unchanged, and the boundary-kind and failure-policy sets are the "
+            + "pre-slice membership plus the ISSUE-0626 bytes rows --");
         List<String> kinds = new ArrayList<>();
         for (SemanticOpKind kind : SemanticOpKind.values()) {
             kinds.add(kind.name());
@@ -2529,14 +2530,16 @@ public class DynamicDispatchEmissionTest {
         }
         checkEq(List.of("VARIABLE_DECLARATION", "VARIABLE_ASSIGNMENT",
                 "CLASS_FIELD_ASSIGNMENT", "ARRAY_ELEMENT_ASSIGNMENT",
-                "ARRAY_ELEMENT_READ", "ARRAY_ELEMENT_DELETE", "ARRAY_LITERAL_ELEMENT",
+                "BYTE_ELEMENT_ASSIGNMENT", "ARRAY_ELEMENT_READ", "BYTE_ELEMENT_READ",
+                "ARRAY_ELEMENT_DELETE", "ARRAY_LITERAL_ELEMENT",
                 "FUNCTION_PARAMETER", "FUNCTION_RETURN", "ASYNC_COMPLETION",
                 "CLASS_LITERAL_FIELD", "CLASS_DEFAULT_FIELD", "UNTYPED_CLASS_INPUT",
                 "OPTIONAL_FIELD_READ", "CONTEXTUAL_TABLE_READ", "IMPORTED_MEMBER_READ",
                 "MODULE_EXPORT", "HOST_TO_DEAL", "DEAL_TO_HOST", "STDLIB_PARAMETER",
                 "STDLIB_RETURN", "EXTERNAL_PARAMETER", "EXTERNAL_RETURN", "JSON_FROM_FIELD",
                 "JSON_TO_FIELD"),
-            boundaries, "the closed boundary-kind set is unchanged");
+            boundaries, "the closed boundary-kind set is the pre-slice set plus the two "
+                + "bytes element cells (ISSUE-0626)");
         List<String> policies = new ArrayList<>();
         for (FailurePolicyId policy : FailurePolicyId.values()) {
             policies.add(policy.name());
@@ -2545,12 +2548,14 @@ public class DynamicDispatchEmissionTest {
                 "INT32_DIVISOR_THEN_RESULT", "INT32_EXPONENT_THEN_RESULT",
                 "INT_CONVERSION", "NUMBER_CONVERSION", "ARRAY_ELEMENT_DESCRIPTOR",
                 "ARRAY_READ_INDEX_THEN_DESCRIPTOR", "ARRAY_WRITE_BOUNDS_THEN_ELEMENT",
-                "ARRAY_DELETE_BOUNDS", "FUNCTION_SIGNATURE", "HOST_PARAMETER",
+                "ARRAY_DELETE_BOUNDS", "BYTES_ALLOCATE", "BYTES_READ", "BYTES_WRITE",
+                "FUNCTION_SIGNATURE", "HOST_PARAMETER",
                 "HOST_SYNC_RETURN", "ASYNC_COMPLETION", "ASYNC_OPERATION_HANDLE",
                 "HOST_LOAD", "CLASS_CONSTRUCTION", "JSON_PARSE_SYNTAX", "JSON_FROM_NULL",
                 "JSON_TO_ERROR", "SQRT_NEGATIVE", "THROW_TRANSFER",
                 "INFRASTRUCTURE_ONLY"),
-            policies, "the closed failure-policy set is unchanged");
+            policies, "the closed failure-policy set is the pre-slice set plus the three "
+                + "bytes rows (ISSUE-0626)");
         List<String> payloads = new ArrayList<>();
         for (Class<?> permitted : KindPayload.class.getPermittedSubclasses()) {
             payloads.add(permitted.getSimpleName());

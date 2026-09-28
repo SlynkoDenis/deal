@@ -290,11 +290,12 @@ public class StdlibFailureProjectionTest {
         FailurePolicyRow typeRow = FailureContractRegistry.row(
             FailurePolicyId.TYPE_DESCRIPTOR);
         check(typeRow.code() == DiagnosticCode.E8001
-                && typeRow.templates().size() == 2
+                && typeRow.templates().size() == 3
                 && typeRow.templates().get(1).equals(
-                    "expected string, got invalid Unicode scalar encoding"),
-            "TYPE_DESCRIPTOR pins the wrong-kind template and the invalid-string "
-                + "variant");
+                    "expected string, got invalid Unicode scalar encoding")
+                && typeRow.templates().get(2).equals("expected bytes"),
+            "TYPE_DESCRIPTOR pins the wrong-kind template, the invalid-string "
+                + "variant, and the bytes kind-mismatch projection (ISSUE-0626)");
 
         // Row instantiation is the only message source; an unbound
         // placeholder fails closed.

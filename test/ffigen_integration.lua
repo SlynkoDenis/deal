@@ -138,8 +138,8 @@ end
 -- declaration import is admitted (the load_ffi prelude is emitted at the
 -- import's MODULE_IMPORT, and the executed artifact fails at the import
 -- with FFI_LIBRARY_LOAD for the never-built library), while the valid
--- project stays fail-closed on its bytes value (CONSTRUCT_UNLOWERED -
--- the bytes-value child's).
+-- project's bytes constructs (bytes(2), the element writes, and the
+-- typed FFI call) are production-covered (ISSUE-0626).
 for i = 1, #PROJECTS do
   local p = PROJECTS[i]
   local out = GEN_ROOT .. "/" .. p.name
@@ -171,9 +171,9 @@ end
 -- load_ffi prelude (the metadata module key, the manifest-resolved loader
 -- text, the import span triplet), and executing it under luajit fails at
 -- the import with FFI_LIBRARY_LOAD at the import statement's origin. The
--- valid project is admitted as well and still fails closed with E6005
--- CONSTRUCT_UNLOWERED on its bytes value (the bytes-value child's),
--- staging nothing.
+-- valid project is admitted as well and — its bytes constructs now
+-- lowering through the one production pipeline (ISSUE-0626) — compiles
+-- and stages its one project artifact.
 do
   local prodOut = GEN_ROOT .. "/production-probe"
   local status = os.execute("rm -rf '" .. prodOut .. "'")
@@ -261,9 +261,9 @@ do
   end
 end
 
--- The valid project stays fail-closed on its bytes value (the bytes-value
--- child's): the extern-C import is admitted (no HOST_MODULE_IMPORT outcome)
--- and the compile fails with E6005 CONSTRUCT_UNLOWERED, staging nothing.
+-- The valid project is production-covered (ISSUE-0626): the extern-C
+-- import is admitted (no HOST_MODULE_IMPORT outcome) and the compile
+-- stages its one project artifact.
 do
   local validEntry = root .. "/test/fixtures/ffigen/valid/src/main.deal"
   local validOut = GEN_ROOT .. "/production-probe-valid"
@@ -283,24 +283,22 @@ do
     probeOutput = logHandle:read("*a")
     logHandle:close()
   end
-  if status == 0 or status == true then
+  if status ~= 0 and status ~= true then
     error("FFIGEN integration bootstrap failed: the release-owned production invocation"
-      .. " of valid exited 0; expected the bytes-value fail-closed outcome:\n"
+      .. " of valid did not compile (its bytes constructs are production-covered):\n"
       .. probeOutput)
   end
-  if not string.find(probeOutput, "E6005", 1, true)
-    or not string.find(probeOutput, "CONSTRUCT_UNLOWERED", 1, true)
+  if string.find(probeOutput, "E6005", 1, true) ~= nil
     or string.find(probeOutput, "HOST_MODULE_IMPORT", 1, true) ~= nil then
     error("FFIGEN integration bootstrap failed: the production-invocation probe of"
-      .. " valid did not report E6005 CONSTRUCT_UNLOWERED without the host-guard"
-      .. " token:\n" .. probeOutput)
+      .. " valid reported an emitter gap or the host-guard token:\n" .. probeOutput)
   end
   local validArtifact = io.open(validOut .. "/main.lua", "r")
-  if validArtifact ~= nil then
-    validArtifact:close()
+  if validArtifact == nil then
     error("FFIGEN integration bootstrap failed: the production-invocation probe of"
-      .. " valid staged an artifact")
+      .. " valid staged no project artifact")
   end
+  validArtifact:close()
 end
 
 -- ===== Bootstrap step 3: event-file reset + the surface scan (half 3) =====

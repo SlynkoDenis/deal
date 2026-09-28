@@ -1321,13 +1321,17 @@ public class ProjectGateFaultBatteryTest {
         }
 
         // The other closed sets the seeds and the namespace registrations
-        // consume keep their pre-slice membership.
+        // consume keep their pre-slice membership, plus the ISSUE-0626
+        // bytes extension: the closed intrinsic-kind set gains the
+        // allocation intrinsic BYTES_NEW (K6 item 1 / K9 item 1; the two
+        // conversion intrinsics stay the seeded first-class values).
         List<String> intrinsicKinds = new ArrayList<>();
         for (IntrinsicKind kind : IntrinsicKind.values()) {
             intrinsicKinds.add(kind.name());
         }
-        checkEq(List.of("INT_CONVERT", "NUMBER_CONVERT"), intrinsicKinds,
-            "the closed IntrinsicKind set is unchanged");
+        checkEq(List.of("INT_CONVERT", "NUMBER_CONVERT", "BYTES_NEW"), intrinsicKinds,
+            "the closed IntrinsicKind set is the two conversion intrinsics plus the "
+                + "bytes allocation intrinsic");
         List<String> importKinds = new ArrayList<>();
         for (ModuleImportKind kind : ModuleImportKind.values()) {
             importKinds.add(kind.name());

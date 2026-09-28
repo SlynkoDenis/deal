@@ -229,20 +229,25 @@ public class BytesCoverageTest {
     /**
      * The fixtures whose closure additionally carries a nested function
      * declaration (the CALLS family's nested-declaration arm — a sibling
-     * construct the bytes slice never introduces): their bytes constructs
-     * lower, but the nested body has no invocation context yet. The drive
-     * asserts their bytes constructs' lowerability and records the sibling
-     * blocker instead of claiming their full execution.
+     * construct the bytes slice never introduces): the nested body has no
+     * lowering context yet, so the closure fails the lowering with the
+     * non-bytes producer guard ("the LoweredBody/async body binding's
+     * function N has no lowering context"). The drive asserts the blocker
+     * is not a bytes-owned guard and records the sibling dependency
+     * instead of claiming their execution.
      */
     private static final List<String> NESTED_DECLARATION_FIXTURES = List.of(
         "bytes-boundary-order", "bytes-async-closure");
 
     /**
      * The fixture whose closure imports the host module
-     * {@code host/bytes_roundtrip} (its Java host fixture is the retained
-     * carrier's, so its full host drive is the host-ABI child's); the bytes
-     * constructs it carries are asserted through the
-     * {@code bytes-class-default} fixture and the host-free drive below.
+     * {@code host/bytes_roundtrip}: it compiles, lowers, and passes the
+     * closed gates once the declaration module is materialized (verified),
+     * but its test export is {@code async}, so driving it through the
+     * production artifacts needs an async-export invocation surface (and a
+     * bytes-aware host responder for the oracle) — the host-ABI child's
+     * drive. Its bytes constructs are asserted through the
+     * {@code bytes-class-default} fixture and the host-free drives below.
      */
     private static final String HOST_FIXTURE = "bytes-class-default-integration";
 
@@ -260,39 +265,55 @@ public class BytesCoverageTest {
      *       the pin section.</li>
      *   <li>{@code bytes-array-closure}: a nested-array-of-arrays read
      *       divergence that reproduces with {@code int[][]} (the oracle
-     *       reads the element, both artifacts read missing) — the
-     *       containers construct's, never bytes'; and the LuaJIT
-     *       restore-register limit of a body with many slots (the call
-     *       emitter's multi-assignment), also independent of bytes.</li>
+     *       reads the element, both artifacts project {@code missing}) —
+     *       the containers construct's, never bytes'; and a LuaJIT
+     *       expression-complexity limit of the emitted cross-module chunk
+     *       ("function or expression too complex"), also independent of
+     *       bytes.</li>
+     *   <li>the emitter-budget family ({@code bytes-nested-arrays},
+     *       {@code bytes-array-container-ops}, {@code bytes-sync-fn-shapes}):
+     *       the emitted cross-module save/restore of the callee module's
+     *       static values packs one multi-assignment and exceeds LuaJIT's
+     *       200-local-per-function limit (or its expression-complexity
+     *       limit) — a parse-time emitter budget, never a bytes semantic;
+     *       the fixtures lower and the zero-{@code CONSTRUCT_UNLOWERED}
+     *       section asserts their bytes constructs.</li>
+     *   <li>{@code bytes-fn-xmod}: the adapter-over-dynamic-function-value
+     *       call fails the lowering closed (the function-typed-value
+     *       child's producing-registration arm).</li>
      * </ul>
      */
     private static final Map<String, String> SIBLING_BLOCKED = Map.of(
         "bytes-fn-adapter-e8010",
-        "the D15 adapter-creation origin rule and the emitted adapter origin",
+        "the D15 adapter-creation origin rule: the oracle projects the pinned E8010 "
+            + "at the adapter-creation coordinate while both production artifacts "
+            + "project the row without the origin (the function-typed-value child's "
+            + "materialization-site origin)",
         "bytes-array-closure",
-        "the nested-array-of-arrays read divergence (reproduces with int[][]) "
-            + "and the LuaJIT restore-register limit",
+        "the nested-array-of-arrays read divergence (the oracle reads the element, "
+            + "both artifacts project missing; reproduces with int[][]) and the "
+            + "LuaJIT expression-complexity limit of the emitted cross-module chunk",
         "bytes-array-container-ops",
-        "the emitted production chunk of this two-module driver project exceeds "
-            + "LuaJIT's 200-variable-name budget in one emitted factory (a parse-time "
-            + "emitter budget, never a bytes semantic); its bytes constructs lower and "
+        "the emitted cross-module save/restore of the callee module's static values "
+            + "exceeds LuaJIT's 200-local-per-function limit (a parse-time emitter "
+            + "budget, never a bytes semantic); its bytes constructs lower and "
             + "the zero-CONSTRUCT_UNLOWERED section asserts them",
         "bytes-function-array-closure",
         "the nested-array-of-arrays read divergence (the oracle reads the element, "
-            + "both artifacts read missing; reproduces with int[][])",
+            + "both artifacts project missing; reproduces with int[][])",
         "bytes-nested-fn-shapes",
         "the nested-array-of-arrays read divergence (reproduces with int[][])",
         "bytes-nested-arrays",
-        "the LuaJIT per-function variable-name budget of the emitted driver-project "
-            + "chunk (a parse-time emitter budget, never a bytes semantic)",
+        "the LuaJIT 200-local-per-function limit of the emitted cross-module "
+            + "save/restore chunk (a parse-time emitter budget, never a bytes semantic)",
         "bytes-sync-fn-shapes",
-        "the LuaJIT expression/register budget of the emitted driver-project chunk "
+        "the LuaJIT expression-complexity limit of the emitted cross-module chunk "
             + "(a parse-time emitter budget, never a bytes semantic)",
         "bytes-fn-xmod",
         "the adapter-over-dynamic-function-value call (the function-typed-value "
             + "child's producing-registration arm): the cross-module bytes-bearing "
-            + "function value's arity-extended call has no statically classified "
-            + "execution");
+            + "function value's arity-extended call fails the lowering closed "
+            + "(\"has no statically classified execution in this slice\")");
 
     private static List<BytesFixture> allFixtures() {
         List<BytesFixture> all = new ArrayList<>();
@@ -480,9 +501,28 @@ public class BytesCoverageTest {
         if (!"main".equals(fixture.export())) {
             Files.writeString(entry, driver(fixture), StandardCharsets.UTF_8);
         }
+        // The host-importing fixture materializes its corpus declaration
+        // module (the host-ABI child's fixture) and the externals mapping of
+        // the drive's temp project, so the fixture's own closure — and the
+        // bytes constructs it carries — compile and lower here too.
+        Map<String, String> externals = null;
+        boolean hostDeclared = HOST_FIXTURE.equals(fixture.relativePath());
+        if (hostDeclared) {
+            Path declaration = root.resolve("host").resolve("bytes_roundtrip.d.deal");
+            Files.createDirectories(declaration.getParent());
+            Files.writeString(declaration, ConformanceHarnessMetadata
+                .stripClassificationHeaders(Files.readString(Path.of("test",
+                    "conformance", "host-fixtures", "bytes_roundtrip.d.deal"),
+                    StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+            externals = new LinkedHashMap<>();
+            externals.put("host.bytes_roundtrip",
+                declaration.toAbsolutePath().toString());
+            externals.put("host/bytes_roundtrip",
+                declaration.toAbsolutePath().toString());
+        }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
             entry.toAbsolutePath(), root.resolve("out"), false, false, false, false,
-            Backend.LUAJIT, null, List.of(root.toAbsolutePath()),
+            Backend.LUAJIT, externals, List.of(root.toAbsolutePath()),
             Path.of("std").toAbsolutePath().normalize(), null, productionInvocation());
         boolean compiled = orchestrator.compile();
         if (!quiet) {
@@ -507,7 +547,9 @@ public class BytesCoverageTest {
         Map<ModuleId, CanonicalModuleIdentity> identities = new LinkedHashMap<>();
         for (ModuleId declaration : orchestrator.hostDeclarationSurface().moduleIds()) {
             identities.put(declaration,
-                new CanonicalModuleIdentity.ExternalModule(declaration.path()));
+                new CanonicalModuleIdentity.ExternalModule(hostDeclared
+                    ? declaration.path().replace('/', '.')
+                    : declaration.path()));
         }
         return new Compiled(root, built.input(), built.index(), manifests.manifests(),
             orchestrator.hostDeclarationSurface(), identities, strippedLines);
@@ -979,6 +1021,12 @@ public class BytesCoverageTest {
                     fixture.relativePath());
                 boolean host = HOST_FIXTURE.equals(fixture.relativePath());
                 boolean sibling = SIBLING_BLOCKED.containsKey(fixture.relativePath());
+                // The host-importing fixture carries its declaration module
+                // in this drive, so its closure (and its bytes constructs)
+                // must compile and lower like every other fixture's.
+                check(!host, fixture.what() + ": the host-importing fixture compiles "
+                    + "and lowers once its declaration module is materialized: "
+                    + compileDiagnostics(fixture));
                 check(nested || host || sibling,
                     fixture.what() + ": a non-compiling fixture is one of the "
                         + "recorded sibling blockers");

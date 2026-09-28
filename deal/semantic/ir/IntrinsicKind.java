@@ -27,11 +27,13 @@ import java.util.List;
  * closed descriptor position of the
  * {@code FunctionExecutionBinding.IntrinsicFunction} shape
  * ({@link #declaredSignature()}); a binding carrying any other
- * {@code (kind, descriptor)} pair fails the closed gate. The bytes
- * allocation intrinsic is never a first-class function value (its
- * {@code INTRINSIC_CALL} carries the pinned {@code int} input descriptor
- * and the {@code bytes} result descriptor), so no
- * {@code IntrinsicFunction} binding is ever registered for it.</p>
+ * {@code (kind, descriptor)} pair fails the closed gate. The allocation
+ * intrinsic is outside the seeded first-class intrinsic set (K14's two
+ * conversion intrinsics): {@code bytes(length)} lowers as the
+ * {@code INTRINSIC_CALL(BYTES_NEW)} producer whose payload carries the
+ * pinned {@code int} input descriptor and the {@code bytes} result
+ * descriptor, and no {@code IntrinsicFunction} binding is registered for
+ * it.</p>
  */
 public enum IntrinsicKind {
 
