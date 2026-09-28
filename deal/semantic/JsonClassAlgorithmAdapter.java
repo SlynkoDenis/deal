@@ -351,6 +351,11 @@ public final class JsonClassAlgorithmAdapter {
             }
             case ClassOpsExecutor.Value.Function ignored ->
                 new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
+            case ClassOpsExecutor.Value.Bytes ignored ->
+                // Bytes are not JSON serializable: the pinned rejection
+                // projection carries the canonical bytes actual token
+                // (K6/K8).
+                new SharedStdlibSemantics.Value.Other(ActualKind.BYTES, null);
             case ClassOpsExecutor.Value.Class instance ->
                 new SharedStdlibSemantics.Value.Other(ActualKind.CLASS,
                     instance.classId().text());
@@ -509,6 +514,9 @@ public final class JsonClassAlgorithmAdapter {
             case ClassOpsExecutor.Value.Function ignored -> throw new FirstFailure(
                 pinnedPath, e8Path,
                 ActualKind.canonicalToken(ActualKind.FUNCTION, null), false);
+            case ClassOpsExecutor.Value.Bytes ignored -> throw new FirstFailure(
+                pinnedPath, e8Path,
+                ActualKind.canonicalToken(ActualKind.BYTES, null), false);
             case ClassOpsExecutor.Value.Class instance -> throw new FirstFailure(
                 pinnedPath, e8Path,
                 ActualKind.canonicalToken(ActualKind.CLASS, instance.classId().text()),

@@ -332,7 +332,7 @@ public final class AdapterCreationRule {
     // =========================================================================
 
     /**
-     * The closed position-kind map over the 25 {@link BoundaryKind}
+     * The closed position-kind map over the 27 {@link BoundaryKind}
      * values: {@code VARIABLE_DECLARATION} → {@code VARIABLE_INITIALIZER},
      * {@code VARIABLE_ASSIGNMENT} → {@code VARIABLE_ASSIGNMENT_TARGET},
      * and every other kind → {@code TYPED_BOUNDARY}. The map is total
@@ -347,7 +347,8 @@ public final class AdapterCreationRule {
         return switch (kind) {
             case VARIABLE_DECLARATION -> PositionKind.VARIABLE_INITIALIZER;
             case VARIABLE_ASSIGNMENT -> PositionKind.VARIABLE_ASSIGNMENT_TARGET;
-            case CLASS_FIELD_ASSIGNMENT, ARRAY_ELEMENT_ASSIGNMENT, ARRAY_ELEMENT_READ,
+            case CLASS_FIELD_ASSIGNMENT, ARRAY_ELEMENT_ASSIGNMENT, BYTE_ELEMENT_ASSIGNMENT,
+                 ARRAY_ELEMENT_READ, BYTE_ELEMENT_READ,
                  ARRAY_ELEMENT_DELETE, ARRAY_LITERAL_ELEMENT, FUNCTION_PARAMETER,
                  FUNCTION_RETURN, ASYNC_COMPLETION, CLASS_LITERAL_FIELD, CLASS_DEFAULT_FIELD,
                  UNTYPED_CLASS_INPUT, OPTIONAL_FIELD_READ, CONTEXTUAL_TABLE_READ,

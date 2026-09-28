@@ -202,7 +202,8 @@ public final class ClassOpsExecutor {
      * — language null, boolean, signed32 int, IEEE-754 number, string
      * (carrying the closed {@link UnicodeScalars.ScalarString}
      * classification), table ({@link SemanticTable}), array
-     * ({@link SemanticArray}), class ({@link Value.Class}), function
+     * ({@link SemanticArray}), bytes ({@link Value.Bytes}, K6 items
+     * 10/11), class ({@link Value.Class}), function
      * (carrying the closed signature for the descriptor-kind rule's
      * {@code FUNCTION_SIGNATURE} cells), and the internal
      * {@code missing} (the schema's {@link ActualKind#MISSING}, never a
@@ -229,7 +230,8 @@ public final class ClassOpsExecutor {
      */
     public sealed interface Value
         permits Value.Null, Value.Bool, Value.Int, Value.Number, Value.String,
-                Value.Table, Value.Array, Value.Class, Value.Function, Value.Missing {
+                Value.Table, Value.Array, Value.Bytes, Value.Class, Value.Function,
+                Value.Missing {
 
         /** The canonical actual kind this value renders as. */
         ActualKind actualKind();
@@ -305,6 +307,31 @@ public final class ClassOpsExecutor {
             @Override
             public ActualKind actualKind() {
                 return ActualKind.TABLE;
+            }
+        }
+
+
+        /**
+         * A bytes buffer view (K6 item 10): the same mutable storage as the
+         * oracle's bytes value, shared by every alias, so an element write
+         * through one view is observed through every other. The logical
+         * length is fixed at allocation and never changes; the view is
+         * classification-only for boundary projection (K6 item 11).
+         */
+        record Bytes(byte[] storage, int length) implements Value {
+
+            public Bytes {
+                Objects.requireNonNull(storage, "storage must not be null");
+                if (length < 0 || length > storage.length) {
+                    throw new Defect("a bytes view's logical length " + length
+                        + " is outside its storage of " + storage.length
+                        + " byte(s)");
+                }
+            }
+
+            @Override
+            public ActualKind actualKind() {
+                return ActualKind.BYTES;
             }
         }
 

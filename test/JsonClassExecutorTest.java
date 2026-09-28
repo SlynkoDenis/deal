@@ -705,6 +705,8 @@ public class JsonClassExecutorTest {
                         path.remove(array.array());
                     }
                 }
+                case Value.Bytes ignored -> throw new StringifyFailure(relativePath,
+                    ActualKind.canonicalToken(ActualKind.BYTES, null));
                 case Value.Class classValue -> throw new StringifyFailure(relativePath,
                     ActualKind.canonicalToken(ActualKind.CLASS, classValue.classId().text()));
                 case Value.Function ignored -> throw new StringifyFailure(relativePath,

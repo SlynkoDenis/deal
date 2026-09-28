@@ -520,12 +520,13 @@ public class AddressChainProtocolTest {
     private static void testNormalizedSlot() {
         System.out.println("-- NormalizedSlot: the closed INDEX_NORMALIZE slot computation --");
 
-        // Closed sealed family: exactly the two shapes.
+        // Closed sealed family: exactly the three shapes (the bytes slot is
+        // the closed third member, K6 item 5).
         Class<?>[] permitted = NormalizedSlot.class.getPermittedSubclasses();
-        check(permitted != null && permitted.length == 2
-                && Set.of(NormalizedSlot.ArraySlot.class, NormalizedSlot.TableSlot.class)
-                    .equals(Set.of(permitted)),
-            "NormalizedSlot is sealed over exactly ArraySlot and TableSlot");
+        check(permitted != null && permitted.length == 3
+                && Set.of(NormalizedSlot.ArraySlot.class, NormalizedSlot.TableSlot.class,
+                    NormalizedSlot.BytesSlot.class).equals(Set.of(permitted)),
+            "NormalizedSlot is sealed over exactly ArraySlot, TableSlot, and BytesSlot");
 
         // ARRAY_READ: present = index < currentLength; append is always false.
         NormalizedSlot.ArraySlot in = NormalizedSlot.arraySlot(IndexMode.ARRAY_READ, 2, 3);

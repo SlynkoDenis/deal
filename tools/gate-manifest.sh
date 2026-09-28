@@ -1383,4 +1383,23 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # is repaired in the same change (the empty argument list emitted a
   # dangling separator).
   'fg|=== Running Lua Transfer Protocol / Loop-Target Label Tests (ISSUE-0700) ===|java -ea -cp build deal.test.LoopTransferLabelEmissionTest'
+  # ISSUE-0626 (the bytes coverage and the bytes element contract): the
+  # corpus sidecars' pinned E8012/E8013/E8010/E8001/E8003 rows; each
+  # driveable bytes fixture through the one production entry (header-stripped
+  # corpus text, the drive's own entry calling the fixture's test export)
+  # with the three-consumer differential verdict (oracle + shared LuaJIT +
+  # shared JVM, the pinned code/message/origin, the traces event-for-event)
+  # and both production artifacts under real luajit and
+  # javac --release 25 -proc:none plus java; the read shape and the
+  # seven-child write chain (the length child at position 3, the normalize's
+  # currentLength referencing it, the BYTE_ELEMENT_ASSIGNMENT child under
+  # BYTES_WRITE) with the read at i == b.length failing E8012 on all three
+  # consumers; the oracle realization (zero-fill allocation, the in-place
+  # write observed through an alias, the fixed logical length, the bytes
+  # boundary crossing, and the BYTES_EQ/NE identity comparison); and zero
+  # bytes CONSTRUCT_UNLOWERED over the corpus, with the sibling-blocked
+  # fixtures recorded by name and reason (the nested-declaration arm, the
+  # host-module fixture, the nested-array-of-arrays read divergence, the
+  # emitted-chunk parse budgets, and the adapter-over-dynamic-value call).
+  'fg|=== Running Bytes Coverage and Element Contract Tests (ISSUE-0626) ===|java -ea -cp build deal.test.BytesCoverageTest'
 )

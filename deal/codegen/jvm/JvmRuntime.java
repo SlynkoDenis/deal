@@ -653,7 +653,8 @@ public final class JvmRuntime {
                     return atom(v, kind.substring("nullable:".length()));
                 }
                 if (kind.equals("ref") || kind.equals("table") || kind.equals("array")
-                        || kind.equals("function") || kind.equals("class")) {
+                        || kind.equals("bytes") || kind.equals("function")
+                        || kind.equals("class")) {
                     return "ref:" + allocId(v);
                 }
                 return "missing";
@@ -699,7 +700,8 @@ public final class JvmRuntime {
         if (v instanceof ErrorValue error) {
             return "err:" + error.code + ":" + esc(error.message);
         }
-        if (v instanceof Table || v instanceof Array || v instanceof FunctionValue
+        if (v instanceof Table || v instanceof Array || v instanceof BytesValue
+                || v instanceof FunctionValue
                 || v instanceof Intrinsic || v instanceof ClassInstance) {
             return "ref:" + allocId(v);
         }
@@ -835,6 +837,9 @@ public final class JvmRuntime {
         }
         if (v instanceof Array) {
             return "array";
+        }
+        if (v instanceof BytesValue) {
+            return "bytes";
         }
         if (v instanceof FunctionValue || v instanceof Intrinsic) {
             return "function";
@@ -999,6 +1004,18 @@ public final class JvmRuntime {
             throw fail("E8001", kindMismatch("table", actual, completion), "-",
                 "table", actual);
         }
+        if ("bytes".equals(desc)) {
+            // The bytes view (K6 item 11): the carrier passes unchanged
+            // (classification only — the view carries no contents); every
+            // other value projects the carrier's pinned v1.2 text
+            // (expected "bytes", actual the value's own kind), the
+            // canonical projection the retained runtimes and the corpus
+            // pins carry.
+            if (v instanceof BytesValue) {
+                return v;
+            }
+            throw fail("E8001", "expected bytes", "-", "bytes", actual);
+        }
         if (desc.startsWith("@")) {
             if ("@/Error".equals(desc)) {
                 // The builtin Error class (the err carrier): an Error
@@ -1022,6 +1039,7 @@ public final class JvmRuntime {
         if (desc.startsWith("array(")) {
             if (v instanceof Array array) {
                 String inner = desc.substring(6, desc.length() - 1);
+                String innerCanonical = innerCanon(canon, "[", "]");
                 for (int i = 0; i < array.length; i++) {
                     Object elem = i < array.elements.size() ? array.elements.get(i)
                         : MISSING;
@@ -1030,10 +1048,14 @@ public final class JvmRuntime {
                     }
                     try {
                         bcheck(inner, elem == MISSING ? "missing" : inner, elem,
-                            innerCanon(canon, "[", "]"));
+                            innerCanonical);
                     } catch (DealError leaf) {
+                        // The canonical element text (the semantic oracle's
+                        // closed canonical spelling), never the runtime's
+                        // internal array(...) dialect.
                         throw fail("E8003", "array element " + (i + 1)
-                            + " type mismatch", "-", inner,
+                            + " type mismatch", "-",
+                            innerCanonical != null ? innerCanonical : inner,
                             actualOf(elem == MISSING ? "missing" : inner, elem));
                     }
                 }
@@ -1629,6 +1651,14 @@ public final class JvmRuntime {
                 return l == r;
             }
             case "REFERENCE_NE" -> {
+                return l != r;
+            }
+            case "BYTES_EQ" -> {
+                // Bytes compare by allocation identity (K6 item 12): an
+                // alias compares equal, two distinct buffers unequal.
+                return l == r;
+            }
+            case "BYTES_NE" -> {
                 return l != r;
             }
             default -> {
@@ -2634,6 +2664,10 @@ public final class JvmRuntime {
         } else if (value instanceof FunctionValue || value instanceof Intrinsic
                 || value instanceof AdapterValue) {
             throw jsonEncodingFailure("function");
+        } else if (value instanceof BytesValue) {
+            // Bytes are not JSON serializable: the pinned rejection
+            // carries the canonical bytes actual token (K6/K8).
+            throw jsonEncodingFailure("bytes");
         } else if (value instanceof ErrorValue) {
             throw jsonEncodingFailure("class:@builtin/Error");
         } else if (value instanceof ClassInstance instance) {
@@ -2872,5 +2906,143 @@ public final class JvmRuntime {
 
     public static String currentModule() {
         return module;
+    }
+
+    // =========================================================================
+    // The shared bytes surface (K6)
+    // =========================================================================
+
+    /** A bytes buffer (K6 item 13): a zero-filled fixed-length byte[] with reference identity. */
+    public static final class BytesValue {
+
+        public final byte[] data;
+        public final int length;
+
+        public BytesValue(int length) {
+            this.data = new byte[length];
+            this.length = length;
+        }
+    }
+
+    /**
+     * The bytes allocation intrinsic (K6 item 1): the pinned E8012
+     * non-negative gate at the {@code bytes(...)} call expression, then the
+     * zero-filled carrier.
+     */
+    public static Object bytesNew(Object length, String evKind, String opKey, String digest,
+                                  String parent, String origin) {
+        long n = indexOf(length);
+        if (n < 0) {
+            DealError e = fail("E8012", "bytes length must be non-negative", origin, null,
+                null);
+            ev(currentModule(), opKey, "FAILURE", evKind, digest, parent, List.of(), null,
+                errtext(e));
+            throw e;
+        }
+        return new BytesValue((int) n);
+    }
+
+    /** The {@code b.length} read (K6 item 7): the fixed logical length. */
+    public static Object bytesLength(Object v, String opKey, String digest, String parent,
+                                     String origin) {
+        if (!(v instanceof BytesValue bytes)) {
+            DealError e = bytesKindFailure(v, origin);
+            ev(currentModule(), opKey, "FAILURE", "ARRAY_LENGTH", digest, parent, List.of(),
+                null, errtext(e));
+            throw e;
+        }
+        return Long.valueOf(bytes.length);
+    }
+
+    /**
+     * The bytes carrier's kind-mismatch projection: the pinned v1.2
+     * {@code expected bytes} text with the expected {@code bytes} and the
+     * value's own canonical actual kind.
+     */
+    public static DealError bytesKindFailure(Object v, String origin) {
+        String actual = actualOf("bytes", v);
+        return fail("E8001", "expected bytes", origin, "bytes", actual);
+    }
+
+    /** The bytes receiver of one element site, or the fail-closed kind failure. */
+    private static BytesValue bytesReceiver(Object v, String origin) {
+        if (v instanceof BytesValue bytes) {
+            return bytes;
+        }
+        throw bytesKindFailure(v, origin);
+    }
+
+    /**
+     * The {@code BYTE_ELEMENT_READ} cell (K6 items 2/3): the pinned E8012
+     * bounds check ({@code index < 0} or {@code index >= b.length}), the
+     * read's own length operand supplying the bound, then the unsigned
+     * byte. The boundary START/terminal events are emitted here.
+     */
+    public static Object bytesRead(String opKey, String digest, String parent, String bKey,
+                                   String bDigest, String bParent, Object container,
+                                   long index, long length, String origin) {
+        BytesValue bytes = bytesReceiver(container, origin);
+        Object elem = (index >= 0 && index < length)
+            ? Long.valueOf(bytes.data[(int) index] & 0xFF)
+            : MISSING;
+        String elemAtom = elem == MISSING ? atom(MISSING, "missing") : atom(elem, "int");
+        ev(currentModule(), bKey, "START", "BOUNDARY", bDigest, bParent,
+            List.of(elemAtom), null, null);
+        if (elem == MISSING) {
+            DealError e = fail("E8012", "bytes index out of bounds", origin, null, null);
+            ev(currentModule(), bKey, "FAILURE", "BOUNDARY", bDigest, bParent, List.of(),
+                null, errtext(e));
+            ev(currentModule(), opKey, "FAILURE", "INDEX_READ", digest, parent, List.of(),
+                null, errtext(e));
+            throw e;
+        }
+        ev(currentModule(), bKey, "SUCCESS", "BOUNDARY", bDigest, bParent, List.of(),
+            elemAtom, null);
+        return elem;
+    }
+
+    /**
+     * The {@code BYTE_ELEMENT_ASSIGNMENT} cell (K6 item 4): the pinned
+     * E8012 bounds check first, then the element descriptor check; the
+     * enclosing commit owns the E8013 range check and the single mutation.
+     */
+    public static void bytesBounds(String bKey, String bDigest, String bParent, Object input,
+                                   long index, long length, String desc, String staticKind,
+                                   String origin) {
+        String inputAtom = atom(input, staticKind);
+        ev(currentModule(), bKey, "START", "BOUNDARY", bDigest, bParent,
+            List.of(inputAtom), null, null);
+        if (index < 0 || index >= length) {
+            DealError e = fail("E8012", "bytes index out of bounds", origin, null, null);
+            ev(currentModule(), bKey, "FAILURE", "BOUNDARY", bDigest, bParent, List.of(),
+                null, errtext(e));
+            throw e;
+        }
+        try {
+            bcheck(desc, staticKind, input);
+        } catch (DealError e) {
+            ev(currentModule(), bKey, "FAILURE", "BOUNDARY", bDigest, bParent, List.of(),
+                null, errtext(e));
+            throw e;
+        }
+        ev(currentModule(), bKey, "SUCCESS", "BOUNDARY", bDigest, bParent, List.of(),
+            inputAtom, null);
+    }
+
+    /**
+     * The bytes write's commit (K6 item 4): the E8013 value-range check
+     * (0..255) at the assignment-expression origin and the single in-place
+     * mutation. A failed write changes no storage.
+     */
+    public static void bytesCommit(String opKey, String digest, String parent, Object container,
+                                   long index, Object value, String origin) {
+        long written = indexOf(value);
+        if (written < 0 || written > 255) {
+            DealError e = fail("E8013", "bytes value out of range", origin, null, null);
+            ev(currentModule(), opKey, "FAILURE", "INDEX_WRITE", digest, parent, List.of(),
+                null, errtext(e));
+            throw e;
+        }
+        bytesReceiver(container, origin).data[(int) index] = (byte) written;
     }
 }

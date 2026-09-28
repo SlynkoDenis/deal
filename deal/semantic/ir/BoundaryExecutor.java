@@ -1,5 +1,7 @@
 package deal.semantic.ir;
 
+import deal.diagnostics.DiagnosticCode;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,14 +13,15 @@ import java.util.Set;
  * {@code BOUNDARY}-op level (ISSUE-0233 design D3): a static, pure,
  * deterministic projection engine over the closed value view.
  *
- * <p><b>Closed 11-policy subset.</b> A {@code BOUNDARY} op can carry
+ * <p><b>Closed 13-policy subset.</b> A {@code BOUNDARY} op can carry
  * exactly these policies and the executor has a projection for exactly
  * these:
  *
  * <pre>{@code
  * TYPE_DESCRIPTOR, FUNCTION_SIGNATURE, HOST_PARAMETER, HOST_SYNC_RETURN,
  * ASYNC_COMPLETION, ARRAY_ELEMENT_DESCRIPTOR, ARRAY_READ_INDEX_THEN_DESCRIPTOR,
- * ARRAY_WRITE_BOUNDS_THEN_ELEMENT, ARRAY_DELETE_BOUNDS, JSON_FROM_NULL, JSON_TO_ERROR
+ * ARRAY_WRITE_BOUNDS_THEN_ELEMENT, ARRAY_DELETE_BOUNDS, BYTES_READ, BYTES_WRITE,
+ * JSON_FROM_NULL, JSON_TO_ERROR
  * }</pre>
  *
  * Any other policy is never a {@code BOUNDARY} policy — the validator's
@@ -57,7 +60,10 @@ import java.util.Set;
  * array cells enforce {@code negative array index} (read),
  * {@code array index out of bounds} (write/delete, index {@code < 0} or
  * {@code > length}) before any element check, and the executor never
- * commits a mutation. {@code JSON_FROM_NULL} swallows every failure into
+ * commits a mutation. The bytes cells (K6) enforce the pinned E8012
+ * bounds ({@code index < 0} or {@code index >= length}) before the
+ * element check; the write's E8013 value range and its single mutation
+ * are the enclosing commit's (this executor commits nothing). {@code JSON_FROM_NULL} swallows every failure into
  * language null (never a DEAL failure); {@code JSON_TO_ERROR} projects the
  * first unsupported/wrong-identity/missing/nonfinite value as E8001
  * {@code value at {fieldPath} is not JSON serializable: {actual}}.
@@ -116,7 +122,7 @@ public final class BoundaryExecutor {
         }
     }
 
-    /** The closed 11-policy subset a {@code BOUNDARY} op can carry (D3, exact). */
+    /** The closed 13-policy subset a {@code BOUNDARY} op can carry (D3, exact). */
     private static final Set<FailurePolicyId> EXECUTABLE_POLICIES = Set.of(
         FailurePolicyId.TYPE_DESCRIPTOR,
         FailurePolicyId.FUNCTION_SIGNATURE,
@@ -127,6 +133,8 @@ public final class BoundaryExecutor {
         FailurePolicyId.ARRAY_READ_INDEX_THEN_DESCRIPTOR,
         FailurePolicyId.ARRAY_WRITE_BOUNDS_THEN_ELEMENT,
         FailurePolicyId.ARRAY_DELETE_BOUNDS,
+        FailurePolicyId.BYTES_READ,
+        FailurePolicyId.BYTES_WRITE,
         FailurePolicyId.JSON_FROM_NULL,
         FailurePolicyId.JSON_TO_ERROR
     );
@@ -162,7 +170,7 @@ public final class BoundaryExecutor {
         Objects.requireNonNull(view, "view must not be null");
         Objects.requireNonNull(context, "context must not be null");
         if (!EXECUTABLE_POLICIES.contains(policy)) {
-            throw new Defect("policy " + policy.name() + " is outside the closed 11-policy "
+            throw new Defect("policy " + policy.name() + " is outside the closed 13-policy "
                 + "BOUNDARY subset: the validator's closed table rejects it as a BOUNDARY "
                 + "policy and the executor has no projection for it");
         }
@@ -177,6 +185,8 @@ public final class BoundaryExecutor {
             case ARRAY_WRITE_BOUNDS_THEN_ELEMENT ->
                 checkArrayWrite(descriptor, view, context);
             case ARRAY_DELETE_BOUNDS -> checkArrayDelete(view, context);
+            case BYTES_READ -> checkBytesRead(descriptor, view, context);
+            case BYTES_WRITE -> checkBytesWrite(descriptor, view, context);
             case JSON_FROM_NULL -> checkJsonFromNull(descriptor, view);
             case JSON_TO_ERROR -> checkJsonToError(descriptor, view, context);
             default -> throw new Defect(
@@ -219,7 +229,7 @@ public final class BoundaryExecutor {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(realization, "realization must not be null");
         if (!EXECUTABLE_POLICIES.contains(policy)) {
-            throw new Defect("policy " + policy.name() + " is outside the closed 11-policy "
+            throw new Defect("policy " + policy.name() + " is outside the closed 13-policy "
                 + "BOUNDARY subset: the validator's closed table rejects it as a BOUNDARY "
                 + "policy and the executor has no projection for it");
         }
@@ -384,6 +394,63 @@ public final class BoundaryExecutor {
         return descriptorKindOutcome(tdProjection(), core(descriptor, view));
     }
 
+    /**
+     * BYTES_READ: the pinned E8012 bounds check first
+     * ({@code index < 0} or {@code index >= b.length}), then the element
+     * descriptor-kind check on the already-read byte (K6 item 3). The
+     * context carries {@code {index, length}}.
+     */
+    private static BoundaryOutcome checkBytesRead(RuntimeDescriptor descriptor,
+                                                  BoundaryValueView view,
+                                                  BoundaryContext context) {
+        Integer index = requireContextField(context.index(), "index", "BYTES_READ");
+        Integer length = requireContextField(context.length(), "length", "BYTES_READ");
+        if (length < 0) {
+            throw new Defect("BYTES_READ names a non-negative bytes length; got " + length);
+        }
+        if (index < 0 || index >= length) {
+            return new BoundaryOutcome.Fail(BoundaryFailure.fromRow(
+                FailureContractRegistry.row(FailurePolicyId.BYTES_READ),
+                0, null, null, new LinkedHashMap<>(), null));
+        }
+        return descriptorKindOutcome(tdProjection(), core(descriptor, view));
+    }
+
+    /**
+     * BYTES_WRITE: the pinned E8012 bounds check first
+     * ({@code index < 0} or {@code index >= b.length}), then the element
+     * descriptor-kind check on the checked RHS value; the value-range
+     * check (E8013, {@code 0..255}) and the single mutation are the
+     * enclosing commit's, after this boundary (K6 items 3/4).
+     */
+    private static BoundaryOutcome checkBytesWrite(RuntimeDescriptor descriptor,
+                                                   BoundaryValueView view,
+                                                   BoundaryContext context) {
+        Integer index = requireContextField(context.index(), "index", "BYTES_WRITE");
+        Integer length = requireContextField(context.length(), "length", "BYTES_WRITE");
+        if (length < 0) {
+            throw new Defect("BYTES_WRITE names a non-negative bytes length; got " + length);
+        }
+        if (index < 0 || index >= length) {
+            return new BoundaryOutcome.Fail(BoundaryFailure.fromRow(
+                FailureContractRegistry.row(FailurePolicyId.BYTES_WRITE),
+                0, null, null, new LinkedHashMap<>(), null));
+        }
+        return descriptorKindOutcome(tdProjection(), core(descriptor, view));
+    }
+
+    /**
+     * The write's value-range projection (E8013
+     * {@code bytes value out of range}): the pinned second template of the
+     * {@code BYTES_WRITE} row, committed by the chain's
+     * {@code INDEX_WRITE} child at the assignment-expression origin.
+     */
+    public static BoundaryFailure bytesWriteRangeFailure() {
+        return BoundaryFailure.fromRowWithCode(
+            FailureContractRegistry.row(FailurePolicyId.BYTES_WRITE), 1,
+            DiagnosticCode.E8013, null, null, new LinkedHashMap<>(), null);
+    }
+
     /** ARRAY_DELETE_BOUNDS: index < 0 or > length; otherwise pass. */
     private static BoundaryOutcome checkArrayDelete(BoundaryValueView view,
                                                     BoundaryContext context) {
@@ -445,6 +512,12 @@ public final class BoundaryExecutor {
         INT_OUT_OF_RANGE,
         /** A function value with a differing carried signature (E8010). */
         SIG_MISMATCH,
+        /**
+         * A non-bytes value at a bytes descriptor: the canonical v1.2
+         * {@code expected bytes} projection (the bytes carrier's own
+         * pinned text, with the expected/actual metadata beside it).
+         */
+        BYTES_KIND_MISMATCH,
         /** A failing array element in increasing index order (E8003 + cause). */
         ELEMENT
     }
@@ -461,6 +534,17 @@ public final class BoundaryExecutor {
 
     private static CoreResult pass(BoundaryValueView view) {
         return new CorePass(view);
+    }
+
+    /**
+     * The bytes descriptor's kind-mismatch projection: the pinned
+     * {@code expected bytes} text (the corpus's canonical v1.2 projection
+     * for a non-bytes value at a bytes descriptor) with the expected
+     * {@code bytes} and the value's canonical actual kind.
+     */
+    private static CoreResult bytesKindFail(BoundaryValueView view) {
+        return new CoreFail(FailureCase.BYTES_KIND_MISMATCH, "bytes",
+            ActualKind.canonicalToken(view.kind(), view.classId()), 0, null);
     }
 
     private static CoreResult kindFail(RuntimeDescriptor descriptor, BoundaryValueView view) {
@@ -503,10 +587,14 @@ public final class BoundaryExecutor {
                         : kindFail(descriptor, view);
             case RuntimeDescriptor.Table ignored ->
                 view.kind() == ActualKind.TABLE ? pass(view) : kindFail(descriptor, view);
-            case RuntimeDescriptor.Bytes ignored -> throw new Defect(
-                "a bytes descriptor reached the closed boundary projection: the closed "
-                    + "boundary-assignment table has no bytes cell and bytes boundaries are "
-                    + "backend-owned (ISSUE-0158) — never a BOUNDARY op");
+            case RuntimeDescriptor.Bytes ignored ->
+                // K6 item 11: the bytes descriptor's boundary projection is
+                // the kind check — a bytes view passes, every other view
+                // projects the bytes carrier's pinned v1.2 text
+                // ({@code expected bytes} with the expected/actual metadata,
+                // the canonical projection every backend produces).
+                view.kind() == ActualKind.BYTES ? pass(view)
+                    : bytesKindFail(view);
             case RuntimeDescriptor.Class cls -> coreClass(cls, view);
             case RuntimeDescriptor.Array array -> coreArray(array, view);
             case RuntimeDescriptor.Nullable nullable -> coreNullable(nullable, view);
@@ -607,19 +695,19 @@ public final class BoundaryExecutor {
     /** The pinned template selection of one descriptor-kind projection set. */
     private record Projection(FailurePolicyRow kindRow, int kindTemplate,
                               int refinementTemplate, int unicodeTemplate,
-                              FailurePolicyRow sigRow) {
+                              FailurePolicyRow sigRow, int bytesTemplate) {
     }
 
     /** TYPE_DESCRIPTOR: kind mismatches, the pinned invalid-unicode variant, E8010 signatures. */
     private static Projection tdProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.TYPE_DESCRIPTOR),
-            0, -1, 1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
+            0, -1, 1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE), 2);
     }
 
     /** FUNCTION_SIGNATURE: non-functions project the E8001 kind template. */
     private static Projection signatureProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.TYPE_DESCRIPTOR),
-            0, -1, -1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE));
+            0, -1, -1, FailureContractRegistry.row(FailurePolicyId.FUNCTION_SIGNATURE), -1);
     }
 
     /**
@@ -629,7 +717,7 @@ public final class BoundaryExecutor {
      */
     private static Projection asyncProjection() {
         return new Projection(FailureContractRegistry.row(FailurePolicyId.ASYNC_COMPLETION),
-            0, 1, 1, null);
+            0, 1, 1, null, -1);
     }
 
     /** The descriptor-kind outcome: Pass keeps the value; a failure projects per the set. */
@@ -663,6 +751,9 @@ public final class BoundaryExecutor {
                 FailureContractRegistry.row(FailurePolicyId.INT32_RESULT), 0);
             case SIG_MISMATCH -> new Selected(
                 projection.sigRow() != null ? projection.sigRow() : projection.kindRow(), 0);
+            case BYTES_KIND_MISMATCH -> new Selected(projection.kindRow(),
+                projection.bytesTemplate() >= 0
+                    ? projection.bytesTemplate() : projection.kindTemplate());
             case ELEMENT -> new Selected(
                 FailureContractRegistry.row(FailurePolicyId.ARRAY_ELEMENT_DESCRIPTOR), 0);
         };

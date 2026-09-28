@@ -726,6 +726,9 @@ public final class JvmSemanticEmitter {
             if (descriptor instanceof RuntimeDescriptor.Array) {
                 return "array";
             }
+            if (descriptor instanceof RuntimeDescriptor.Bytes) {
+                return "bytes";
+            }
             if (descriptor instanceof RuntimeDescriptor.Func) {
                 return "function";
             }
@@ -766,6 +769,9 @@ public final class JvmSemanticEmitter {
             }
             if (descriptor instanceof RuntimeDescriptor.Array array) {
                 return "array(" + descriptorText(array.element()) + ")";
+            }
+            if (descriptor instanceof RuntimeDescriptor.Bytes) {
+                return "bytes";
             }
             if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
                 return "nullable(" + descriptorText(nullable.inner()) + ")";
@@ -811,12 +817,15 @@ public final class JvmSemanticEmitter {
 
         private static String bcheckArgs(String method, RuntimeDescriptor descriptor,
                                          String value) {
-            String args = javaString(descriptorText(descriptor)) + ", "
-                + javaString(staticKind(descriptor)) + ", " + value;
-            if (containsFunction(descriptor)) {
-                args += ", " + javaString(descriptor.canonicalSpecText());
-            }
-            return method + "(" + args + ")";
+            // The canonical spec text is always the trailing argument: the
+            // function row compares a carrier's canonical signature with
+            // it, and the array element projection (E8003) spells its
+            // expected element text from it (the semantic oracle's closed
+            // canonical spelling), never from the runtime's internal
+            // array(...) dialect.
+            return method + "(" + javaString(descriptorText(descriptor)) + ", "
+                + javaString(staticKind(descriptor)) + ", " + value + ", "
+                + javaString(descriptor.canonicalSpecText()) + ")";
         }
 
         /** Whether one descriptor carries a function position (recursively). */
@@ -1654,6 +1663,23 @@ public final class JvmSemanticEmitter {
             return last == null || completesNormally(last);
         }
 
+        /**
+         * The {@link LoweredFunction} record of one function id across the
+         * session's closure: a non-entry module's function body resolves
+         * against its own module's function registry, never the entry
+         * unit's (a cross-module call site's capture list is the callee's
+         * own).
+         */
+        private LoweredFunction functionOf(FunctionId functionId) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                LoweredFunction function = moduleUnit.functions().get(functionId);
+                if (function != null) {
+                    return function;
+                }
+            }
+            return unit.functions().get(functionId);
+        }
+
         /** The membership table of the unit owning one lowered function. */
         private StructuredBodyTable tableOfFunction(LoweredFunction function) {
             for (LoweredModuleUnit moduleUnit : units.values()) {
@@ -1796,6 +1822,27 @@ public final class JvmSemanticEmitter {
                 .append(", List.of(").append(inputs).append("), null, null);\n");
         }
 
+        /** The INDEX_READ START of a bytes read: the container atom plus the bytes slot atom. */
+        private void emitBytesSlotOperandStart(SemanticOp op, int indent) {
+            if (!trace) {
+                return;
+            }
+            StringBuilder inputs = new StringBuilder();
+            inputs.append("JvmRuntime.atom(").append(slot(op.operands().get(0)))
+                .append(", ").append(javaString(staticKind(op.operandTypes().get(0))))
+                .append("), ");
+            inputs.append("\"byteslot:\" + ((Object[]) ").append(slot(op.operands().get(1)))
+                .append(")[1] + \"/\" + (((Long) ((Object[]) ")
+                .append(slot(op.operands().get(1))).append(")[1]) < ((Long) ((Object[]) ")
+                .append(slot(op.operands().get(1))).append(")[2]))");
+            out.append(indent(indent)).append("JvmRuntime.ev(MODULE, ")
+                .append(javaString(opKey(op.opId()))).append(", \"START\", ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId())))
+                .append(", List.of(").append(inputs).append("), null, null);\n");
+        }
+
         private void emitBoundaryStart(SemanticOp boundary, String inputExpr,
                                        RuntimeDescriptor inputDescriptor, int indent) {
             if (!trace) {
@@ -1837,6 +1884,24 @@ public final class JvmSemanticEmitter {
                 .append(javaString(boundary.contract().canonicalDigest())).append(", ")
                 .append(javaString(parentKey(boundary.origin().parentOpId())))
                 .append(", List.of(), ").append(atomExpr).append(", null);\n");
+        }
+
+        /**
+         * The op's SUCCESS event with the value-aware atom (the oracle's
+         * {@code atomOf}): a deferred composite read atomizes the value's
+         * own kind, never the declared descriptor's kind.
+         */
+        private void emitResultSuccessAtom(SemanticOp op, String valueExpr, int indent) {
+            if (!trace) {
+                return;
+            }
+            out.append(indent(indent)).append("JvmRuntime.ev(MODULE, ")
+                .append(javaString(opKey(op.opId()))).append(", \"SUCCESS\", ")
+                .append(javaString(op.kind().name())).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId())))
+                .append(", List.of(), JvmRuntime.rawAtom(").append(valueExpr)
+                .append(", \"ref\"), null);\n");
         }
 
         private void emitResultSuccess(SemanticOp op, String valueExpr,
@@ -2128,11 +2193,40 @@ public final class JvmSemanticEmitter {
             KindPayload.ArrayLengthPayload payload =
                 (KindPayload.ArrayLengthPayload) op.payload();
             emitStart(op, indent);
-            out.append(indent(indent)).append(slot((ValueId) op.result()))
-                .append(" = Long.valueOf(((").append("JvmRuntime.Array) ")
-                .append(slot(payload.arrayValue())).append(").length);\n");
-            emitResultSuccess(op, slot((ValueId) op.result()),
-                (RuntimeDescriptor) op.resultType(), indent);
+            String target = slot((ValueId) op.result());
+            if (isBytesValue(payload.arrayValue())) {
+                // K6 item 7: b.length reads the bytes buffer's fixed
+                // logical length at the read's own origin.
+                out.append(indent(indent)).append(target)
+                    .append(" = JvmRuntime.bytesLength(")
+                    .append(slot(payload.arrayValue())).append(", ")
+                    .append(javaString(opKey(op.opId()))).append(", ")
+                    .append(javaString(op.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(javaString(originOf(op))).append(");\n");
+            } else {
+                out.append(indent(indent)).append(target)
+                    .append(" = Long.valueOf(((").append("JvmRuntime.Array) ")
+                    .append(slot(payload.arrayValue())).append(").length);\n");
+            }
+            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
+        }
+
+        /**
+         * Whether one value identity's producing op publishes a bytes
+         * value (the {@code b.length} receiver selector, K6 item 7): an
+         * {@code ARRAY_LENGTH} op carries no operands, so the receiver
+         * producer's own result descriptor is the classification
+         * authority.
+         */
+        private boolean isBytesValue(deal.semantic.ir.ValueId value) {
+            for (SemanticOp candidate : opsById.values()) {
+                if (value.equals(candidate.result())
+                        && candidate.resultType() instanceof RuntimeDescriptor.Bytes) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void emitMemberRead(SemanticOp op, int indent) {
@@ -2203,11 +2297,16 @@ public final class JvmSemanticEmitter {
                         + target + ", "
                         + javaString(staticKind(boundaryPayload.descriptor())) + ")",
                         indent);
+                    // The deferred composite read's own SUCCESS atom renders
+                    // the value's own kind too (the oracle's value-aware
+                    // publish, never the declared kind).
+                    emitResultSuccessAtom(op, target, indent);
                 } else {
                     emitBoundarySuccess(boundary, target,
                         boundaryPayload.descriptor(), indent);
+                    emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(),
+                        indent);
                 }
-                emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
                 return;
             }
             // The OPTIONAL_READ envelope shape: the raw read publishes the
@@ -2376,7 +2475,19 @@ public final class JvmSemanticEmitter {
          * cell (ISSUE-0651: the function and array carriers).
          */
         private boolean defersContextualCheck(RuntimeDescriptor descriptor) {
-            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor);
+            // The composite carriers (functions, arrays, and bytes — a bytes
+            // contextual read defers its shape check to the consuming
+            // declared cell, whose bytes projection carries the pinned
+            // "expected bytes" text at the declaration's own origin).
+            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor)
+                || isBytesDescriptor(descriptor);
+        }
+
+        /** Whether one boundary descriptor is the bytes carrier (nullable unwrapped). */
+        private boolean isBytesDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Bytes;
         }
 
         /**
@@ -2596,6 +2707,14 @@ public final class JvmSemanticEmitter {
                         .append(slot(payload.currentLength())).append("), ")
                         .append(write ? "1L" : "0L").append("};\n");
                 }
+                case BYTES_READ, BYTES_WRITE ->
+                    // The bytes slot (K6 item 5): the index against the
+                    // receiver's length read; no append decision exists.
+                    out.append(indent(indent)).append(target)
+                        .append(" = new Object[]{\"b\", Long.valueOf(JvmRuntime.indexOf(")
+                        .append(slot(payload.rawKey()))
+                        .append(")), Long.valueOf(JvmRuntime.indexOf(")
+                        .append(slot(payload.currentLength())).append("))};\n");
                 case TABLE_READ, TABLE_WRITE ->
                     out.append(indent(indent)).append(target).append(" = new Object[]{")
                         .append("\"t\", ").append(slot(payload.rawKey())).append("};\n");
@@ -2612,6 +2731,17 @@ public final class JvmSemanticEmitter {
                 .append(javaString(parentKey(op.origin().parentOpId())))
                 .append(", List.of(), \"slot:\" + __s[0] + \"/\" + (__s[0] < __s[1]) "
                     + "+ \"/\" + (__s[2] == 1 && __s[0] == __s[1]), null);\n");
+            out.append(indent(indent)).append("} else if (\"b\".equals(((Object[]) ")
+                .append(target).append(")[0])) {\n");
+            out.append(indent(indent)).append("  Object[] __s = (Object[]) ").append(target)
+                .append(";\n");
+            out.append(indent(indent)).append(
+                "  JvmRuntime.ev(MODULE, ").append(javaString(opKey(op.opId())))
+                .append(", \"SUCCESS\", \"INDEX_NORMALIZE\", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId())))
+                .append(", List.of(), \"byteslot:\" + __s[1] + \"/\" + (((Long) __s[1]) "
+                    + "< ((Long) __s[2])), null);\n");
             out.append(indent(indent)).append("} else {\n");
             out.append(indent(indent)).append("  Object[] __s = (Object[]) ").append(target)
                 .append(";\n");
@@ -2633,6 +2763,31 @@ public final class JvmSemanticEmitter {
             boolean nullable = descriptor instanceof RuntimeDescriptor.Nullable;
             RuntimeDescriptor inner = nullable
                 ? ((RuntimeDescriptor.Nullable) descriptor).inner() : descriptor;
+            if (!op.operandTypes().isEmpty()
+                    && op.operandTypes().get(0) instanceof RuntimeDescriptor.Bytes) {
+                // K6 item 2: the bytes element read — the length read's
+                // result is the normalize's currentLength and the
+                // BYTE_ELEMENT_READ cell consumes {index, length} from the
+                // same slot.
+                emitBytesSlotOperandStart(op, indent);
+                String bytesTarget = slot((ValueId) op.result());
+                out.append(indent(indent)).append(bytesTarget)
+                    .append(" = JvmRuntime.bytesRead(")
+                    .append(javaString(opKey(op.opId()))).append(", ")
+                    .append(javaString(op.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(javaString(opKey(boundary.opId()))).append(", ")
+                    .append(javaString(boundary.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(boundary.origin().parentOpId())))
+                    .append(", ").append(slot(payload.container())).append(", ((Long) ")
+                    .append("((Object[]) ").append(slot(payload.slot()))
+                    .append(")[1]).longValue(), ((Long) ((Object[]) ")
+                    .append(slot(payload.slot())).append(")[2]).longValue(), ")
+                    .append(javaString(originOf(boundary))).append(");\n");
+                emitResultSuccess(op, bytesTarget, (RuntimeDescriptor) op.resultType(),
+                    indent);
+                return;
+            }
             emitSlotOperandStart(op, indent);
             String target = slot((ValueId) op.result());
             out.append(indent(indent)).append(target).append(" = JvmRuntime.arrayRead(")
@@ -2673,6 +2828,20 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("  ((")
                 .append("JvmRuntime.Array) ").append(container)
                 .append(").elements.set(__wi, ").append(value).append(");\n");
+            out.append(indent(indent)).append("} else if (\"b\".equals(((Object[]) ")
+                .append(slotName).append(")[0])) {\n");
+            // The bytes commit (K6 item 4): the E8013 value-range check at
+            // the assignment expression and the single in-place mutation;
+            // the bounds already passed at the chain's
+            // BYTE_ELEMENT_ASSIGNMENT boundary.
+            out.append(indent(indent)).append("  Object[] __s = (Object[]) ").append(slotName)
+                .append(";\n");
+            out.append(indent(indent)).append("  JvmRuntime.bytesCommit(")
+                .append(javaString(opKey(op.opId()))).append(", ")
+                .append(javaString(op.contract().canonicalDigest())).append(", ")
+                .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(container).append(", ((Long) __s[1]).longValue(), ").append(value)
+                .append(", ").append(javaString(originOf(op))).append(");\n");
             out.append(indent(indent)).append("} else {\n");
             out.append(indent(indent)).append("  Object[] __s = (Object[]) ").append(slotName)
                 .append(";\n");
@@ -3138,7 +3307,7 @@ public final class JvmSemanticEmitter {
             }
             for (int i = 0; i < payload.functions().size(); i++) {
                 FunctionId functionId = payload.functions().get(i);
-                LoweredFunction function = unit.functions().get(functionId);
+                LoweredFunction function = functionOf(functionId);
                 if (function == null) {
                     throw new IllegalStateException("group member " + functionId
                         + " has no LoweredFunction record (producer defect)");
@@ -3273,6 +3442,24 @@ public final class JvmSemanticEmitter {
                                        SemanticOp chain, int indent) {
             String input = slot(payload.input());
             switch (payload.kind()) {
+                case BYTE_ELEMENT_ASSIGNMENT -> {
+                    // K6 item 4: the E8012 bounds cell (index-expression
+                    // origin), then the element descriptor check; the
+                    // commit owns the E8013 range check.
+                    out.append(indent(indent)).append("JvmRuntime.bytesBounds(")
+                        .append(javaString(opKey(boundary.opId()))).append(", ")
+                        .append(javaString(boundary.contract().canonicalDigest()))
+                        .append(", ")
+                        .append(javaString(parentKey(boundary.origin().parentOpId())))
+                        .append(", ").append(input).append(", ((Long) ((Object[]) ")
+                        .append(chainSlotExpr(chain)).append(")[1]).longValue(), ((Long) ")
+                        .append("((Object[]) ").append(chainSlotExpr(chain))
+                        .append(")[2]).longValue(), ")
+                        .append(javaString(descriptorText(payload.descriptor())))
+                        .append(", ").append(javaString(staticKind(payload.descriptor())))
+                        .append(", ").append(javaString(originOf(boundary)))
+                        .append(");\n");
+                }
                 case ARRAY_ELEMENT_ASSIGNMENT, ARRAY_ELEMENT_DELETE -> {
                     // JvmRuntime.arrayBounds emits the boundary START/terminal
                     // events (the bounds check runs only from this projection);
@@ -3449,7 +3636,7 @@ public final class JvmSemanticEmitter {
                         .append(resultLocal)
                         .append(" = ").append(fnFactory(callee)).append("(");
                     deal.semantic.ir.LoweredFunction calleeFunction =
-                        unit.functions().get(callee);
+                        functionOf(callee);
                     List<deal.semantic.ir.BindingId> captures = calleeFunction == null
                         ? List.of() : calleeFunction.captures();
                     for (int i = 0; i < captures.size(); i++) {
@@ -5933,6 +6120,13 @@ public final class JvmSemanticEmitter {
                     .append(javaString(op.contract().canonicalDigest())).append(", ")
                     .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
                     .append(javaString(origin)).append(");\n");
+                case BYTES_NEW -> out.append(indent(indent)).append(target)
+                    .append(" = JvmRuntime.bytesNew(").append(input).append(", ")
+                    .append(javaString(op.kind().name())).append(", ")
+                    .append(javaString(opKey(op.opId()))).append(", ")
+                    .append(javaString(op.contract().canonicalDigest())).append(", ")
+                    .append(javaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(javaString(origin)).append(");\n");
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType(), indent);
         }
@@ -6365,7 +6559,20 @@ public final class JvmSemanticEmitter {
 
         /** Collects the transfer ops of a block recursively through structure payloads. */
         private void collectTransfers(BlockId block, List<SemanticOp> transfers) {
-            for (OpId opId : table.blockOps().get(block)) {
+            // The block's owning membership table (a non-entry module's
+            // factory body resolves against its own module table, exactly
+            // like the block walk's own resolution).
+            StructuredBodyTable ownerTable = blockTableOf.get(block);
+            if (ownerTable == null) {
+                ownerTable = table;
+            }
+            List<OpId> memberOps = ownerTable.blockOps().get(block);
+            if (memberOps == null) {
+                throw new IllegalStateException("block " + block + " has no membership row "
+                    + "in its owning unit's table (a malformed table — the production "
+                    + "validator rejects this)");
+            }
+            for (OpId opId : memberOps) {
                 SemanticOp op = opsById.get(opId);
                 switch (op.kind()) {
                     case BREAK, CONTINUE, RETURN -> transfers.add(op);
@@ -6681,7 +6888,7 @@ public final class JvmSemanticEmitter {
             out.append(indent(indent)).append("  Object __res;\n");
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
-                    LoweredFunction function = unit.functions().get(body.functionId());
+                    LoweredFunction function = functionOf(body.functionId());
                     List<BindingId> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();
@@ -7026,7 +7233,7 @@ public final class JvmSemanticEmitter {
             };
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
-                    LoweredFunction function = unit.functions().get(body.functionId());
+                    LoweredFunction function = functionOf(body.functionId());
                     List<BindingId> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();

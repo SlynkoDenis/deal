@@ -1770,9 +1770,9 @@ public class SemanticIrValidatorTest {
                     null)));
             assertPass(SemanticIrValidator.validate(base, FACTS), "boundary injection base");
             String text = substitutePayloadLeaf(SemanticIrValidator.toUnitText(base),
-                "kind", "VARIABLE_DECLARATION", "BYTE_ELEMENT_ASSIGNMENT");
+                "kind", "VARIABLE_DECLARATION", "DEAL_TO_C_FFI");
             assertE6005(SemanticIrValidator.validateText(text, FACTS),
-                "R-ENUM", "BYTE_ELEMENT_ASSIGNMENT");
+                "R-ENUM", "DEAL_TO_C_FFI");
         }
 
         // R-PRIVATE-STEP: an out-of-set op-kind string.

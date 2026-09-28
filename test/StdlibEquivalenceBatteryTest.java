@@ -857,7 +857,7 @@ public final class StdlibEquivalenceBatteryTest {
                 case Value.String string -> BoundaryValueView.of(string.scalar()
                     instanceof UnicodeScalars.Valid ? ActualKind.STRING
                         : ActualKind.INVALID_UNICODE);
-                case Value.Table ignored -> BoundaryValueView.of(ActualKind.TABLE);
+                    case Value.Table ignored -> BoundaryValueView.of(ActualKind.TABLE);
                 case Value.Array array -> {
                     List<BoundaryValueView> elements = new ArrayList<>();
                     for (Value element : array.elements().elements()) {

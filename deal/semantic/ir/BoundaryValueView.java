@@ -11,7 +11,7 @@ import java.util.Objects;
  * <p>Shape (D3, exact):
  * {@code {kind: ActualKind, classId?, numberValue?, functionSignature?,
  * elements:[BoundaryValueView]?}}. The {@code kind} is one of the closed
- * 13 canonical actual kinds ({@link ActualKind}); the payload fields are
+ * 14 canonical actual kinds ({@link ActualKind}); the payload fields are
  * present exactly when the kind names them:
  * {@code classId} for {@code CLASS} (the canonical {@code @modulePath/Name}
  * atom text), {@code numberValue} for {@code NUMBER} (any IEEE-754 double,
@@ -76,8 +76,10 @@ public record BoundaryValueView(
                 }
             }
             default -> {
-                // NULL, MISSING, BOOLEAN, STRING, TABLE, ASYNC_OPERATION,
-                // NOTHING, INVALID_UNICODE: no payload field.
+                // NULL, MISSING, BOOLEAN, STRING, BYTES, TABLE,
+                // ASYNC_OPERATION, NOTHING, INVALID_UNICODE: no payload
+                // field (a BYTES view is classification-only: it carries
+                // no contents, K6 item 11).
             }
         }
         if (kind != ActualKind.CLASS && classId != null) {
@@ -102,13 +104,14 @@ public record BoundaryValueView(
     }
 
     /** A payload-free view for {@code NULL}, {@code MISSING}, {@code BOOLEAN},
-     *  {@code INT}, {@code STRING}, {@code TABLE}, {@code ASYNC_OPERATION},
-     *  {@code NOTHING}, and {@code INVALID_UNICODE}. */
+     *  {@code INT}, {@code STRING}, {@code BYTES}, {@code TABLE},
+     *  {@code ASYNC_OPERATION}, {@code NOTHING}, and {@code INVALID_UNICODE}. */
     public static BoundaryValueView of(ActualKind kind) {
         Objects.requireNonNull(kind, "kind must not be null");
         return switch (kind) {
-            case NULL, MISSING, BOOLEAN, INT, STRING, TABLE, ASYNC_OPERATION, NOTHING,
-                 INVALID_UNICODE -> new BoundaryValueView(kind, null, null, null, null);
+            case NULL, MISSING, BOOLEAN, INT, STRING, BYTES, TABLE, ASYNC_OPERATION,
+                 NOTHING, INVALID_UNICODE ->
+                new BoundaryValueView(kind, null, null, null, null);
             case CLASS, NUMBER, FUNCTION, ARRAY ->
                 throw new IllegalArgumentException(kind
                     + " carries a payload; use the payload-bearing factory");

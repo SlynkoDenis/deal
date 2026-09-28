@@ -90,6 +90,46 @@ public record BoundaryFailure(
             metadata == null ? new LinkedHashMap<>() : metadata, cause);
     }
 
+    /**
+     * Instantiates one pinned template of a registry row under an explicit
+     * DEAL-visible code — the multi-code rows' second projection
+     * ({@code BYTES_WRITE}: the bounds template carries the row's own
+     * E8012, the value-range template the pinned E8013). The message is
+     * the selected template, single-sourced from the registry row; only
+     * the code differs.
+     *
+     * @param row           the registry row owning the projection; non-null
+     * @param templateIndex the row's template list position
+     * @param code          the pinned DEAL-visible code of this template; non-null
+     * @param expected      the canonical expected text, or {@code null}
+     * @param actual        the canonical actual text, or {@code null}
+     * @param metadata      the row's pinned metadata values; may be empty, never null
+     * @param cause         the leaf failure, or {@code null}
+     * @return the structured failure whose {@code policy} is the row's
+     * @throws NullPointerException     if {@code row} or {@code code} is null
+     * @throws IndexOutOfBoundsException if {@code templateIndex} is outside
+     *                                   the row's template list
+     * @throws BoundaryExecutor.Defect  if a placeholder stays unbound after
+     *                                  instantiation (fail closed)
+     */
+    public static BoundaryFailure fromRowWithCode(FailurePolicyRow row, int templateIndex,
+                                                  DiagnosticCode code, String expected,
+                                                  String actual,
+                                                  Map<String, String> metadata,
+                                                  BoundaryFailure cause) {
+        Objects.requireNonNull(row, "row must not be null");
+        Objects.requireNonNull(code, "code must not be null");
+        List<String> templates = row.templates();
+        if (templates.isEmpty() || templateIndex < 0 || templateIndex >= templates.size()) {
+            throw new IllegalArgumentException(
+                "template index " + templateIndex + " is outside the pinned templates of "
+                    + row.policy());
+        }
+        String message = instantiate(templates.get(templateIndex), expected, actual, metadata);
+        return new BoundaryFailure(row.policy(), code, message, expected, actual,
+            metadata == null ? new LinkedHashMap<>() : metadata, cause);
+    }
+
     /** Substitutes the canonical placeholders; an unbound placeholder is a defect. */
     private static String instantiate(String template, String expected, String actual,
                                       Map<String, String> metadata) {

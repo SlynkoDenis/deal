@@ -6,7 +6,7 @@ import java.util.Objects;
  * The minimal execution context a boundary cell names (ISSUE-0233 design
  * D3): exactly {@code {parameterIndex?, index?, length?, elementIndex?,
  * fieldPath?}} — one field per context-bearing cell of the closed
- * 11-policy subset, all optional because every field is named by at most
+ * 13-policy subset, all optional because every field is named by at most
  * one cell.
  *
  * <ul>
@@ -17,9 +17,11 @@ import java.util.Objects;
  *   <li>{@code index} — the array index for the
  *       {@code ARRAY_READ_INDEX_THEN_DESCRIPTOR},
  *       {@code ARRAY_WRITE_BOUNDS_THEN_ELEMENT}, and
- *       {@code ARRAY_DELETE_BOUNDS} cells.</li>
+ *       {@code ARRAY_DELETE_BOUNDS} cells, and the bytes index for the
+ *       {@code BYTES_READ}/{@code BYTES_WRITE} cells.</li>
  *   <li>{@code length} — the array length at check time for the write and
- *       delete bounds cells.</li>
+ *       delete bounds cells, and the bytes length for the
+ *       {@code BYTES_READ}/{@code BYTES_WRITE} cells.</li>
  *   <li>{@code elementIndex} — the {@code ARRAY_ELEMENT_DESCRIPTOR}
  *       boundary's one-based element position ({@code {oneBasedIndex}}).</li>
  *   <li>{@code fieldPath} — the {@code JSON_TO_ERROR} boundary's
@@ -63,6 +65,19 @@ public record BoundaryContext(
     /** The {@code ARRAY_WRITE_BOUNDS_THEN_ELEMENT}/{@code ARRAY_DELETE_BOUNDS}
      *  context: the index and the array length at check time. */
     public static BoundaryContext writeBounds(int index, int length) {
+        if (length < 0) {
+            throw new IllegalArgumentException("length must be >= 0, got " + length);
+        }
+        return new BoundaryContext(null, index, length, null, null);
+    }
+
+    /**
+     * The bytes cells' context (K6 item 3): the bytes index and the
+     * receiver's length at check time — the read's own length read for
+     * {@code BYTES_READ}, the chain's length child for
+     * {@code BYTES_WRITE}.
+     */
+    public static BoundaryContext bytesBounds(int index, int length) {
         if (length < 0) {
             throw new IllegalArgumentException("length must be >= 0, got " + length);
         }

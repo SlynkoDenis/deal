@@ -196,7 +196,8 @@ public class SemanticIrSchemaTest {
 
     private static final List<String> BOUNDARY_KINDS = List.of(
         "VARIABLE_DECLARATION", "VARIABLE_ASSIGNMENT", "CLASS_FIELD_ASSIGNMENT",
-        "ARRAY_ELEMENT_ASSIGNMENT", "ARRAY_ELEMENT_READ", "ARRAY_ELEMENT_DELETE",
+        "ARRAY_ELEMENT_ASSIGNMENT", "BYTE_ELEMENT_ASSIGNMENT", "ARRAY_ELEMENT_READ",
+        "BYTE_ELEMENT_READ", "ARRAY_ELEMENT_DELETE",
         "ARRAY_LITERAL_ELEMENT", "FUNCTION_PARAMETER", "FUNCTION_RETURN",
         "ASYNC_COMPLETION", "CLASS_LITERAL_FIELD", "CLASS_DEFAULT_FIELD",
         "UNTYPED_CLASS_INPUT", "OPTIONAL_FIELD_READ", "CONTEXTUAL_TABLE_READ",
@@ -209,7 +210,8 @@ public class SemanticIrSchemaTest {
         "INT32_DIVISOR_THEN_RESULT", "INT32_EXPONENT_THEN_RESULT", "INT_CONVERSION",
         "NUMBER_CONVERSION", "ARRAY_ELEMENT_DESCRIPTOR",
         "ARRAY_READ_INDEX_THEN_DESCRIPTOR", "ARRAY_WRITE_BOUNDS_THEN_ELEMENT",
-        "ARRAY_DELETE_BOUNDS", "FUNCTION_SIGNATURE", "HOST_PARAMETER",
+        "ARRAY_DELETE_BOUNDS", "BYTES_ALLOCATE", "BYTES_READ", "BYTES_WRITE",
+        "FUNCTION_SIGNATURE", "HOST_PARAMETER",
         "HOST_SYNC_RETURN", "ASYNC_COMPLETION", "ASYNC_OPERATION_HANDLE",
         "HOST_LOAD", "CLASS_CONSTRUCTION", "JSON_PARSE_SYNTAX", "JSON_FROM_NULL",
         "JSON_TO_ERROR", "SQRT_NEGATIVE", "THROW_TRANSFER", "INFRASTRUCTURE_ONLY");
@@ -252,7 +254,8 @@ public class SemanticIrSchemaTest {
         testClosedEnum(ParameterBoundaryMode.class, List.of("RUN", "ELIDED_BY_ADAPTER"),
             "ParameterBoundaryMode");
         testClosedEnum(IndexMode.class,
-            List.of("ARRAY_READ", "ARRAY_WRITE", "TABLE_READ", "TABLE_WRITE"), "IndexMode");
+            List.of("ARRAY_READ", "ARRAY_WRITE", "BYTES_READ", "BYTES_WRITE", "TABLE_READ",
+                "TABLE_WRITE"), "IndexMode");
         testClosedEnum(IterationMode.class, List.of("ARRAY_VALUES", "STRING_SCALARS"),
             "IterationMode");
         testClosedEnum(ControlSelector.class, List.of("IF", "LOGICAL_AND", "LOGICAL_OR",
@@ -269,12 +272,13 @@ public class SemanticIrSchemaTest {
         testClosedEnum(AsyncLinkKind.class, List.of("EXTERNAL_LINK", "ADAPTER_INNER"),
             "AsyncLinkKind");
         testClosedEnum(NullableSide.class, List.of("LEFT", "RIGHT", "BOTH"), "NullableSide");
-        testClosedEnum(IntrinsicKind.class, List.of("INT_CONVERT", "NUMBER_CONVERT"),
-            "IntrinsicKind");
+        testClosedEnum(IntrinsicKind.class,
+            List.of("INT_CONVERT", "NUMBER_CONVERT", "BYTES_NEW"), "IntrinsicKind");
         testClosedEnum(BindingCellKind.class, List.of("DIRECT", "SHARED_CELL"),
             "BindingCellKind");
         testClosedEnum(AssignTargetKind.class,
-            List.of("VARIABLE", "TABLE_SLOT", "ARRAY_SLOT", "CLASS_FIELD"), "AssignTargetKind");
+            List.of("VARIABLE", "TABLE_SLOT", "ARRAY_SLOT", "BYTES_SLOT", "CLASS_FIELD"),
+            "AssignTargetKind");
         testClosedEnum(DeleteTargetKind.class, List.of("TABLE_SLOT", "ARRAY_SLOT", "CLASS_FIELD"),
             "DeleteTargetKind");
         testClosedEnum(DefaultOwner.class, List.of("LOCAL", "SHARED_FACTORY", "RETAINED_ABI",
@@ -298,8 +302,8 @@ public class SemanticIrSchemaTest {
         check(OP_KINDS.size() == 55, "SemanticOpKind has exactly 55 values; got " + OP_KINDS.size());
         check(UNARY_SELECTORS.size() == 3, "UnarySelector has exactly 3 values");
         check(BINARY_SELECTORS.size() == 42, "BinarySelector has exactly 42 values; got " + BINARY_SELECTORS.size());
-        check(BOUNDARY_KINDS.size() == 25, "BoundaryKind has exactly 25 values; got " + BOUNDARY_KINDS.size());
-        check(FAILURE_POLICIES.size() == 24, "FailurePolicyId has exactly 24 values; got " + FAILURE_POLICIES.size());
+        check(BOUNDARY_KINDS.size() == 27, "BoundaryKind has exactly 27 values; got " + BOUNDARY_KINDS.size());
+        check(FAILURE_POLICIES.size() == 27, "FailurePolicyId has exactly 27 values; got " + FAILURE_POLICIES.size());
         check(STDLIB_IDS.size() == 21, "StdlibFunctionId has exactly 21 values; got " + STDLIB_IDS.size());
     }
 
@@ -362,8 +366,8 @@ public class SemanticIrSchemaTest {
         System.out.println("-- Reserved names marked invalid --");
 
         check(BoundaryKind.RESERVED_NAMES.equals(
-                List.of("BYTE_ELEMENT_ASSIGNMENT", "C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
-            "BoundaryKind.RESERVED_NAMES is exactly the three reserved boundary names");
+                List.of("C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
+            "BoundaryKind.RESERVED_NAMES is exactly the two reserved boundary names");
         check(FailurePolicyId.RESERVED_NAMES.equals(
                 List.of("EXTERNAL_PARAMETER", "EXTERNAL_RETURN", "STDLIB_PARAMETER", "STDLIB_RETURN")),
             "FailurePolicyId.RESERVED_NAMES is exactly the four reserved policy names");

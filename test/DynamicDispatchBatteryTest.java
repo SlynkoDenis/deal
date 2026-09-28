@@ -2729,10 +2729,12 @@ public class DynamicDispatchBatteryTest {
             + "failure-policy, and payload-record sets are unchanged --");
         checkEq(55, SemanticOpKind.values().length,
             "the closed operation-kind set keeps its 55 members");
-        checkEq(25, deal.semantic.ir.BoundaryKind.values().length,
-            "the closed boundary-kind set keeps its 25 members");
-        checkEq(24, deal.semantic.ir.FailurePolicyId.values().length,
-            "the closed failure-policy set keeps its 24 members");
+        checkEq(27, deal.semantic.ir.BoundaryKind.values().length,
+            "the closed boundary-kind set keeps its 27 members (the bytes element "
+                + "cells of ISSUE-0626)");
+        checkEq(27, deal.semantic.ir.FailurePolicyId.values().length,
+            "the closed failure-policy set keeps its 27 members (the three bytes "
+                + "policies of ISSUE-0626)");
         checkEq(55, KindPayload.class.getPermittedSubclasses().length,
             "the closed payload-record set keeps its 55 landed records");
         checkEq(7, FunctionExecutionBinding.class.getPermittedSubclasses().length,

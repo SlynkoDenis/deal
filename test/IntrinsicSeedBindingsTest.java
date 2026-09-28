@@ -295,6 +295,7 @@ public class IntrinsicSeedBindingsTest {
             String expectedText = switch (kind) {
                 case INT_CONVERT -> "(number)->int";
                 case NUMBER_CONVERT -> "(int)->number";
+                case BYTES_NEW -> "(int)->bytes";
             };
             check(descriptor.canonicalSpecText().equals(expectedText),
                 kind + "'s declared signature text is " + expectedText + "; got "

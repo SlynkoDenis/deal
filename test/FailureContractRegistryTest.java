@@ -92,9 +92,9 @@ public class FailureContractRegistryTest {
         System.out.println("-- Exhaustive row coverage --");
 
         Map<FailurePolicyId, FailurePolicyRow> rows = FailureContractRegistry.rows();
-        check(rows.size() == 24, "exactly 24 rows; got " + rows.size());
+        check(rows.size() == 27, "exactly 27 rows; got " + rows.size());
         check(rows.keySet().equals(EnumSet.allOf(FailurePolicyId.class)),
-            "the row keys are exactly all 24 FailurePolicyId values (none missing, none extra)");
+            "the row keys are exactly all 27 FailurePolicyId values (none missing, none extra)");
 
         int enumerated = 0;
         for (FailurePolicyId policy : FailurePolicyId.values()) {
@@ -106,7 +106,7 @@ public class FailureContractRegistryTest {
                 "one immutable row instance per policy for " + policy);
             enumerated++;
         }
-        check(enumerated == 24, "enumerated all 24 policies (got " + enumerated + ")");
+        check(enumerated == 27, "enumerated all 27 policies (got " + enumerated + ")");
 
         expectThrows(NullPointerException.class,
             () -> FailureContractRegistry.row(null), "null policy fails closed");
@@ -208,7 +208,8 @@ public class FailureContractRegistryTest {
 
         expectRow(FailurePolicyId.TYPE_DESCRIPTOR, "E8001", "RUNTIME",
             List.of("expected {expected}, got {actual}",
-                "expected string, got invalid Unicode scalar encoding"),
+                "expected string, got invalid Unicode scalar encoding",
+                "expected bytes"),
             List.of("expected", "actual"),
             op, none, frames,
             "single check: wrong-kind or invalid-unicode-string projection per the checked "
@@ -444,16 +445,16 @@ public class FailureContractRegistryTest {
         System.out.println("-- Canonical actual-kind tokens --");
 
         List<String> pinned = List.of("NULL", "MISSING", "BOOLEAN", "INT", "NUMBER",
-            "STRING", "TABLE", "ARRAY", "FUNCTION", "CLASS", "ASYNC_OPERATION",
+            "STRING", "BYTES", "TABLE", "ARRAY", "FUNCTION", "CLASS", "ASYNC_OPERATION",
             "NOTHING", "INVALID_UNICODE");
         List<String> actual = new ArrayList<>();
         for (ActualKind kind : ActualKind.values()) {
             actual.add(kind.name());
         }
-        check(actual.equals(pinned), "exactly the 13 pinned actual kinds in the pinned "
+        check(actual.equals(pinned), "exactly the 14 pinned actual kinds in the pinned "
             + "order; got " + actual);
-        check(ActualKind.values().length == 13,
-            "no open/unknown fallback member (13 values)");
+        check(ActualKind.values().length == 14,
+            "no open/unknown fallback member (14 values)");
 
         Map<ActualKind, String> tokens = new LinkedHashMap<>();
         tokens.put(ActualKind.NULL, "null");

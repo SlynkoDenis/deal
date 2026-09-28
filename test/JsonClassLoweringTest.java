@@ -1294,6 +1294,7 @@ public class JsonClassLoweringTest {
             case Value.Int intValue -> BoundaryValueView.ofInt(intValue.value());
             case Value.Number number -> BoundaryValueView.ofNumber(number.value());
             case Value.String string -> BoundaryValueView.of(string.scalar().actualKind());
+            case Value.Bytes ignored -> BoundaryValueView.of(ActualKind.BYTES);
             case Value.Table ignored -> BoundaryValueView.of(ActualKind.TABLE);
             case Value.Array ignored -> BoundaryValueView.of(ActualKind.ARRAY);
             case Value.Class classValue -> BoundaryValueView.ofClass(classValue.classId().text());

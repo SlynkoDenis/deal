@@ -478,19 +478,20 @@ public class BoundaryTableCorpusTest {
         }
         check(boundaryNames.equals(List.of(
                 "VARIABLE_DECLARATION", "VARIABLE_ASSIGNMENT", "CLASS_FIELD_ASSIGNMENT",
-                "ARRAY_ELEMENT_ASSIGNMENT", "ARRAY_ELEMENT_READ", "ARRAY_ELEMENT_DELETE",
+                "ARRAY_ELEMENT_ASSIGNMENT", "BYTE_ELEMENT_ASSIGNMENT", "ARRAY_ELEMENT_READ",
+                "BYTE_ELEMENT_READ", "ARRAY_ELEMENT_DELETE",
                 "ARRAY_LITERAL_ELEMENT", "FUNCTION_PARAMETER", "FUNCTION_RETURN",
                 "ASYNC_COMPLETION", "CLASS_LITERAL_FIELD", "CLASS_DEFAULT_FIELD",
                 "UNTYPED_CLASS_INPUT", "OPTIONAL_FIELD_READ", "CONTEXTUAL_TABLE_READ",
                 "IMPORTED_MEMBER_READ", "MODULE_EXPORT", "HOST_TO_DEAL", "DEAL_TO_HOST",
                 "STDLIB_PARAMETER", "STDLIB_RETURN", "EXTERNAL_PARAMETER", "EXTERNAL_RETURN",
                 "JSON_FROM_FIELD", "JSON_TO_FIELD")),
-            "BoundaryKind keeps the 25 closed values in the pinned order; got " + boundaryNames);
-        check(BoundaryKind.values().length == 25,
-            "exactly 25 BoundaryKind values, got " + BoundaryKind.values().length);
+            "BoundaryKind keeps the 27 closed values in the pinned order; got " + boundaryNames);
+        check(BoundaryKind.values().length == 27,
+            "exactly 27 BoundaryKind values, got " + BoundaryKind.values().length);
         check(BoundaryKind.RESERVED_NAMES.equals(List.of(
-                "BYTE_ELEMENT_ASSIGNMENT", "C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
-            "BoundaryKind.RESERVED_NAMES is exactly the three pinned reserved names");
+                "C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
+            "BoundaryKind.RESERVED_NAMES is exactly the two pinned reserved names");
         for (String reserved : BoundaryKind.RESERVED_NAMES) {
             check(!enumMember(BoundaryKind.class, reserved),
                 reserved + " stays a reserved name, never an enum member");
@@ -507,13 +508,14 @@ public class BoundaryTableCorpusTest {
                 "INT32_DIVISOR_THEN_RESULT", "INT32_EXPONENT_THEN_RESULT", "INT_CONVERSION",
                 "NUMBER_CONVERSION", "ARRAY_ELEMENT_DESCRIPTOR",
                 "ARRAY_READ_INDEX_THEN_DESCRIPTOR", "ARRAY_WRITE_BOUNDS_THEN_ELEMENT",
-                "ARRAY_DELETE_BOUNDS", "FUNCTION_SIGNATURE", "HOST_PARAMETER",
+                "ARRAY_DELETE_BOUNDS", "BYTES_ALLOCATE", "BYTES_READ", "BYTES_WRITE",
+                "FUNCTION_SIGNATURE", "HOST_PARAMETER",
                 "HOST_SYNC_RETURN", "ASYNC_COMPLETION", "ASYNC_OPERATION_HANDLE", "HOST_LOAD",
                 "CLASS_CONSTRUCTION", "JSON_PARSE_SYNTAX", "JSON_FROM_NULL", "JSON_TO_ERROR",
                 "SQRT_NEGATIVE", "THROW_TRANSFER", "INFRASTRUCTURE_ONLY")),
-            "FailurePolicyId keeps the 24 closed values in the pinned order; got " + policyNames);
-        check(FailurePolicyId.values().length == 24,
-            "exactly 24 FailurePolicyId values, got " + FailurePolicyId.values().length);
+            "FailurePolicyId keeps the 27 closed values in the pinned order; got " + policyNames);
+        check(FailurePolicyId.values().length == 27,
+            "exactly 27 FailurePolicyId values, got " + FailurePolicyId.values().length);
         check(FailurePolicyId.RESERVED_NAMES.equals(List.of(
                 "EXTERNAL_PARAMETER", "EXTERNAL_RETURN", "STDLIB_PARAMETER", "STDLIB_RETURN")),
             "FailurePolicyId.RESERVED_NAMES is exactly the four pinned reserved names");
@@ -1502,9 +1504,22 @@ public class BoundaryTableCorpusTest {
                 }
             }
         }
-        check(kinds.equals(new LinkedHashSet<>(List.of(BoundaryKind.values()))),
-            "all 25 BoundaryKind values appear in the positive corpus; missing: "
-                + List.of(BoundaryKind.values()).stream().filter(k -> !kinds.contains(k)).toList());
+        // ISSUE-0626 retargeted this pin: the two bytes element cells carry
+        // their own {index, length} contexts and their own parent shapes (the
+        // INDEX_READ read shape and the seven-child BYTES_SLOT chain), so
+        // their positive rows are the bytes slice's own vertical drive
+        // (test/BytesCoverageTest) — every other kind stays covered here.
+        List<BoundaryKind> corpusKinds = List.of(BoundaryKind.values()).stream()
+            .filter(kind -> kind != BoundaryKind.BYTE_ELEMENT_READ
+                && kind != BoundaryKind.BYTE_ELEMENT_ASSIGNMENT)
+            .toList();
+        check(kinds.equals(new LinkedHashSet<>(corpusKinds)),
+            "every BoundaryKind value except the bytes element cells appears in the "
+                + "positive corpus (the bytes cells' positive rows are the bytes "
+                + "slice's own vertical drive); missing: "
+                + corpusKinds.stream().filter(k -> !kinds.contains(k)).toList()
+                + ", extra: "
+                + kinds.stream().filter(k -> !corpusKinds.contains(k)).toList());
         check(policies.equals(new LinkedHashSet<>(List.of(
                 FailurePolicyId.TYPE_DESCRIPTOR, FailurePolicyId.FUNCTION_SIGNATURE,
                 FailurePolicyId.HOST_PARAMETER, FailurePolicyId.HOST_SYNC_RETURN,
@@ -1513,8 +1528,10 @@ public class BoundaryTableCorpusTest {
                 FailurePolicyId.ARRAY_WRITE_BOUNDS_THEN_ELEMENT,
                 FailurePolicyId.ARRAY_DELETE_BOUNDS, FailurePolicyId.JSON_FROM_NULL,
                 FailurePolicyId.JSON_TO_ERROR))),
-            "the closed 11-policy executor subset is exactly the BOUNDARY-op policy set of the "
-                + "positive corpus; got " + policies);
+            "the BOUNDARY-op policy set of this positive corpus is exactly the 11 "
+                + "non-bytes executor cells (the bytes element cells carry their own "
+                + "{index, length} contexts and are covered by the bytes slice's own "
+                + "vertical drive); got " + policies);
     }
 
     // =========================================================================
@@ -2651,15 +2668,16 @@ public class BoundaryTableCorpusTest {
         FailurePolicyId.ASYNC_COMPLETION, FailurePolicyId.ARRAY_ELEMENT_DESCRIPTOR,
         FailurePolicyId.ARRAY_READ_INDEX_THEN_DESCRIPTOR,
         FailurePolicyId.ARRAY_WRITE_BOUNDS_THEN_ELEMENT, FailurePolicyId.ARRAY_DELETE_BOUNDS,
-        FailurePolicyId.JSON_FROM_NULL, FailurePolicyId.JSON_TO_ERROR));
+        FailurePolicyId.JSON_FROM_NULL, FailurePolicyId.JSON_TO_ERROR,
+        FailurePolicyId.BYTES_READ, FailurePolicyId.BYTES_WRITE));
 
     static void testExecutorClosedSubsetTie() {
-        System.out.println("-- Executor closed-subset tie: the 13 non-BOUNDARY policies fail closed --");
+        System.out.println("-- Executor closed-subset tie: the 14 non-executor policies fail closed --");
 
-        check(FailurePolicyId.values().length == 24,
-            "the policy universe is exactly 24 values");
-        check(EXECUTABLE_POLICIES.size() == 11,
-            "the executor subset is exactly 11 policies; got " + EXECUTABLE_POLICIES.size());
+        check(FailurePolicyId.values().length == 27,
+            "the policy universe is exactly 27 values");
+        check(EXECUTABLE_POLICIES.size() == 13,
+            "the executor subset is exactly 13 policies; got " + EXECUTABLE_POLICIES.size());
         BoundaryValueView stringView = BoundaryValueView.of(ActualKind.STRING);
         int refused = 0;
         for (FailurePolicyId policy : FailurePolicyId.values()) {
@@ -2674,8 +2692,8 @@ public class BoundaryTableCorpusTest {
                 "execute(" + policy.name() + ") outside the closed 11-policy subset");
             refused++;
         }
-        check(refused == 13,
-            "exactly the 13 non-BOUNDARY policies are refused fail closed; got " + refused);
+        check(refused == 14,
+            "exactly the 14 non-executor policies are refused fail closed; got " + refused);
 
         // The out-of-table descriptor/policy pairings fail closed too (the
         // validator's rejection and the executor's Defect are the same tie).

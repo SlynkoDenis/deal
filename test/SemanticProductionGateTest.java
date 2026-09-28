@@ -649,8 +649,12 @@ public class SemanticProductionGateTest {
                 // expressions and the builtin Error construction of the
                 // closure-capture fixture, whose only remaining blocker was
                 // the builtin Error construct).
+                // ISSUE-0626 retargeted the bytes-length case: the bytes
+                // element contract is production-covered, so the fixture
+                // compiles to the one project artifact and runs.
                 boolean productionCovered = fixture.getKey().startsWith("stored-closure")
-                    || fixture.getKey().equals("closure-capture");
+                    || fixture.getKey().equals("closure-capture")
+                    || fixture.getKey().equals("bytes-length");
                 if (productionCovered) {
                     CompilationOrchestrator production =
                         compileProject(project, "src/main.deal", "out");
@@ -716,8 +720,19 @@ public class SemanticProductionGateTest {
         try {
             write(luaProject, "deal.json", DEAL_JSON_LUA);
             write(luaProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(luaProject, "src/main.deal", "out",
-                "CONSTRUCT_UNLOWERED", "the bytes-bearing LuaJIT module");
+            // ISSUE-0626: the bytes realization is production-covered — the
+            // release-owned invocation compiles the module to the one project
+            // artifact and the artifact runs; the harness arm below keeps the
+            // retained route report (the bytesBearing marker and rule 2b are
+            // the harness subject, never the production path).
+            checkProductionEmits(luaProject, "src/main.deal", "out",
+                "the bytes-bearing LuaJIT module");
+            ProcessOutcome productionRun = runProcess(luaProject.resolve("out"),
+                List.of("luajit", "main.lua"));
+            check(productionRun.exitCode() == 0,
+                "the bytes-bearing LuaJIT production project artifact runs: exit="
+                    + productionRun.exitCode() + " output="
+                    + productionRun.output().replace("\n", "\\n"));
 
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(luaProject, "src/main.deal", "out");
@@ -771,8 +786,8 @@ public class SemanticProductionGateTest {
         try {
             write(jvmProject, "deal.json", DEAL_JSON_JVM);
             write(jvmProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(jvmProject, "src/main.deal", "out",
-                "CONSTRUCT_UNLOWERED", "the bytes-bearing JVM module");
+            checkProductionEmits(jvmProject, "src/main.deal", "out",
+                "the bytes-bearing JVM module");
 
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(jvmProject, "src/main.deal", "out");
@@ -1245,8 +1260,7 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(bytesProject, "src/main.deal",
-                "out", "CONSTRUCT_UNLOWERED",
+            checkProductionEmits(bytesProject, "src/main.deal", "out",
                 "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(bytesProject, "src/main.deal",
@@ -1618,8 +1632,7 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(bytesProject, "src/main.deal",
-                "out", "CONSTRUCT_UNLOWERED",
+            checkProductionEmits(bytesProject, "src/main.deal", "out",
                 "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(bytesProject, "src/main.deal",
@@ -2095,8 +2108,7 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(bytesProject, "src/main.deal",
-                "out", "CONSTRUCT_UNLOWERED",
+            checkProductionEmits(bytesProject, "src/main.deal", "out",
                 "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(bytesProject, "src/main.deal",
@@ -2528,8 +2540,7 @@ public class SemanticProductionGateTest {
         try {
             write(bytesProject, "deal.json", DEAL_JSON_LUA);
             write(bytesProject, "src/main.deal", BYTES_SOURCE);
-            checkProductionFailClosed(bytesProject, "src/main.deal",
-                "out", "CONSTRUCT_UNLOWERED",
+            checkProductionEmits(bytesProject, "src/main.deal", "out",
                 "the bytes-bearing module (a later-slice promotion check)");
             CompilationOrchestrator orchestrator =
                 compileHarnessProject(bytesProject, "src/main.deal",

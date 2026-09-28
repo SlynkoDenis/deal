@@ -794,6 +794,9 @@ public final class LuaSemanticEmitter {
             if (descriptor instanceof RuntimeDescriptor.Array) {
                 return "array";
             }
+            if (descriptor instanceof RuntimeDescriptor.Bytes) {
+                return "bytes";
+            }
             if (descriptor instanceof RuntimeDescriptor.Func) {
                 return "function";
             }
@@ -835,6 +838,9 @@ public final class LuaSemanticEmitter {
             if (descriptor instanceof RuntimeDescriptor.Array array) {
                 return "array(" + descriptorText(array.element()) + ")";
             }
+            if (descriptor instanceof RuntimeDescriptor.Bytes) {
+                return "bytes";
+            }
             if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
                 return "nullable(" + descriptorText(nullable.inner()) + ")";
             }
@@ -874,12 +880,15 @@ public final class LuaSemanticEmitter {
          * check is emitted unchanged.
          */
         static String bcheckArgs(RuntimeDescriptor descriptor, String value) {
-            String args = luaString(descriptorText(descriptor)) + ", "
-                + luaString(staticKind(descriptor)) + ", " + value;
-            if (containsFunction(descriptor)) {
-                args += ", " + luaString(descriptor.canonicalSpecText());
-            }
-            return args;
+            // The canonical spec text is always the trailing argument: the
+            // function row compares a carrier's canonical signature with
+            // it, and the array element projection (E8003) spells its
+            // expected element text from it (the semantic oracle's closed
+            // canonical spelling), never from the prelude's internal
+            // array(...) dialect.
+            return luaString(descriptorText(descriptor)) + ", "
+                + luaString(staticKind(descriptor)) + ", " + value + ", "
+                + luaString(descriptor.canonicalSpecText());
         }
 
         /** Whether one descriptor carries a function position (recursively). */
@@ -1035,6 +1044,15 @@ public final class LuaSemanticEmitter {
             if (bindsHostRuntime()) {
                 out.append("local __rt = require(\"deal.runtime\")\n");
                 out.append(HOST_BOUNDARY_PRELUDE);
+            } else if (bindsBytesRuntime()) {
+                // The bytes surface's runtime binding (K6 item 13): the
+                // landed bytes entries are the one carrier/authority, so a
+                // chunk carrying bytes ops binds the deployed runtime in
+                // both modes.
+                out.append("local __rt = require(\"deal.runtime\")\n");
+            }
+            if (bindsBytesRuntime()) {
+                out.append(BYTES_PRELUDE);
             }
             for (LoweredModuleUnit moduleUnit : units.values()) {
                 String moduleKey = luaString(moduleUnit.moduleId().path());
@@ -1085,7 +1103,8 @@ public final class LuaSemanticEmitter {
                 + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
                 + "__okD, __chkD, "
                 + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT, "
-                + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE\n");
+                + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE, "
+                + "__tA, __okH, __errH, __oA\n");
 
             // Function factories first (capture cells are factory
             // arguments); the local names are pre-declared so bodies can
@@ -1300,6 +1319,45 @@ public final class LuaSemanticEmitter {
          */
         private boolean bindsHostRuntime() {
             return projectSession && (hasHostImports() || hasHostCellBoundaries());
+        }
+
+        /**
+         * Whether the session's op walk carries at least one bytes op (K6
+         * items 1/2/4/7): the allocation intrinsic, a bytes normalize mode,
+         * a bytes element boundary, or a bytes-receiver length read. A
+         * chunk that carries one binds the deployed runtime and emits the
+         * bytes surface prelude in both modes.
+         */
+        private boolean bindsBytesRuntime() {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                for (SemanticOp op : moduleUnit.ops()) {
+                    if (op.kind() == SemanticOpKind.INTRINSIC_CALL
+                            && op.payload() instanceof KindPayload.IntrinsicCallPayload
+                                intrinsic
+                            && intrinsic.kind() == IntrinsicKind.BYTES_NEW) {
+                        return true;
+                    }
+                    if (op.payload() instanceof KindPayload.IndexNormalizePayload normalize
+                            && (normalize.mode()
+                                    == deal.semantic.ir.IndexMode.BYTES_READ
+                                || normalize.mode()
+                                    == deal.semantic.ir.IndexMode.BYTES_WRITE)) {
+                        return true;
+                    }
+                    if (op.payload() instanceof KindPayload.BoundaryPayload boundary
+                            && (boundary.kind() == BoundaryKind.BYTE_ELEMENT_READ
+                                || boundary.kind() == BoundaryKind.BYTE_ELEMENT_ASSIGNMENT)) {
+                        return true;
+                    }
+                    if (op.kind() == SemanticOpKind.ARRAY_LENGTH
+                            && !op.operandTypes().isEmpty()
+                            && op.operandTypes().get(0)
+                                instanceof RuntimeDescriptor.Bytes) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         /**
@@ -2035,10 +2093,40 @@ public final class LuaSemanticEmitter {
             KindPayload.ArrayLengthPayload payload =
                 (KindPayload.ArrayLengthPayload) op.payload();
             emitStart(op);
-            out.append(slot((ValueId) op.result())).append(" = ")
-                .append(slot(payload.arrayValue())).append(".__n\n");
-            emitResultSuccess(op, slot((ValueId) op.result()),
-                (RuntimeDescriptor) op.resultType());
+            String target = slot((ValueId) op.result());
+            if (isBytesValue(payload.arrayValue())) {
+                // K6 item 7: b.length reads the bytes buffer's fixed
+                // logical length through the runtime entry, at the read's
+                // own origin.
+                out.append(target).append(" = __bytesLength(")
+                    .append(slot(payload.arrayValue())).append(", ")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(originOf(op))).append(", ")
+                    .append(spanTripletArgs(op)).append(")\n");
+            } else {
+                out.append(target).append(" = ")
+                    .append(slot(payload.arrayValue())).append(".__n\n");
+            }
+            emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
+        }
+
+        /**
+         * Whether one value identity's producing op publishes a bytes
+         * value (the {@code b.length} receiver selector, K6 item 7): an
+         * {@code ARRAY_LENGTH} op carries no operands, so the receiver
+         * producer's own result descriptor is the classification
+         * authority.
+         */
+        private boolean isBytesValue(deal.semantic.ir.ValueId value) {
+            for (SemanticOp candidate : opsById.values()) {
+                if (value.equals(candidate.result())
+                        && candidate.resultType() instanceof RuntimeDescriptor.Bytes) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void emitMemberRead(SemanticOp op) {
@@ -2282,7 +2370,19 @@ public final class LuaSemanticEmitter {
          * cell (ISSUE-0651: the function and array carriers).
          */
         private boolean defersContextualCheck(RuntimeDescriptor descriptor) {
-            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor);
+            // The composite carriers (functions, arrays, and bytes — a bytes
+            // contextual read defers its shape check to the consuming
+            // declared cell, whose bytes projection carries the pinned
+            // "expected bytes" text at the declaration's own origin).
+            return isFunctionDescriptor(descriptor) || isArrayDescriptor(descriptor)
+                || isBytesDescriptor(descriptor);
+        }
+
+        /** Whether one boundary descriptor is the bytes carrier (nullable unwrapped). */
+        private boolean isBytesDescriptor(RuntimeDescriptor descriptor) {
+            RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
+                ? nullable.inner() : descriptor;
+            return inner instanceof RuntimeDescriptor.Bytes;
         }
 
         /**
@@ -2612,6 +2712,12 @@ public final class LuaSemanticEmitter {
                         .append(slot(payload.currentLength())).append("), a = ")
                         .append(write).append("}\n");
                 }
+                case BYTES_READ, BYTES_WRITE ->
+                    // The bytes slot (K6 item 5): the index against the
+                    // receiver's length read; no append decision exists.
+                    out.append(target).append(" = {slot = \"b\", i = __num(")
+                        .append(slot(payload.rawKey())).append("), n = __num(")
+                        .append(slot(payload.currentLength())).append(")}\n");
                 case TABLE_READ, TABLE_WRITE ->
                     out.append(target).append(" = {slot = \"t\", k = __num(")
                         .append(slot(payload.rawKey())).append(")}\n");
@@ -2632,6 +2738,27 @@ public final class LuaSemanticEmitter {
             RuntimeDescriptor inner = nullable
                 ? ((RuntimeDescriptor.Nullable) descriptor).inner() : descriptor;
             emitSlotOperandStart(op);
+            if (!op.operandTypes().isEmpty()
+                    && op.operandTypes().get(0) instanceof RuntimeDescriptor.Bytes) {
+                // K6 item 2: the bytes element read — the length read's
+                // result is the normalize's currentLength and the
+                // BYTE_ELEMENT_READ cell consumes {index, length} from the
+                // same slot.
+                out.append(slot((ValueId) op.result())).append(" = __bytesRead(")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(opKey(boundary.opId()))).append(", ")
+                    .append(luaString(boundary.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(boundary.origin().parentOpId()))).append(", ")
+                    .append(slot(payload.container())).append(", ")
+                    .append(slot(payload.slot())).append(", ")
+                    .append(luaString(originOf(boundary))).append(", ")
+                    .append(spanTripletArgs(boundary)).append(")\n");
+                emitResultSuccess(op, slot((ValueId) op.result()),
+                    (RuntimeDescriptor) op.resultType());
+                return;
+            }
             String target = slot((ValueId) op.result());
             out.append(target).append(" = __arrayRead(")
                 .append(luaString(opKey(op.opId()))).append(", ")
@@ -2660,7 +2787,19 @@ public final class LuaSemanticEmitter {
             String value = slot(payload.value());
             String numberWriteFlag = isNumberKind(producerKind(payload.value()))
                 ? "true" : "false";
-            out.append("if ").append(slotName).append(".slot == \"a\" then\n");
+            out.append("if ").append(slotName).append(".slot == \"b\" then\n");
+            // The bytes commit (K6 item 4): the E8013 value-range check at
+            // the assignment expression and the single in-place mutation
+            // through the runtime entry; the bounds already passed at the
+            // chain's BYTE_ELEMENT_ASSIGNMENT boundary.
+            out.append("  __bytesCommit(")
+                .append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(container).append(", ").append(slotName).append(", ")
+                .append(value).append(", ").append(luaString(originOf(op))).append(", ")
+                .append(spanTripletArgs(op)).append(")\n");
+            out.append("elseif ").append(slotName).append(".slot == \"a\" then\n");
             out.append("  if ").append(slotName).append(".i == ").append(slotName)
                 .append(".n then\n");
             out.append("    ").append(container).append(".__n = ").append(container)
@@ -3260,6 +3399,22 @@ public final class LuaSemanticEmitter {
                                        SemanticOp chain) {
             String input = slot(payload.input());
             switch (payload.kind()) {
+                case BYTE_ELEMENT_ASSIGNMENT -> {
+                    // K6 item 4: the E8012 bounds cell (index-expression
+                    // origin), then the element descriptor check; the
+                    // commit owns the E8013 range check.
+                    out.append("__bytesBounds(")
+                        .append(luaString(opKey(boundary.opId()))).append(", ")
+                        .append(luaString(boundary.contract().canonicalDigest()))
+                        .append(", ")
+                        .append(luaString(parentKey(boundary.origin().parentOpId())))
+                        .append(", ").append(input).append(", ")
+                        .append(chainSlotExpr(chain)).append(", ")
+                        .append(luaString(descriptorText(payload.descriptor())))
+                        .append(", ")
+                        .append(luaString(staticKind(payload.descriptor()))).append(", ")
+                        .append(luaString(originOf(boundary))).append(")\n");
+                }
                 case ARRAY_ELEMENT_ASSIGNMENT, ARRAY_ELEMENT_DELETE -> {
                     // __arrayBounds emits the boundary START/terminal events
                     // (the bounds check runs only from this projection); the
@@ -4940,6 +5095,14 @@ public final class LuaSemanticEmitter {
                     .append(luaString(op.contract().canonicalDigest())).append(", ")
                     .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
                     .append(luaString(origin)).append(")\n");
+                case BYTES_NEW -> out.append(target).append(" = __bytesNew(")
+                    .append(input).append(", ").append(luaString(op.kind().name()))
+                    .append(", ")
+                    .append(luaString(opKey(op.opId()))).append(", ")
+                    .append(luaString(op.contract().canonicalDigest())).append(", ")
+                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                    .append(luaString(origin)).append(", ")
+                    .append(spanTripletArgs(op)).append(")\n");
             }
             emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
         }
@@ -6108,7 +6271,20 @@ public final class LuaSemanticEmitter {
 
         /** Collects the transfer ops of a block recursively through structure payloads. */
         private void collectTransfers(BlockId block, List<SemanticOp> transfers) {
-            for (OpId opId : table.blockOps().get(block)) {
+            // The block's owning membership table (a non-entry module's
+            // factory body resolves against its own module table, exactly
+            // like the block walk's own resolution).
+            StructuredBodyTable ownerTable = blockTableOf.get(block);
+            if (ownerTable == null) {
+                ownerTable = table;
+            }
+            List<OpId> memberOps = ownerTable.blockOps().get(block);
+            if (memberOps == null) {
+                throw new IllegalStateException("block " + block + " has no membership row "
+                    + "in its owning unit's table (a malformed table — the production "
+                    + "validator rejects this)");
+            }
+            for (OpId opId : memberOps) {
                 SemanticOp op = opsById.get(opId);
                 switch (op.kind()) {
                     case BREAK, CONTINUE, RETURN -> transfers.add(op);
@@ -6992,7 +7168,7 @@ public final class LuaSemanticEmitter {
                 (KindPayload.BoundaryPayload) boundary.payload();
             emitStart(op);
             out.append("__asyncDrain()\n");
-            out.append("local __tA = __tasks[").append(canonicalId).append("]\n");
+            out.append("__tA = __tasks[").append(canonicalId).append("]\n");
             out.append("if __tA == nil then\n");
             out.append("  error(\"AWAIT consumes an unbound token ")
                 .append(payload.token()).append(" (producer defect)\", 0)\n");
@@ -7006,7 +7182,7 @@ public final class LuaSemanticEmitter {
             // converted once into the chunk's canonical carrier with its
             // own code, message, origin, expected, and actual; anything
             // else is an infrastructure failure and rethrows identical.
-            out.append("    local __okH, __errH = pcall(__rt.async_step, "
+            out.append("    __okH, __errH = pcall(__rt.async_step, "
                 + "__tA.handle)\n");
             out.append("    if not __okH then\n");
             out.append("      if type(__errH) == \"table\" and (__errH.__d "
@@ -7030,7 +7206,7 @@ public final class LuaSemanticEmitter {
             }
             out.append("    end\n");
             out.append("  else\n");
-            out.append("    local __oA = "
+            out.append("    __oA = "
                 + "__callbacks.__hostCompleteAsync(__tA.label)\n");
             out.append("    if __oA.ok then\n");
             if (trace) {
@@ -8994,6 +9170,122 @@ local function __ffiClassPlan(module, class)
   return surface[class.."_plan"]
 end
 """;
+    /**
+     * The shared bytes surface (K6 items 1/2/4/7/13): the emitted helpers
+     * over the deployed runtime's landed bytes entries
+     * ({@code __rt.bytes_new}/{@code bytes_length}/{@code bytes_get}/
+     * {@code bytes_set}), each passing the site's own
+     * {@code (file, line, column)} origin so the pinned E8012/E8013 texts
+     * and origins hold, plus the boundary/read/commit cells that emit the
+     * boundary events the semantic oracle emits. Emitted exactly for a
+     * chunk carrying bytes ops, after the runtime binding it uses.
+     */
+    private static final String BYTES_PRELUDE = """
+-- The bytes allocation intrinsic (K6 item 1): the pinned E8012
+-- non-negative gate at the bytes(...) call expression, then the runtime's
+-- zero-filled carrier.
+-- The runtime error -> the canonical failure carrier (the deployed
+-- runtime's own (file, line, column) wins when present, exactly like the
+-- host prelude's conversion); a site that raises its own failure never
+-- consults this.
+local function __rtFail(e, origin)
+  if type(e) ~= "table" then return e end
+  if e.__d then return e end
+  if e.code == nil or e.message == nil then return e end
+  local o = origin
+  if e.file ~= nil then
+    o = tostring(e.file)..":"..tostring(e.line)..":"..tostring(e.column)
+  end
+  return __failExpr(e.code, e.message, o, e.expected, e.actual)
+end
+local function __bytesNew(length, evKind, opKey, digest, parent, origin, src, line, col)
+  local n = __num(length)
+  if n < 0 then
+    local e = __failExpr("E8012", "bytes length must be non-negative", origin, nil, nil)
+    __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  local ok, b = pcall(__rt.bytes_new, n, src, line, col)
+  if not ok then
+    local e = __rtFail(b, origin)
+    __ev(opKey, "FAILURE", evKind, digest, parent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  return b
+end
+-- The ARRAY_LENGTH read over a bytes receiver (K6 item 7): the fixed
+-- logical length through the runtime entry.
+local function __bytesLength(v, opKey, digest, parent, origin, src, line, col)
+  local ok, n = pcall(__rt.bytes_length, v, src, line, col)
+  if not ok then
+    local e = __rtFail(n, origin)
+    __ev(opKey, "FAILURE", "ARRAY_LENGTH", digest, parent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  return n
+end
+-- The bytes element read (K6 item 2): the ARRAY_LENGTH + BYTES_READ
+-- normalize + INDEX_READ shape with its BYTE_ELEMENT_READ cell. The
+-- bounds failure (E8012 "bytes index out of bounds") projects the
+-- boundary and read FAILURE events at the index expression, and the read
+-- at i == b.length fails exactly like the negative index. The cell's
+-- input is the missing sentinel out of bounds (the probe never reads out
+-- of bounds) and the byte otherwise.
+local function __bytesRead(opKey, digest, parent, bKey, bDigest, bParent, container,
+                           slotName, origin, src, line, col)
+  local index = slotName.i
+  local elem
+  if index < 0 or index >= slotName.n then
+    elem = __MISSING
+  else
+    elem = __rt.bytes_get(container, index, src, line, col)
+  end
+  local atom = (elem == __MISSING) and "missing" or ("int:"..tostring(elem))
+  __ev(bKey, "START", "BOUNDARY", bDigest, bParent, {atom}, nil, nil)
+  if elem == __MISSING then
+    local e = __failExpr("E8012", "bytes index out of bounds", origin, nil, nil)
+    __ev(bKey, "FAILURE", "BOUNDARY", bDigest, bParent, {}, nil, __errtext(e))
+    __ev(opKey, "FAILURE", "INDEX_READ", digest, parent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  __ev(bKey, "SUCCESS", "BOUNDARY", bDigest, bParent, {}, atom, nil)
+  return elem
+end
+-- The bytes write's BYTE_ELEMENT_ASSIGNMENT cell (K6 item 4): the bounds
+-- check first (E8012 at the index expression), then the element
+-- descriptor check; the commit owns the E8013 range check and the single
+-- mutation.
+local function __bytesBounds(bKey, bDigest, bParent, input, slotName, desc, kind, origin)
+  local index = slotName.i
+  __ev(bKey, "START", "BOUNDARY", bDigest, bParent, {__atom(kind, input)}, nil, nil)
+  if index < 0 or index >= slotName.n then
+    local e = __failExpr("E8012", "bytes index out of bounds", origin, nil, nil)
+    __ev(bKey, "FAILURE", "BOUNDARY", bDigest, bParent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  local ok, checked = pcall(__bcheck, desc, kind, input)
+  if not ok then
+    __ev(bKey, "FAILURE", "BOUNDARY", bDigest, bParent, {}, nil, __errtext(checked))
+    error(checked, 0)
+  end
+  __ev(bKey, "SUCCESS", "BOUNDARY", bDigest, bParent, {}, __atom(kind, input), nil)
+end
+-- The bytes write's commit (K6 item 4): the E8013 value-range check and
+-- the single in-place mutation through the runtime entry, at the
+-- assignment-expression origin. A failed write changes no storage.
+local function __bytesCommit(opKey, digest, parent, container, slotName, value, origin,
+                             src, line, col)
+  local ok, written = pcall(__rt.bytes_set, container, slotName.i, __num(value), src,
+    line, col)
+  if not ok then
+    local e = __rtFail(written, origin)
+    __ev(opKey, "FAILURE", "INDEX_WRITE", digest, parent, {}, nil, __errtext(e))
+    error(e, 0)
+  end
+  return written
+end
+""";
+
     private static final String PRELUDE = """
 -- ==== shared runtime prelude ====
 local __MISSING = setmetatable({}, {__tostring = function() return "missing" end})
@@ -9298,6 +9590,7 @@ local function __atom(kind, v)
     if v.k == "int" then return "int:"..tostring(v.d) end
     return __atom("number", v.d)
   end
+  if type(v) == "table" and v.__kind == "bytes" then return "ref:"..__allocId(v) end
   if kind == "null" then return "null" end
   if kind == "missing" then return "missing" end
   if kind == "bool" then return "bool:"..tostring(v) end
@@ -9367,6 +9660,7 @@ local function __actualOf(staticKind, v)
     -- any declared-kind fallback): a parsed/constructed array is an array
     -- even against a declared table boundary, and a class instance or an
     -- error/function carrier renders its own kind.
+    if v.__kind == "bytes" then return "bytes" end
     if v.__a then return "array" end
     if v.__c then return "class:"..v.__id end
     if v.__d then return "class:@builtin/Error" end
@@ -9443,6 +9737,19 @@ local function __fnRow(desc, csig, v, carriedCsig, carriedSig)
   return error(__failExpr("E8010",
     "function signature mismatch: expected "..wanted..", got "..carried,
     "-", wanted, carried), 0)
+end
+-- The closed canonical spelling of one prelude-internal descriptor text
+-- (the semantic oracle's canonicalSpecText over the same descriptor): a
+-- boundary check emitted without the canonical trailer still projects the
+-- canonical element text in its E8003 row.
+local function __canonDesc(desc)
+  if string.sub(desc, 1, 6) == "array(" then
+    return "["..__canonDesc(string.sub(desc, 7, -2)).."]"
+  end
+  if string.sub(desc, 1, 9) == "nullable(" then
+    return "?"..__canonDesc(string.sub(desc, 10, -2))
+  end
+  return desc
 end
 local function __bcheck(desc, staticKind, v, csig, completion)
   local actual = completion and __completionActualOf(staticKind, v)
@@ -9535,6 +9842,19 @@ local function __bcheck(desc, staticKind, v, csig, completion)
     -- passes unchanged.
     if type(v) == "table" and v.__d then return v end
     return fail(desc)
+  elseif desc == "bytes" then
+    -- The bytes view (K6 item 11): the runtime carrier passes unchanged
+    -- (classification only — the view carries no contents); every other
+    -- value projects the carrier's pinned v1.2 text (expected "bytes",
+    -- actual the value's own kind), the canonical projection the
+    -- retained runtimes and the corpus pins carry.
+    if type(v) == "table" and v.__kind == "bytes" then return v end
+    if completion then
+      return error(__failExpr("E8001", "expected bytes", "-", "bytes",
+        __completionActualOf(staticKind, v)), 0)
+    end
+    return error(__failExpr("E8001", "expected bytes", "-", "bytes",
+      __actualOf(staticKind, v)), 0)
   elseif string.sub(desc, 1, 1) == "@" then
     -- A nominal class descriptor (E5): the canonical @module/Class
     -- identity text — the instance must carry the identical tag.
@@ -9544,8 +9864,15 @@ local function __bcheck(desc, staticKind, v, csig, completion)
     if type(v) == "table" and v.__a then
       local inner = string.sub(desc, 7, -2)
       local innerSig = nil
+      -- The canonical element text of the E8003 projection: the closed
+      -- canonical descriptor spelling (the semantic oracle's
+      -- canonicalSpecText), never the prelude's internal array(...)
+      -- dialect (a boundary check emitted without the canonical trailer
+      -- falls back to the prelude's own conversion).
+      local innerExpected = __canonDesc(inner)
       if csig ~= nil and string.sub(csig, 1, 1) == "[" then
         innerSig = string.sub(csig, 2, -2)
+        innerExpected = innerSig
       end
       for i = 1, v.__n do
         local elem = v[i]
@@ -9554,10 +9881,9 @@ local function __bcheck(desc, staticKind, v, csig, completion)
         local ok, checked = pcall(__bcheck, inner,
           (elem == __MISSING) and "missing" or inner, elem, innerSig)
         if not ok then
-          local expected = inner
           local actualKind = __actualOf((elem == __MISSING) and "missing" or inner, elem)
           return error(__failExpr("E8003",
-            "array element "..i.." type mismatch", "-", expected, actualKind), 0)
+            "array element "..i.." type mismatch", "-", innerExpected, actualKind), 0)
         end
       end
       return v
@@ -9641,6 +9967,10 @@ local function __cmp(selector, kindL, l, kindR, r, side)
   if selector == "NULLABLE_NE" then return l ~= r end
   if selector == "REFERENCE_EQ" then return l == r end
   if selector == "REFERENCE_NE" then return l ~= r end
+  -- Bytes compare by allocation identity (K6 item 12): an alias compares
+  -- equal, two distinct buffers unequal.
+  if selector == "BYTES_EQ" then return l == r end
+  if selector == "BYTES_NE" then return l ~= r end
   return false
 end
 local function __unary(selector, v, opKey, digest, parent, origin)
@@ -9842,6 +10172,9 @@ local function __slotAtom(s)
   if s.slot == "a" then
     return "slot:"..s.i.."/"..tostring(s.i < s.n).."/"..tostring(s.a and (s.i == s.n))
   end
+  if s.slot == "b" then
+    return "byteslot:"..s.i.."/"..tostring(s.i < s.n)
+  end
   return "keyslot:"..__esc(s.k)
 end
 local function __arrayBoundsSlot(bKey, bDigest, bParent, slotName, lengthSlot,
@@ -9874,6 +10207,8 @@ local function __normalizeEvent(opKey, digest, parent, slotName)
   if slotName.slot == "a" then
     atom = "slot:"..slotName.i.."/"..tostring(slotName.i < slotName.n).."/"
       ..tostring(slotName.a and (slotName.i == slotName.n))
+  elseif slotName.slot == "b" then
+    atom = "byteslot:"..slotName.i.."/"..tostring(slotName.i < slotName.n)
   else
     atom = "keyslot:"..__esc(slotName.k)
   end

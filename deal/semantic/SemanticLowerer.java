@@ -8468,22 +8468,16 @@ public final class SemanticLowerer {
          * producer defect, never an invented descriptor.
          */
         /**
-         * The shared container pipeline's bytes-element exclusion
-         * (ISSUE-0158 boundary): bytes <em>value</em> semantics are
-         * backend-owned (the retained Lua/JVM emitters), so a container
-         * element position whose checked type contains bytes — at any
-         * depth — cannot produce an array/boundary op here. The bytes
-         * element descriptor exists since the ISSUE-0158 schema lift, but
-         * no shared bytes value semantics exist, so the position fails
-         * closed as a producer defect (never an invented element check).
+         * The element descriptor of one container position (K6 item 8):
+         * the single {@link ContainerPayloadDescriptors} bridge over the
+         * checked element type, bytes included at every depth.
          */
         private RuntimeDescriptor containerElementDescriptor(Type element) {
-            if (Types.containsBytes(element)) {
-                throw new ConstructUnlowered("a container element position whose checked "
-                    + "type contains bytes: bytes value semantics are backend-owned "
-                    + "(ISSUE-0158) and the shared container pipeline excludes them "
-                    + "(producer defect, never an invented element check)");
-            }
+            // K6 item 8: a container element position whose checked type
+            // contains bytes derives its descriptor through the single
+            // DescriptorService bridge (the bytes descriptor member is
+            // representable at every depth); the lowered bytes value is
+            // carried by the target runtime's bytes representation.
             return ContainerPayloadDescriptors.elementDescriptorOf(element);
         }
 
@@ -8586,9 +8580,12 @@ public final class SemanticLowerer {
                 if (containerType instanceof Type.Array arrayType) {
                     return lowerArrayIndexAssign(assignment, index, arrayType, slot);
                 }
+                if (containerType instanceof Type.Bytes) {
+                    return lowerBytesIndexAssign(assignment, index, slot);
+                }
                 throw new ConstructUnlowered("assignment target index on "
                     + typeName(containerType) + " (no closed A-D9 chain shape for this "
-                    + "container: bytes indexing is ISSUE-0158's)");
+                    + "container)");
             }
             throw new ConstructUnlowered("assignment target "
                 + target.getClass().getSimpleName() + " (no closed A-D9 chain shape)");
@@ -9149,6 +9146,81 @@ public final class SemanticLowerer {
                 recordBoundaryClassification(BoundaryKind.ARRAY_ELEMENT_ASSIGNMENT,
                     checkedType(assignment.value()), arrayType.element());
             }
+            return value;
+        }
+
+        /**
+         * ASSIGN BYTES_SLOT write (K6 item 4): the array chain's exact
+         * mirror — {@code [containerOp, keyOp, valueOp,
+         * lengthOp(ARRAY_LENGTH over the byte receiver),
+         * normalizeOp(INDEX_NORMALIZE BYTES_WRITE, rawKey = the key child's
+         * result, currentLength = the length child's result),
+         * boundaryOp(BYTE_ELEMENT_ASSIGNMENT + BYTES_WRITE, input = the
+         * checked RHS value),
+         * commitOp(INDEX_WRITE)]}. The boundary enforces the pinned E8012
+         * bounds at the index expression ({@code index < 0} or
+         * {@code index >= b.length}); the commit enforces the E8013 value
+         * range (0..255) at the assignment expression and runs the single
+         * mutation — a failed write changes no storage. There is no bytes
+         * delete shape ({@code delete b[i]} is the checker's E3007
+         * rejection).
+         */
+        private ValueId lowerBytesIndexAssign(AssignmentExpr assignment, IndexExpr index,
+                                              ValueId slot) {
+            RuntimeDescriptor elementDescriptor =
+                ContainerPayloadDescriptors.resultDescriptorOf(Type.Int.INSTANCE);
+            OpId chainOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            chainParents.push(chainOpId);
+            ValueId value;
+            OpId containerOp;
+            OpId keyOp;
+            OpId valueOp;
+            OpId lengthOp;
+            OpId normalizeOp;
+            OpId boundaryOp;
+            OpId commitOp;
+            try {
+                ValueId container = lowerExpression(index.array());
+                containerOp = producerOpId(container);
+                ValueId key = lowerExpression(index.index());
+                keyOp = producerOpId(key);
+                value = lowerExpression(assignment.value(), slot);
+                valueOp = producerOpId(value);
+                ValueId length = emitChainChildOp(SemanticOpKind.ARRAY_LENGTH,
+                    new KindPayload.ArrayLengthPayload(container), index.span(),
+                    elementDescriptor, FailurePolicyId.INT32_RESULT);
+                lengthOp = producerOpId(length);
+                ValueId normalizedSlot = emitChainChildOp(SemanticOpKind.INDEX_NORMALIZE,
+                    new KindPayload.IndexNormalizePayload(IndexMode.BYTES_WRITE, key,
+                        length),
+                    index.span(), elementDescriptor,
+                    FailurePolicyId.NO_DEAL_FAILURE);
+                normalizeOp = producerOpId(normalizedSlot);
+                boundaryOp = emitNullOp(SemanticOpKind.BOUNDARY,
+                    new KindPayload.BoundaryPayload(BoundaryKind.BYTE_ELEMENT_ASSIGNMENT,
+                        elementDescriptor, value,
+                        new BoundaryRealization.RuntimeValidation(
+                            CANONICAL_RUNTIME_VALIDATION_ID)),
+                    index.span(), FailurePolicyId.BYTES_WRITE,
+                    SourceOriginKind.SYNTHETIC, chainOpId);
+                // The commit carries the assignment expression's origin:
+                // its E8013 value-range projection is the commit's own
+                // (K6 item 4).
+                commitOp = emitNullOp(SemanticOpKind.INDEX_WRITE,
+                    new KindPayload.IndexWritePayload(container, normalizedSlot, value),
+                    assignment.span(), FailurePolicyId.NO_DEAL_FAILURE,
+                    SourceOriginKind.SYNTHETIC, chainOpId);
+            } finally {
+                chainParents.pop();
+            }
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(assignment.span()),
+                SourceOriginKind.USER, anchor, currentParent());
+            emit(buildOp(chainOpId, SemanticOpKind.ASSIGN,
+                new KindPayload.AssignPayload(AssignTargetKind.BYTES_SLOT,
+                    List.of(containerOp, keyOp, valueOp, lengthOp, normalizeOp, boundaryOp,
+                        commitOp)),
+                value, elementDescriptor, FailurePolicyId.NO_DEAL_FAILURE, origin));
             return value;
         }
 
@@ -13248,8 +13320,64 @@ public final class SemanticLowerer {
          * Table index reads stay E2's (the carrier slice lowers array
          * index reads only).
          */
+        /**
+         * The bytes element read (K6 item 2): the landed array-read shape
+         * over a byte receiver — {@code ARRAY_LENGTH(byteReceiver)} then
+         * {@code INDEX_NORMALIZE(BYTES_READ, rawKey = the index child's
+         * result, currentLength = the length read's result)} then
+         * {@code INDEX_READ(container, normalize, boundaryOpId)} with the
+         * {@code BYTE_ELEMENT_READ} boundary child under the
+         * {@code BYTES_READ} policy (E8012 {@code bytes index out of
+         * bounds} at the index expression, for {@code i < 0} and
+         * {@code i >= b.length}). The result is the byte as {@code int}.
+         */
+        private ValueId lowerBytesIndexRead(IndexExpr index, ValueId slot) {
+            RuntimeDescriptor intDescriptor =
+                ContainerPayloadDescriptors.resultDescriptorOf(Type.Int.INSTANCE);
+            RuntimeDescriptor resultType = intDescriptor;
+            ValueId container = lowerExpression(index.array());
+            ValueId key = lowerExpression(index.index());
+            ValueId length = emitValueOp(SemanticOpKind.ARRAY_LENGTH,
+                new KindPayload.ArrayLengthPayload(container), index.span(),
+                intDescriptor, FailurePolicyId.INT32_RESULT);
+            ValueId normalize = emitOperandOp(SemanticOpKind.INDEX_NORMALIZE,
+                new KindPayload.IndexNormalizePayload(IndexMode.BYTES_READ, key, length),
+                List.of(key, length), List.of(intDescriptor, intDescriptor),
+                index.span(), intDescriptor,
+                FailurePolicyId.NO_DEAL_FAILURE);
+            ValueId result = slot != null ? slot : ids.nextValueId(module, nextOrdinal++, 0);
+            AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            OpId opId = ids.nextOpId(module, nextOrdinal++, 0);
+            AnchorId boundaryAnchor = ids.nextAnchorId(module, nextOrdinal++, 0);
+            OpId boundaryOpId = ids.nextOpId(module, nextOrdinal++, 0);
+            SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(index.span()),
+                SourceOriginKind.USER, anchor, currentParent());
+            emit(buildOp(opId, SemanticOpKind.INDEX_READ,
+                new KindPayload.IndexReadPayload(container, normalize, boundaryOpId),
+                result, resultType, List.of(container, normalize), List.of(
+                    RuntimeDescriptor.Bytes.INSTANCE, intDescriptor),
+                FailurePolicyId.NO_DEAL_FAILURE, origin));
+            SourceOrigin boundaryOrigin = new SourceOrigin(sourceId,
+                toSourceSpan(index.span()), SourceOriginKind.SYNTHETIC, boundaryAnchor,
+                opId);
+            emit(buildOp(boundaryOpId, SemanticOpKind.BOUNDARY,
+                new KindPayload.BoundaryPayload(BoundaryKind.BYTE_ELEMENT_READ,
+                    resultType, result,
+                    new BoundaryRealization.RuntimeValidation(
+                        CANONICAL_RUNTIME_VALIDATION_ID)),
+                null, null, FailurePolicyId.BYTES_READ,
+                boundaryOrigin));
+            // The producer rule's index-read arm: a function-typed element
+            // read registers exactly one dynamic materialization; a bytes
+            // element read is an int, so the registration never applies.
+            return result;
+        }
+
         private ValueId lowerIndexRead(IndexExpr index, ValueId slot) {
             Type objectType = checkedType(index.array());
+            if (objectType instanceof Type.Bytes) {
+                return lowerBytesIndexRead(index, slot);
+            }
             if (!(objectType instanceof Type.Array)) {
                 throw new ConstructUnlowered("index read on " + typeName(objectType)
                     + " (the carrier slice lowers array index reads; table index reads "
@@ -13346,8 +13474,14 @@ public final class SemanticLowerer {
                 return lowerFieldRead(access, innerClassType, slot);
             }
             if (objectType instanceof Type.Bytes) {
+                if ("length".equals(access.field())) {
+                    // K6 item 7: b.length reads the fixed logical length
+                    // through the existing ARRAY_LENGTH op with an int
+                    // result and the INT32_RESULT terminal.
+                    return lowerArrayLength(access, slot);
+                }
                 throw new ConstructUnlowered("member access '" + access.field()
-                    + "' on bytes (bytes value semantics are ISSUE-0158's; a bytes member "
+                    + "' on bytes (the checker admits .length only; a bytes member "
                     + "access reaching an E5 arm fails hard)");
             }
             throw new ConstructUnlowered("member access '" + access.field() + "' on "
@@ -13857,6 +13991,18 @@ public final class SemanticLowerer {
             ExpressionNode argument = call.args().get(0);
             Type argumentType = checkedType(argument);
             ValueId input = lowerExpression(argument);
+            if (kind == IntrinsicKind.BYTES_NEW) {
+                // K6 item 1: the allocation intrinsic's pinned int input
+                // descriptor and bytes result descriptor, with the
+                // BYTES_ALLOCATE terminal policy at the call expression.
+                RuntimeDescriptor intDescriptor =
+                    ContainerPayloadDescriptors.resultDescriptorOf(Type.Int.INSTANCE);
+                return emitOperandOp(SemanticOpKind.INTRINSIC_CALL,
+                    new KindPayload.IntrinsicCallPayload(kind, input),
+                    List.of(input), List.of(intDescriptor),
+                    call.span(), RuntimeDescriptor.Bytes.INSTANCE,
+                    SemanticIrValidator.intrinsicPolicy(kind), slot);
+            }
             return emitOperandOp(SemanticOpKind.INTRINSIC_CALL,
                 new KindPayload.IntrinsicCallPayload(kind, input),
                 List.of(input), List.of(valueDescriptorOf(argumentType)),
@@ -13880,11 +14026,14 @@ public final class SemanticLowerer {
                     if (kind != null) {
                         return kind;
                     }
+                    if ("bytes".equals(intrinsic.name())) {
+                        return IntrinsicKind.BYTES_NEW;
+                    }
                 }
             }
-            throw new ConstructUnlowered("call expression (only int()/number() intrinsic "
-                + "calls lower in this slice — INTRINSIC_CALL is the I3 terminal-check "
-                + "arm; the CALL machinery is E7's and bytes() is the bytes exclusion)");
+            throw new ConstructUnlowered("call expression (only the int()/number() "
+                + "conversion and bytes() allocation intrinsic calls lower to "
+                + "INTRINSIC_CALL; the CALL machinery is the calls slice's)");
         }
 
         /**

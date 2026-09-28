@@ -739,7 +739,11 @@ public class ProductionDispatchTest {
         try {
             Path out = project.resolve("out");
             write(project, "deal.json", DEAL_JSON_LUA);
-            write(project, "src/main.deal", BYTES_SOURCE);
+            // ISSUE-0626 retargeted this probe: the bytes-bearing module now
+            // compiles (the bytes element contract is production-covered), so
+            // the atomic-staging probe uses the still-fail-closed
+            // function-typed materialization fixture.
+            write(project, "src/main.deal", FUNCTION_VALUE_SOURCE);
             // A previous artifact set in the live output root.
             write(out, "main.lua", "-- previous artifact\n");
             write(out, "deal/runtime.lua", "-- previous runtime\n");
@@ -747,7 +751,8 @@ public class ProductionDispatchTest {
             ProjectOutcome compile = productionCompile(project, "src/main.deal",
                 "out");
             check(compile.exitCode() != 0,
-                "the bytes-bearing production compile fails closed");
+                "the function-typed-materialization production compile fails "
+                    + "closed");
             check(compile.stderr().contains("E6005")
                     && compile.stderr().contains("CONSTRUCT_UNLOWERED"),
                 "the failing lowering names the construct rule: "
@@ -968,8 +973,7 @@ public class ProductionDispatchTest {
         // (d) The later-slice constructs each fail with their named E6005;
         // the builtin Error construction is covered by ISSUE-0619 and
         // executes its production artifact on both targets.
-        checkLaterSliceConstruct("bytes", Map.of("src/main.deal", BYTES_SOURCE),
-            "CONSTRUCT_UNLOWERED");
+        checkBytesProductionCoverage();
         checkTimeNowMillisCoverage();
         checkLaterSliceConstruct("function-typed materialization",
             Map.of("src/main.deal", FUNCTION_VALUE_SOURCE),
@@ -1087,6 +1091,34 @@ public class ProductionDispatchTest {
                     + compile.stderr());
             check(!Files.exists(project.resolve("out")),
                 name + ": the failure stages no artifact");
+        } finally {
+            deleteRecursively(project);
+        }
+    }
+
+    /**
+     * The K6 bytes coverage through the release-owned production invocation
+     * (the fixture this battery pinned fail-closed): the closure emits
+     * exactly one project artifact and the artifact executes under the real
+     * {@code luajit} toolchain.
+     */
+    private static void checkBytesProductionCoverage() throws Exception {
+        Path project = Files.createTempDirectory("production-dispatch-bytes-");
+        try {
+            write(project, "deal.json", DEAL_JSON_LUA);
+            write(project, "src/main.deal", BYTES_SOURCE);
+            ProjectOutcome compile = productionCompile(project, "src/main.deal",
+                "out");
+            check(compile.exitCode() == 0,
+                "the bytes closure emits one project artifact: "
+                    + compile.stderr());
+            if (compile.exitCode() == 0) {
+                ProcessOutcome run = runProcess(project.resolve("out"),
+                    "luajit", "main.lua");
+                check(run.exitCode() == 0,
+                    "the bytes production artifact runs: exit=" + run.exitCode()
+                        + " output=" + run.output());
+            }
         } finally {
             deleteRecursively(project);
         }

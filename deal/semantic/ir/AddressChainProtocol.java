@@ -25,7 +25,11 @@ import java.util.Optional;
  * {@code ARRAY_SLOT} write = {@code [containerOp, keyOp, valueOp,
  * lengthOp, normalizeOp(ARRAY_WRITE), boundaryOp, commitOp(INDEX_WRITE)]}
  * with the lengthOp an {@code ARRAY_LENGTH} read of the resolved
- * receiver; {@code CLASS_FIELD} write = {@code [containerOp, valueOp,
+ * receiver; {@code BYTES_SLOT} write (K6 item 4) = the array shape's
+ * exact mirror with the lengthOp an {@code ARRAY_LENGTH} read of the
+ * resolved byte receiver, the normalize mode {@code BYTES_WRITE}, and
+ * the {@code BYTE_ELEMENT_ASSIGNMENT} + {@code BYTES_WRITE} boundary;
+ * {@code CLASS_FIELD} write = {@code [containerOp, valueOp,
  * commitOp(FIELD_WRITE)]}. {@code DELETE}: {@code TABLE_SLOT} member =
  * {@code [containerOp, commitOp(MEMBER_DELETE)]}; {@code TABLE_SLOT}
  * index = {@code [containerOp, keyOp, normalizeOp(TABLE_WRITE),
@@ -43,7 +47,9 @@ import java.util.Optional;
  * RHS value ({@code valueOp}'s result); the {@code ARRAY_SLOT} delete
  * boundary must carry kind {@code ARRAY_ELEMENT_DELETE} with policy
  * {@code ARRAY_DELETE_BOUNDS} and input = the normalized index
- * ({@code normalizeOp}'s result). A {@code VARIABLE} chain's single
+ * ({@code normalizeOp}'s result); the {@code BYTES_SLOT} write boundary
+ * must carry kind {@code BYTE_ELEMENT_ASSIGNMENT} with policy
+ * {@code BYTES_WRITE} and input = the checked RHS value. A {@code VARIABLE} chain's single
  * boundary must carry kind {@code VARIABLE_ASSIGNMENT} with the
  * descriptor-kind policy — {@code TYPE_DESCRIPTOR} for non-function
  * descriptors, {@code FUNCTION_SIGNATURE} for function descriptors — and
@@ -59,7 +65,8 @@ import java.util.Optional;
  * <p><b>Normalize and commit (A-D3/A-D5).</b> The normalize child is
  * {@code INDEX_NORMALIZE} with policy {@code NO_DEAL_FAILURE} (purity —
  * it never raises E8002 and never enforces bounds) and the closed mode:
- * {@code ARRAY_WRITE} on {@code ARRAY_SLOT} chains, {@code TABLE_WRITE}
+ * {@code ARRAY_WRITE} on {@code ARRAY_SLOT} chains, {@code BYTES_WRITE}
+ * on {@code BYTES_SLOT} chains, {@code TABLE_WRITE}
  * on {@code TABLE_SLOT} index chains. For array chains the normalize's
  * {@code rawKey} references the key child's result and its
  * {@code currentLength} references the length child's result (the length
@@ -225,6 +232,7 @@ public final class AddressChainProtocol {
                     case VARIABLE -> checkVariableAssign(unit, chain, payload.childOps(), ops);
                     case TABLE_SLOT -> checkTableAssign(unit, chain, payload.childOps(), ops);
                     case ARRAY_SLOT -> checkArrayAssign(unit, chain, payload.childOps(), ops);
+                    case BYTES_SLOT -> checkBytesAssign(unit, chain, payload.childOps(), ops);
                     case CLASS_FIELD -> checkClassFieldAssign(unit, chain, payload.childOps(),
                         ops);
                 };
@@ -621,6 +629,120 @@ public final class AddressChainProtocol {
     }
 
     /**
+     * ASSIGN BYTES_SLOT write — the array chain's exact mirror (K6 item
+     * 4): {@code [containerOp, keyOp, valueOp,
+     * lengthOp(ARRAY_LENGTH over the byte receiver),
+     * normalizeOp(INDEX_NORMALIZE BYTES_WRITE),
+     * boundaryOp(BYTE_ELEMENT_ASSIGNMENT + BYTES_WRITE),
+     * commitOp(INDEX_WRITE)]}. The boundary enforces the pinned E8012
+     * bounds ({@code index < 0} or {@code index >= b.length}) with input =
+     * the checked RHS value; the commit enforces the E8013 value range
+     * (0..255) before the single mutation. There is no bytes delete shape
+     * ({@code delete b[i]} is the checker's E3007 rejection).
+     */
+    private static Optional<CompilerDiagnostic> checkBytesAssign(LoweredModuleUnit unit,
+                                                                 SemanticOp chain,
+                                                                 List<OpId> children,
+                                                                 Map<OpId, SemanticOp> ops) {
+        if (children.size() != 7) {
+            return fail(unit, RULE_ADDRESS_CHAIN_SHAPE, chain,
+                "no closed ASSIGN BYTES_SLOT chain shape with " + children.size()
+                    + " children; the closed shape is [containerOp, keyOp, valueOp, "
+                    + "lengthOp(ARRAY_LENGTH), normalizeOp(INDEX_NORMALIZE BYTES_WRITE), "
+                    + "boundaryOp(BYTE_ELEMENT_ASSIGNMENT + BYTES_WRITE), "
+                    + "commitOp(INDEX_WRITE)]");
+        }
+        CompilerDiagnostic[] childFailure = new CompilerDiagnostic[1];
+        SemanticOp[] c = resolveChildren(unit, chain, children, ops, childFailure);
+        if (childFailure[0] != null) {
+            return Optional.of(childFailure[0]);
+        }
+        Optional<CompilerDiagnostic> failure;
+        failure = requireParentage(unit, chain, c[0], 0);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireValueResult(unit, chain, c[0], 0, "receiver");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireParentage(unit, chain, c[1], 1);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireValueResult(unit, chain, c[1], 1, "key");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireResultType(unit, chain, c[1], RuntimeDescriptor.Int.INSTANCE,
+            "the bytes key child at position 1");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireParentage(unit, chain, c[2], 2);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireValueResult(unit, chain, c[2], 2, "value");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = checkIndexLengthAndNormalize(unit, chain, c, 3, 4, IndexMode.BYTES_WRITE);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        // boundaryOp — BYTE_ELEMENT_ASSIGNMENT + BYTES_WRITE,
+        // input = the checked RHS value.
+        failure = requireParentage(unit, chain, c[5], 5);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireKind(unit, chain, c[5], SemanticOpKind.BOUNDARY, 5,
+            "BYTE_ELEMENT_ASSIGNMENT boundary");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        KindPayload.BoundaryPayload boundary = (KindPayload.BoundaryPayload) c[5].payload();
+        if (boundary.kind() != BoundaryKind.BYTE_ELEMENT_ASSIGNMENT) {
+            return fail(unit, RULE_ADDRESS_CHAIN_SHAPE, chain,
+                "the BYTES_SLOT write boundary at position 5 must carry kind "
+                    + "BYTE_ELEMENT_ASSIGNMENT, got " + boundary.kind());
+        }
+        if (c[5].failurePolicy() != FailurePolicyId.BYTES_WRITE) {
+            return fail(unit, RULE_ADDRESS_CHAIN_SHAPE, chain,
+                "the BYTE_ELEMENT_ASSIGNMENT boundary at position 5 must carry policy "
+                    + "BYTES_WRITE, got " + c[5].failurePolicy().name());
+        }
+        failure = requireEqual(unit, chain, boundary.input(), (ValueId) c[2].result(),
+            "the BYTE_ELEMENT_ASSIGNMENT boundary's input (the checked RHS value)");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        // commitOp — INDEX_WRITE, last.
+        failure = requireParentage(unit, chain, c[6], 6);
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireKind(unit, chain, c[6], SemanticOpKind.INDEX_WRITE, 6, "commit");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        KindPayload.IndexWritePayload write = (KindPayload.IndexWritePayload) c[6].payload();
+        failure = requireEqual(unit, chain, write.container(), (ValueId) c[0].result(),
+            "the INDEX_WRITE commit's resolved container reference");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        failure = requireEqual(unit, chain, write.slot(), (ValueId) c[4].result(),
+            "the INDEX_WRITE commit's resolved slot reference");
+        if (failure.isPresent()) {
+            return failure;
+        }
+        return requireEqual(unit, chain, write.value(), (ValueId) c[2].result(),
+            "the INDEX_WRITE commit's stored value");
+    }
+
+    /**
      * The shared length read + ARRAY_WRITE normalize of an array chain
      * (write or delete): positions {@code lengthPos} (ARRAY_LENGTH of the
      * resolved receiver) and {@code normalizePos} (INDEX_NORMALIZE
@@ -629,6 +751,19 @@ public final class AddressChainProtocol {
     private static Optional<CompilerDiagnostic> checkArrayLengthAndNormalize(
             LoweredModuleUnit unit, SemanticOp chain, SemanticOp[] c, int lengthPos,
             int normalizePos, int boundaryPos) {
+        return checkIndexLengthAndNormalize(unit, chain, c, lengthPos, normalizePos,
+            IndexMode.ARRAY_WRITE);
+    }
+
+    /**
+     * The shared length read + write normalize of an index chain (array or
+     * bytes; K6 item 4): positions {@code lengthPos} (ARRAY_LENGTH of the
+     * resolved receiver) and {@code normalizePos} (INDEX_NORMALIZE of the
+     * key result against the read length) under the expected write mode.
+     */
+    private static Optional<CompilerDiagnostic> checkIndexLengthAndNormalize(
+            LoweredModuleUnit unit, SemanticOp chain, SemanticOp[] c, int lengthPos,
+            int normalizePos, IndexMode expectedMode) {
         Optional<CompilerDiagnostic> failure;
         failure = requireParentage(unit, chain, c[lengthPos], lengthPos);
         if (failure.isPresent()) {
@@ -666,11 +801,11 @@ public final class AddressChainProtocol {
         }
         KindPayload.IndexNormalizePayload normalize =
             (KindPayload.IndexNormalizePayload) c[normalizePos].payload();
-        if (normalize.mode() != IndexMode.ARRAY_WRITE) {
+        if (normalize.mode() != expectedMode) {
             return fail(unit, RULE_ADDRESS_CHAIN_SHAPE, chain,
-                "the array chain normalize at position " + normalizePos + " must carry mode "
-                    + "ARRAY_WRITE (delete is a mutation context; the closed IndexMode set is "
-                    + "not extended), got " + normalize.mode());
+                "the chain normalize at position " + normalizePos + " must carry mode "
+                    + expectedMode + " (delete is a mutation context; the closed IndexMode "
+                    + "set is not extended), got " + normalize.mode());
         }
         failure = requirePolicy(unit, chain, c[normalizePos], FailurePolicyId.NO_DEAL_FAILURE,
             "the INDEX_NORMALIZE child (purity: it never raises a DEAL failure, never E8002)");

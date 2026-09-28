@@ -723,9 +723,9 @@ public final class SemanticOracle {
     public sealed interface Value
         permits Value.NullValue, Value.MissingValue, Value.BoolValue, Value.IntValue,
                 Value.NumValue, Value.StrValue, Value.TableValue, Value.ArrayValue,
-                Value.FuncValue, Value.AdapterValue, Value.IntrinsicValue, Value.ErrorValue,
-                Value.SlotValue, Value.ClassValue, Value.StdlibCallableValue,
-                Value.HostEntryValue {
+                Value.BytesValue, Value.FuncValue, Value.AdapterValue, Value.IntrinsicValue,
+                Value.ErrorValue, Value.SlotValue, Value.ClassValue,
+                Value.StdlibCallableValue, Value.HostEntryValue {
 
         enum NullValue implements Value { INSTANCE }
 
@@ -750,6 +750,55 @@ public final class SemanticOracle {
         /** A dense array; deleted slots hold {@link MissingValue}. */
         record ArrayValue(List<Value> elements, RuntimeDescriptor elementDescriptor)
             implements Value {
+        }
+
+        /**
+         * A bytes buffer (K6 item 9): a mutable zero-filled byte sequence
+         * with reference identity and a logical length fixed at
+         * allocation. Element writes mutate the buffer in place, so every
+         * alias observes the commit; the length never changes. The value
+         * converts to and from the closed executor views by identity
+         * (exactly like tables and arrays).
+         */
+        final class BytesValue implements Value {
+
+            private final byte[] storage;
+            private final int length;
+
+            /**
+             * Allocates one zero-filled bytes buffer.
+             *
+             * @param length the logical length; non-negative
+             */
+            public BytesValue(int length) {
+                if (length < 0) {
+                    throw new IllegalArgumentException(
+                        "a bytes buffer's logical length must be non-negative, got "
+                            + length);
+                }
+                this.storage = new byte[length];
+                this.length = length;
+            }
+
+            /** The immutable logical length. */
+            public int length() {
+                return length;
+            }
+
+            /** The unsigned byte at {@code index}; the caller checks bounds. */
+            public int read(int index) {
+                return storage[index] & 0xFF;
+            }
+
+            /** Writes one byte in place; the caller checks the range. */
+            public void write(int index, int value) {
+                storage[index] = (byte) value;
+            }
+
+            /** The shared storage of the closed executor views (never copied). */
+            public byte[] storage() {
+                return storage;
+            }
         }
 
         /** A closure allocation: the lowered body plus its captured cells. */
@@ -1424,15 +1473,20 @@ public final class SemanticOracle {
                 case Value.StrValue str -> "str:" + SemanticRuntimeModel.escapeString(str.value());
                 case Value.ErrorValue error -> "err:" + error.code() + ":"
                     + SemanticRuntimeModel.escapeString(error.message());
-                case Value.SlotValue slot -> slot.slot() instanceof NormalizedSlot.ArraySlot array
-                    ? "slot:" + array.index() + "/" + array.present() + "/" + array.append()
-                    : "keyslot:" + SemanticRuntimeModel.escapeString(
-                        ((NormalizedSlot.TableSlot) slot.slot()).key());
+                case Value.SlotValue slot -> switch (slot.slot()) {
+                    case NormalizedSlot.ArraySlot array -> "slot:" + array.index() + "/"
+                        + array.present() + "/" + array.append();
+                    case NormalizedSlot.BytesSlot bytes -> "byteslot:" + bytes.index() + "/"
+                        + bytes.present();
+                    case NormalizedSlot.TableSlot table -> "keyslot:"
+                        + SemanticRuntimeModel.escapeString(table.key());
+                };
                 case Value.TableValue table -> allocate(table);
                 case Value.ArrayValue array -> allocate(array);
                 case Value.FuncValue func -> allocate(func);
                 case Value.IntrinsicValue intrinsic -> allocate(intrinsic);
                 case Value.AdapterValue adapter -> allocate(adapter);
+                case Value.BytesValue bytes -> allocate(bytes);
                 case Value.ClassValue classValue -> allocate(classValue);
                 case Value.StdlibCallableValue callable -> allocate(callable);
                 case Value.HostEntryValue entry -> allocate(entry);
@@ -2039,6 +2093,12 @@ public final class SemanticOracle {
                     new ComparisonOperandView.Ref(refIdentity(adapter));
                 case Value.IntrinsicValue intrinsic ->
                     new ComparisonOperandView.Ref(refIdentity(intrinsic));
+                case Value.BytesValue bytes ->
+                    // Bytes compare by allocation identity (the landed
+                    // BYTES_EQ/NE row over Ref views, K6 item 12): an alias
+                    // compares equal, two distinct buffers unequal — exactly
+                    // as both production artifacts compare their carriers.
+                    new ComparisonOperandView.Ref(refIdentity(bytes));
                 case Value.StdlibCallableValue callable ->
                     // The in-target cataloged callable (M4): a heap value whose
                     // identity is its memoized allocation, exactly like the
@@ -2089,7 +2149,13 @@ public final class SemanticOracle {
         private String executeArrayLength(SemanticOp op) {
             KindPayload.ArrayLengthPayload payload =
                 (KindPayload.ArrayLengthPayload) op.payload();
-            Value.ArrayValue array = (Value.ArrayValue) valueOf(payload.arrayValue());
+            Value receiver = valueOf(payload.arrayValue());
+            if (receiver instanceof Value.BytesValue bytes) {
+                // K6 item 7: b.length reads the bytes buffer's fixed logical
+                // length through the existing ARRAY_LENGTH op.
+                return publish(op, new Value.IntValue(bytes.length()));
+            }
+            Value.ArrayValue array = (Value.ArrayValue) receiver;
             return publish(op, new Value.IntValue(array.elements().size()));
         }
 
@@ -2239,7 +2305,8 @@ public final class SemanticOracle {
             RuntimeDescriptor inner = descriptor instanceof RuntimeDescriptor.Nullable nullable
                 ? nullable.inner() : descriptor;
             return inner instanceof RuntimeDescriptor.Func
-                || inner instanceof RuntimeDescriptor.Array;
+                || inner instanceof RuntimeDescriptor.Array
+                || inner instanceof RuntimeDescriptor.Bytes;
         }
 
         /**
@@ -3068,6 +3135,8 @@ public final class SemanticOracle {
                     yield new ClassOpsExecutor.Value.Array(
                         SemanticArray.of(elements));
                 }
+                case Value.BytesValue bytes -> new ClassOpsExecutor.Value.Bytes(
+                    bytes.storage(), bytes.length());
                 case Value.FuncValue func ->
                     new ClassOpsExecutor.Value.Function(func.signature());
                 case Value.AdapterValue adapter ->
@@ -3153,6 +3222,7 @@ public final class SemanticOracle {
                     yield new Value.ArrayValue(elements,
                         RuntimeDescriptor.String.INSTANCE);
                 }
+                case ClassOpsExecutor.Value.Bytes bytes -> bytesValueOf(bytes);
                 case ClassOpsExecutor.Value.Function function ->
                     new Value.FuncValue(null, function.signature(), Map.of());
                 case ClassOpsExecutor.Value.Class classValue -> {
@@ -3239,7 +3309,7 @@ public final class SemanticOracle {
                 case KindPayload.IndexWritePayload payload -> {
                     Value container = valueOf(payload.container());
                     NormalizedSlot slot = ((Value.SlotValue) valueOf(payload.slot())).slot();
-                    commitIndexWrite(container, slot, valueOf(payload.value()));
+                    commitIndexWrite(op, container, slot, valueOf(payload.value()));
                 }
                 case KindPayload.IndexDeletePayload payload -> {
                     Value container = valueOf(payload.container());
@@ -3534,8 +3604,9 @@ public final class SemanticOracle {
                 false);
         }
 
-        /** The array/table commit mutation (slot mechanics of the carrier). */
-        private void commitIndexWrite(Value container, NormalizedSlot slot, Value value) {
+        /** The array/table/bytes commit mutation (slot mechanics of the carrier). */
+        private void commitIndexWrite(SemanticOp commit, Value container, NormalizedSlot slot,
+                                      Value value) {
             switch (slot) {
                 case NormalizedSlot.ArraySlot array -> {
                     Value.ArrayValue target = (Value.ArrayValue) container;
@@ -3544,6 +3615,19 @@ public final class SemanticOracle {
                     } else {
                         target.elements().set(array.index(), value);
                     }
+                }
+                case NormalizedSlot.BytesSlot bytes -> {
+                    // The bytes write's value-range check (E8013) commits
+                    // here, at the assignment-expression origin (K6 item 4):
+                    // the bounds check already ran at the chain's
+                    // BYTE_ELEMENT_ASSIGNMENT boundary.
+                    Value.BytesValue target = (Value.BytesValue) container;
+                    long written = ((Value.IntValue) value).value();
+                    if (written < 0 || written > 255) {
+                        throw DealFailure.of(BoundaryExecutor.bytesWriteRangeFailure(),
+                            commit.origin(), List.copyOf(frames));
+                    }
+                    target.write(bytes.index(), (int) written);
                 }
                 case NormalizedSlot.TableSlot table ->
                     ((Value.TableValue) container).entries().put(table.key(), value);
@@ -3560,6 +3644,9 @@ public final class SemanticOracle {
                     // index == length: the nil write at the append slot is a
                     // no-op on a dense array (A-D4).
                 }
+                case NormalizedSlot.BytesSlot ignored -> throw new IllegalStateException(
+                    "a bytes slot never carries a delete (delete b[i] is the "
+                        + "checker's E3007 rejection) — a producer defect, never executed");
                 case NormalizedSlot.TableSlot table ->
                     ((Value.TableValue) container).entries().remove(table.key());
             }
@@ -3572,6 +3659,9 @@ public final class SemanticOracle {
             Value currentLength = valueOf(payload.currentLength());
             NormalizedSlot slot = switch (payload.mode()) {
                 case ARRAY_READ, ARRAY_WRITE -> NormalizedSlot.arraySlot(payload.mode(),
+                    (int) ((Value.IntValue) rawKey).value(),
+                    (int) ((Value.IntValue) currentLength).value());
+                case BYTES_READ, BYTES_WRITE -> NormalizedSlot.bytesSlot(payload.mode(),
                     (int) ((Value.IntValue) rawKey).value(),
                     (int) ((Value.IntValue) currentLength).value());
                 case TABLE_READ, TABLE_WRITE -> NormalizedSlot.tableSlot(payload.mode(),
@@ -3611,6 +3701,20 @@ public final class SemanticOracle {
                     // declaration boundary's E8001 projection).
                     return publish(op, checked);
                 }
+                case NormalizedSlot.BytesSlot bytes -> {
+                    Value.BytesValue target = (Value.BytesValue) container;
+                    int index = bytes.index();
+                    int length = readLengthOf(op, payload.slot());
+                    Value read;
+                    if (index < 0 || index >= target.length()) {
+                        read = Value.MissingValue.INSTANCE; // the cell's E8012
+                    } else {
+                        read = new Value.IntValue(target.read(index));
+                    }
+                    Value checked = runBoundaryChild(boundary, read,
+                        BoundaryContext.bytesBounds(index, length));
+                    return publish(op, checked);
+                }
                 case NormalizedSlot.TableSlot table -> {
                     Value.TableValue target = (Value.TableValue) container;
                     Value read = target.entries().get(table.key());
@@ -3621,6 +3725,31 @@ public final class SemanticOracle {
                     return contextualReadDecision(op, checked, descriptor);
                 }
             }
+        }
+
+        /**
+         * The bytes read's length operand (K6 item 3): the read's own
+         * length read — the {@code INDEX_NORMALIZE} child that produced the
+         * read's slot carries the {@code ARRAY_LENGTH} result as its
+         * {@code currentLength}, and the cell consumes exactly that value.
+         * A missing normalize/length operand is a producer defect.
+         */
+        private int readLengthOf(SemanticOp read, ValueId slotId) {
+            for (SemanticOp candidate : stateOf(read.opId()).unit.ops()) {
+                if (candidate.kind() == SemanticOpKind.INDEX_NORMALIZE
+                        && slotId.equals(candidate.result())) {
+                    KindPayload.IndexNormalizePayload normalize =
+                        (KindPayload.IndexNormalizePayload) candidate.payload();
+                    Value length = valueOf(normalize.currentLength());
+                    if (length instanceof Value.IntValue intValue) {
+                        return (int) intValue.value();
+                    }
+                    throw new IllegalStateException("the bytes read's currentLength operand "
+                        + "is not an int value (producer defect)");
+                }
+            }
+            throw new IllegalStateException("the bytes read's slot " + slotId
+                + " has no producing INDEX_NORMALIZE op (producer defect)");
         }
 
         /**
@@ -3740,6 +3869,10 @@ public final class SemanticOracle {
                         : BoundaryValueView.of(ActualKind.INVALID_UNICODE);
                 }
                 case Value.TableValue table -> BoundaryValueView.of(ActualKind.TABLE);
+                case Value.BytesValue ignored ->
+                    // The bytes value's boundary view (K6 item 11):
+                    // classification-only — the view carries no contents.
+                    BoundaryValueView.of(ActualKind.BYTES);
                 case Value.ErrorValue error ->
                     // The builtin Error carrier's closed boundary view
                     // (ISSUE-0619; K13 item 5): the canonical @/Error class
@@ -4005,10 +4138,11 @@ public final class SemanticOracle {
         private BoundaryContext chainBoundaryContext(SemanticOp chain,
                                                      deal.semantic.ir.BoundaryKind kind) {
             if (kind != deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_ASSIGNMENT
-                    && kind != deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_DELETE) {
+                    && kind != deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_DELETE
+                    && kind != deal.semantic.ir.BoundaryKind.BYTE_ELEMENT_ASSIGNMENT) {
                 return BoundaryContext.none();
             }
-            NormalizedSlot.ArraySlot array = null;
+            NormalizedSlot slot = null;
             int length = -1;
             List<OpId> children = switch (chain.payload()) {
                 case KindPayload.AssignPayload assign -> assign.childOps();
@@ -4020,19 +4154,24 @@ public final class SemanticOracle {
                 SemanticOp child = ops.get(childId);
                 if (child.kind() == SemanticOpKind.INDEX_NORMALIZE
                         && child.result() instanceof ValueId normalizeResult) {
-                    array = (NormalizedSlot.ArraySlot)
-                        ((Value.SlotValue) valueOf(normalizeResult)).slot();
+                    slot = ((Value.SlotValue) valueOf(normalizeResult)).slot();
                 } else if (child.kind() == SemanticOpKind.ARRAY_LENGTH
                         && child.result() instanceof ValueId lengthResult) {
                     length = (int) ((Value.IntValue) valueOf(lengthResult)).value();
                 }
             }
-            if (array == null || length < 0) {
-                throw new IllegalStateException("an array chain boundary lacks its "
+            if (slot == null || length < 0) {
+                throw new IllegalStateException("an index chain boundary lacks its "
                     + "normalize slot/length facts (a malformed chain — the production "
                     + "protocol rejects this)");
             }
-            return BoundaryContext.writeBounds(array.index(), length);
+            return switch (slot) {
+                case NormalizedSlot.ArraySlot array ->
+                    BoundaryContext.writeBounds(array.index(), length);
+                case NormalizedSlot.BytesSlot bytes ->
+                    BoundaryContext.bytesBounds(bytes.index(), length);
+                case NormalizedSlot.TableSlot ignored -> BoundaryContext.none();
+            };
         }
 
         /**
@@ -4044,15 +4183,21 @@ public final class SemanticOracle {
         private BoundaryContext chainBoundaryContext(deal.semantic.ir.BoundaryKind kind,
                                                      Value.SlotValue slot, Value length) {
             if (kind == deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_ASSIGNMENT
-                    || kind == deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_DELETE) {
-                if (slot == null || !(slot.slot() instanceof NormalizedSlot.ArraySlot array)
-                        || length == null) {
-                    throw new IllegalStateException("an array chain boundary lacks its "
+                    || kind == deal.semantic.ir.BoundaryKind.ARRAY_ELEMENT_DELETE
+                    || kind == deal.semantic.ir.BoundaryKind.BYTE_ELEMENT_ASSIGNMENT) {
+                if (slot == null || length == null) {
+                    throw new IllegalStateException("an index chain boundary lacks its "
                         + "normalize slot/length facts (a malformed chain — the "
                         + "production protocol rejects this)");
                 }
-                return BoundaryContext.writeBounds(array.index(),
-                    (int) ((Value.IntValue) length).value());
+                int lengthValue = (int) ((Value.IntValue) length).value();
+                return switch (slot.slot()) {
+                    case NormalizedSlot.ArraySlot array ->
+                        BoundaryContext.writeBounds(array.index(), lengthValue);
+                    case NormalizedSlot.BytesSlot bytes ->
+                        BoundaryContext.bytesBounds(bytes.index(), lengthValue);
+                    case NormalizedSlot.TableSlot ignored -> BoundaryContext.none();
+                };
             }
             return BoundaryContext.none();
         }
@@ -4192,6 +4337,10 @@ public final class SemanticOracle {
             return switch (intrinsic.kind()) {
                 case INT_CONVERT -> convertInt(op, argument);
                 case NUMBER_CONVERT -> convertNumber(op, argument);
+                case BYTES_NEW -> throw new IllegalStateException(
+                    "the bytes allocation intrinsic is never a first-class function "
+                        + "value (no IntrinsicFunction registration exists for '"
+                        + intrinsic.kind() + "') — a producer defect, never executed");
             };
         }
 
@@ -5744,8 +5893,48 @@ public final class SemanticOracle {
             Value result = switch (payload.kind()) {
                 case INT_CONVERT -> convertInt(op, input);
                 case NUMBER_CONVERT -> convertNumber(op, input);
+                case BYTES_NEW -> allocateBytes(op, input);
             };
             return publish(op, result);
+        }
+
+        /**
+         * The {@code BYTES_NEW} arm (K6 item 1): the pinned E8012
+         * non-negative gate at the {@code bytes(...)} call expression,
+         * then one fresh zero-filled buffer of the given logical length.
+         * The length value is the already-completed input operand (single
+         * evaluation).
+         */
+        private Value allocateBytes(SemanticOp op, Value input) {
+            long length = ((Value.IntValue) input).value();
+            if (length < 0) {
+                throw DealFailure.of(BoundaryFailure.fromRow(
+                    FailureContractRegistry.row(FailurePolicyId.BYTES_ALLOCATE),
+                    0, null, null, new LinkedHashMap<>(), null),
+                    op.origin(), List.copyOf(frames));
+            }
+            if (length > Integer.MAX_VALUE) {
+                throw new IllegalStateException("the bytes allocation length " + length
+                    + " is outside the signed32 input descriptor's admitted set "
+                    + "(producer defect)");
+            }
+            return new Value.BytesValue((int) length);
+        }
+
+        /**
+         * The closed executor bytes view → the oracle bytes value: the view
+         * shares the buffer storage of the oracle value it converted from,
+         * so an alias write commits in place. A view with no oracle
+         * original (never produced by the identity-preserving caches) is a
+         * producer defect.
+         */
+        private Value.BytesValue bytesValueOf(ClassOpsExecutor.Value.Bytes bytes) {
+            Value original = oracleOriginals.get(bytes);
+            if (original instanceof Value.BytesValue bytesValue) {
+                return bytesValue;
+            }
+            throw new IllegalStateException("a bytes executor view has no oracle original "
+                + "(the identity-preserving conversion caches are broken — producer defect)");
         }
 
         /**
@@ -5820,6 +6009,7 @@ public final class SemanticOracle {
                 case Value.StrValue ignored -> "string";
                 case Value.TableValue ignored -> "table";
                 case Value.ArrayValue ignored -> "array";
+                case Value.BytesValue ignored -> "bytes";
                 case Value.FuncValue ignored -> "function";
                 case Value.AdapterValue ignored -> "function";
                 case Value.IntrinsicValue ignored -> "function";
@@ -5973,6 +6163,8 @@ public final class SemanticOracle {
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
                 case Value.HostEntryValue ignored ->
                     new SharedStdlibSemantics.Value.Other(ActualKind.FUNCTION, null);
+                case Value.BytesValue ignored -> new SharedStdlibSemantics.Value.Other(
+                    ActualKind.BYTES, null);
                 case Value.ErrorValue ignored -> new SharedStdlibSemantics.Value.Other(
                     ActualKind.CLASS, "@builtin/Error");
                 case Value.ClassValue classValue ->

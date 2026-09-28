@@ -19,7 +19,7 @@ import java.util.Objects;
  * {@link FailurePolicyId}, and the registry-owned construction of every
  * E6005 diagnostic.
  *
- * <p>Closed rows. The table maps each of the 24 policies to exactly one
+ * <p>Closed rows. The table maps each of the 27 policies to exactly one
  * row — no missing row, no extra row, and no fallback. The row data
  * (code, templates, metadata keys, origin rule, cause rule, frame
  * rule, precedence) is the parent's closed table, including
@@ -102,10 +102,17 @@ public final class FailureContractRegistry {
             "propagation only: a propagated child/operand failure keeps its own frames",
             "only already-started child/operand failure may propagate"));
 
+        // Three projections share the row: template 0 is the general
+        // descriptor-kind projection, template 1 the invalid-Unicode-string
+        // variant, and template 2 the bytes carrier's pinned v1.2
+        // projection ({@code "expected bytes"} — the canonical text every
+        // backend produces for a non-bytes value at a bytes descriptor,
+        // with the expected/actual metadata carried beside it).
         rows.put(FailurePolicyId.TYPE_DESCRIPTOR, makeRow(FailurePolicyId.TYPE_DESCRIPTOR,
             DiagnosticCode.E8001,
             List.of("expected {expected}, got {actual}",
-                "expected string, got invalid Unicode scalar encoding"),
+                "expected string, got invalid Unicode scalar encoding",
+                "expected bytes"),
             List.of("expected", "actual"),
             ORIGIN_OPERATION, CAUSE_NONE, FRAMES_ACTIVE,
             "single check: wrong-kind or invalid-unicode-string projection per the checked "
@@ -169,6 +176,40 @@ public final class FailureContractRegistry {
                 "the delete-target origin", CAUSE_NONE, FRAMES_ACTIVE,
                 "index < 0 or > length fails; otherwise no failure and the commit's nil write "
                     + "runs after the boundary"));
+
+        // The bytes rows (K6; the pinned v1.2 texts): allocation
+        // (E8012, the bytes(...) call expression), the element read
+        // (E8012, the index expression), and the element write (E8012
+        // bounds first at the index expression, then E8013 range at the
+        // assignment expression; the mutation runs only after both pass
+        // and a failed write changes no storage).
+        rows.put(FailurePolicyId.BYTES_ALLOCATE,
+            makeRow(FailurePolicyId.BYTES_ALLOCATE, DiagnosticCode.E8012,
+                List.of("bytes length must be non-negative"), List.of(),
+                "the bytes(...) call expression", CAUSE_NONE, FRAMES_ACTIVE,
+                "single check: the allocation length value is non-negative and its "
+                    + "allocation succeeds"));
+
+        rows.put(FailurePolicyId.BYTES_READ,
+            makeRow(FailurePolicyId.BYTES_READ, DiagnosticCode.E8012,
+                List.of("bytes index out of bounds"), List.of(),
+                "the index expression", CAUSE_NONE, FRAMES_ACTIVE,
+                "single bounds check: index < 0 or index >= b.length fails; otherwise the "
+                    + "unsigned byte is read"));
+
+        // Two projections share the row: template 0 is the bounds check
+        // (the row's own E8012 at the index expression), template 1 is
+        // the value-range check committed by the write (E8013 at the
+        // assignment expression; the mutation runs last and a failed
+        // write changes no storage).
+        rows.put(FailurePolicyId.BYTES_WRITE,
+            makeRow(FailurePolicyId.BYTES_WRITE, DiagnosticCode.E8012,
+                List.of("bytes index out of bounds", "bytes value out of range"),
+                List.of(),
+                "the index expression for the bounds check, the assignment expression for "
+                    + "the value-range check", CAUSE_NONE, FRAMES_ACTIVE,
+                "bounds first (index < 0 or index >= b.length), then the value range "
+                    + "(0..255), then the single mutation"));
 
         rows.put(FailurePolicyId.FUNCTION_SIGNATURE,
             makeRow(FailurePolicyId.FUNCTION_SIGNATURE, DiagnosticCode.E8010,

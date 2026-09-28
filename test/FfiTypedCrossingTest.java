@@ -552,12 +552,14 @@ public class FfiTypedCrossingTest {
                     + " stderr=" + escaped(run.stderr()));
 
             // The closed boundary-kind set and its reserved names stay
-            // landed: this slice introduces no boundary kind.
-            checkEq(25, BoundaryKind.values().length,
+            // landed: this slice introduces no boundary kind (the two bytes
+            // element cells are ISSUE-0626's; the C FFI crossings stay
+            // reserved).
+            checkEq(27, BoundaryKind.values().length,
                 "the closed BoundaryKind set keeps its landed member count");
             check(BoundaryKind.RESERVED_NAMES.equals(List.of(
-                    "BYTE_ELEMENT_ASSIGNMENT", "C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
-                "the reserved boundary names are unchanged");
+                    "C_FFI_TO_DEAL", "DEAL_TO_C_FFI")),
+                "the reserved boundary names are the C FFI crossings");
             check(java.util.Arrays.asList(BoundaryKind.values()).contains(
                     BoundaryKind.DEAL_TO_HOST)
                     && java.util.Arrays.asList(BoundaryKind.values()).contains(
