@@ -817,15 +817,12 @@ public final class JvmSemanticEmitter {
 
         private static String bcheckArgs(String method, RuntimeDescriptor descriptor,
                                          String value) {
-            // The canonical spec text is always the trailing argument: the
-            // function row compares a carrier's canonical signature with
-            // it, and the array element projection (E8003) spells its
-            // expected element text from it (the semantic oracle's closed
-            // canonical spelling), never from the runtime's internal
-            // array(...) dialect.
-            return method + "(" + javaString(descriptorText(descriptor)) + ", "
-                + javaString(staticKind(descriptor)) + ", " + value + ", "
-                + javaString(descriptor.canonicalSpecText()) + ")";
+            String args = javaString(descriptorText(descriptor)) + ", "
+                + javaString(staticKind(descriptor)) + ", " + value;
+            if (containsFunction(descriptor)) {
+                args += ", " + javaString(descriptor.canonicalSpecText());
+            }
+            return method + "(" + args + ")";
         }
 
         /** Whether one descriptor carries a function position (recursively). */

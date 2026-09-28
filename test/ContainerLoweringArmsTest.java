@@ -135,15 +135,18 @@ import java.util.Set;
  *       array for-of raises E6005 {@code CONSTRUCT_UNLOWERED} as a hard
  *       failure with the exact {@link LoweringFailureDetail} (and the
  *       same hard failure for class-typed literals, class/member access,
- *       and bytes {@code .length}); the module member access arm is the
+ *       and the bytes {@code .length} arm's receiver); the module member
+ *       access arm is the
  *       value position of the one import-member read production
  *       (ISSUE-0659) — with the resolved import fact installed and a
  *       declaration matching the closed catalog row it produces the
  *       realized {@code EXPORT_READ}, while a declaration diverging from
  *       the catalog row's declared descriptor fails closed with the
  *       descriptor-equality guard; a
- *       bytes/error descriptor position raises E6005
- *       {@code DESCRIPTOR_UNREPRESENTABLE} with the exact detail;</li>
+ *       {@code Type.Error} descriptor position raises E6005
+ *       {@code DESCRIPTOR_UNREPRESENTABLE} with the exact detail (the bytes
+ *       element position lowers: its descriptor is representable and the
+ *       bytes construct is production-covered);</li>
  *   <li>the combined dependency step — an array literal with
  *       side-effecting elements and a table literal with duplicate keys
  *       lowered to their validated unit and executed through
@@ -1636,8 +1639,11 @@ public class ContainerLoweringArmsTest {
             }
         }
 
-        // (e) .length on bytes (ISSUE-0158) — a synthetic checked fact, since
-        // the checker has no bytes source spelling yet.
+        // (e) .length on bytes (ISSUE-0626 retargeted this pin): the bytes
+        // .length arm is the landed ARRAY_LENGTH read over the byte receiver,
+        // so the synthetic access no longer fails closed for bytes — its only
+        // remaining defect is the synthetic receiver's own binding-load arm
+        // (the fixture carries no binding fact), never a bytes-owned guard.
         {
             IdentifierExpr bytesObject = new IdentifierExpr(
                 new Span(SOURCE_ID, 1, 1, 1, 2), "b");
@@ -1653,8 +1659,16 @@ public class ContainerLoweringArmsTest {
             } catch (SemanticLowerer.ConstructUnlowered unlowered) {
                 defect = unlowered;
             }
-            check(defect != null, "the bytes .length arm raises ConstructUnlowered");
-            checkConstructDetail("bytes .length", defect, "ISSUE-0158");
+            check(defect == null
+                    || !defect.getMessage().contains("bytes"),
+                "the bytes .length arm is admitted (its receiver's binding-load arm is "
+                    + "the synthetic fixture's only defect): "
+                    + (defect == null ? "lowered" : defect.getMessage()));
+            check(defect != null
+                    && defect.getMessage().contains("identifier 'b' is not a load of an "
+                        + "enclosing for-of loop binding"),
+                "the bytes .length arm proceeds to the receiver's binding-load arm: "
+                    + (defect == null ? "<lowered>" : defect.getMessage()));
         }
     }
 
@@ -1665,12 +1679,10 @@ public class ContainerLoweringArmsTest {
     static void testDescriptorNegatives() {
         System.out.println("-- Descriptor negatives: DESCRIPTOR_UNREPRESENTABLE --");
 
-        // (a) An array of bytes at the element-descriptor position. The
-        // bytes element descriptor IS representable since the ISSUE-0158
-        // schema lift (RuntimeDescriptor.Bytes), but bytes VALUE semantics
-        // stay backend-owned: the shared container pipeline excludes the
-        // position fail-closed as ConstructUnlowered (never an invented
-        // element check, never a crash).
+        // (a) An array of bytes at the element-descriptor position (ISSUE-0626
+        // retargeted this pin): the bytes element descriptor is representable
+        // and the shared container pipeline emits the ARRAY_NEW with it — the
+        // position is no longer excluded.
         {
             Span span = new Span(SOURCE_ID, 1, 1, 1, 5);
             ArrayLiteralExpr literal = new ArrayLiteralExpr(span, List.of());
@@ -1684,14 +1696,10 @@ public class ContainerLoweringArmsTest {
             } catch (SemanticLowerer.ConstructUnlowered raised) {
                 defect = raised;
             }
-            check(defect != null,
-                "the bytes element position raises ConstructUnlowered (the shared "
-                    + "container pipeline's bytes exclusion, never an invented "
-                    + "descriptor)");
-            check(defect != null && defect.getMessage().contains("ISSUE-0158")
-                    && defect.getMessage().contains("backend-owned"),
-                "the bytes exclusion defect names the backend-owned ISSUE-0158 value "
-                    + "semantics: " + (defect == null ? "<none>" : defect.getMessage()));
+            check(defect == null,
+                "the bytes element position lowers through the shared container "
+                    + "pipeline (the bytes descriptor is representable): "
+                    + (defect == null ? "lowered" : defect.getMessage()));
         }
 
         // (b) Type.Error at the element-descriptor position (same projection).

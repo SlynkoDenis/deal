@@ -472,9 +472,8 @@ import java.util.Set;
  * {@link ContainerPayloadDescriptors}; a {@code Type.Error} derivation
  * converts at the same seam to E6005
  * {@code DESCRIPTOR_UNREPRESENTABLE} — never an invented descriptor,
- * never a crash — and a bytes-bearing container element position stays
- * the container pipeline's fail-closed exclusion (ISSUE-0158 bytes value
- * semantics are backend-owned).</p>
+ * never a crash — and a bytes-bearing container element position derives
+ * its descriptor through the same bridge (the bytes descriptor member).</p>
  *
  * <p><b>The binding-core child (ISSUE-0444).</b> {@link
  * #lowerModuleBindingCore} drives the same session in binding-core mode:

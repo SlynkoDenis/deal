@@ -47,7 +47,9 @@ import java.util.Objects;
  * DEAL_V1_2_INT32}, {@code irVersion deal.semantic-ir/1}, the module, and
  * the origin — the same pattern as {@code CanonicalTypeText.Defect} →
  * {@code INDEX_INTERNAL_ERROR_SENTINEL} (parent D11).
- * {@code BYTE_ELEMENT_ASSIGNMENT} stays a reserved boundary name.</p>
+ * the bytes descriptor is a first-class member of the table (its boundary
+ * projection is the kind check; the two C FFI crossings stay reserved
+ * boundary names).</p>
  *
  * <p><b>Canonical text (D2):</b> the service's canonical spec text is
  * exactly {@link RuntimeDescriptor#canonicalSpecText()} — the

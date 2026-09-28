@@ -880,15 +880,12 @@ public final class LuaSemanticEmitter {
          * check is emitted unchanged.
          */
         static String bcheckArgs(RuntimeDescriptor descriptor, String value) {
-            // The canonical spec text is always the trailing argument: the
-            // function row compares a carrier's canonical signature with
-            // it, and the array element projection (E8003) spells its
-            // expected element text from it (the semantic oracle's closed
-            // canonical spelling), never from the prelude's internal
-            // array(...) dialect.
-            return luaString(descriptorText(descriptor)) + ", "
-                + luaString(staticKind(descriptor)) + ", " + value + ", "
-                + luaString(descriptor.canonicalSpecText());
+            String args = luaString(descriptorText(descriptor)) + ", "
+                + luaString(staticKind(descriptor)) + ", " + value;
+            if (containsFunction(descriptor)) {
+                args += ", " + luaString(descriptor.canonicalSpecText());
+            }
+            return args;
         }
 
         /** Whether one descriptor carries a function position (recursively). */

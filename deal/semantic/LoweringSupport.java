@@ -420,16 +420,17 @@ public final class LoweringSupport {
          *  called through the iteration binding). */
         boolean functionContainer;
         /** The ISSUE-0239 container trigger: a for-of iterable whose
-         *  checked type carries bytes (backend-owned value semantics). */
+         *  checked type carries bytes. */
         boolean bytesInContainer;
 
         /** The ISSUE-0239 {@code CONTAINERS_AND_STRINGS} trigger: any
          *  walked expression whose checked type carries bytes —
          *  {@code bytes(...)} calls, bytes {@code .length}/index
          *  positions, and bytes-typed values anywhere in the checked
-         *  source (bytes value semantics are backend-owned, ISSUE-0158;
-         *  a bytes-bearing value shape cannot produce a shared container
-         *  op, so the position claims the owning capability). */
+         *  source (the position claims the owning capability; the
+         *  plan-time marker additionally drives the retained route's
+         *  bytesBearing row, while the production path lowers the bytes
+         *  construct through the shared bytes surface, K6). */
         boolean bytesValue;
 
         /** The ISSUE-0239 {@code CALLS} trigger: a call of a
@@ -718,13 +719,13 @@ public final class LoweringSupport {
     private static void walkExpression(ExpressionNode expression, CheckedModuleInput module,
                                        ModuleScan scan, SymbolTable checkerScope)
             throws FactDefect {
-        // The ISSUE-0239 CONTAINERS_AND_STRINGS bytes arm (ISSUE-0158
-        // boundary): a walked expression whose checked type carries bytes
-        // — bytes(...) calls, bytes .length/index positions, and
-        // bytes-typed values anywhere in the checked source — claims the
-        // owning capability at the value position (bytes value semantics
-        // are backend-owned; no shared container op exists for them, and
-        // an over-claim only forces LEGACY, never E6005).
+        // The ISSUE-0239 CONTAINERS_AND_STRINGS bytes arm: a walked
+        // expression whose checked type carries bytes — bytes(...) calls,
+        // bytes .length/index positions, and bytes-typed values anywhere in
+        // the checked source — claims the owning capability at the value
+        // position (the claim also sets the manifest's bytesBearing row the
+        // retained route's rule 2b consumes; the production path lowers the
+        // bytes construct through the shared bytes surface, K6).
         if (Types.containsBytes(checkedType(module, expression))) {
             scan.bytesValue = true;
         }

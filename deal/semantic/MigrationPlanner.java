@@ -323,11 +323,12 @@ public final class MigrationPlanner {
             return ModuleRoute.LEGACY; // rule 2: never shared in any purpose
         }
         if (manifest.bytesBearing()) {
-            // Rule 2b (ISSUE-0574): bytes value semantics are
-            // backend-owned (ISSUE-0158) — a bytes-bearing module stays
-            // on the retained route in every purpose, before the purpose
-            // switch so the CONTAINERS_AND_STRINGS promotion never flips
-            // it SHARED. Deterministic, plan-time-only, never an error.
+            // Rule 2b (ISSUE-0574): a bytes-bearing module stays on the
+            // retained route in every purpose, before the purpose switch so
+            // the CONTAINERS_AND_STRINGS promotion never flips it SHARED.
+            // The production path never consults the route plan (C3); the
+            // marker is the retained route report's own subject.
+            // Deterministic, plan-time-only, never an error.
             return ModuleRoute.LEGACY;
         }
         switch (invocation.purpose()) {

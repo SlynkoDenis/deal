@@ -1040,6 +1040,9 @@ public final class JvmRuntime {
             if (v instanceof Array array) {
                 String inner = desc.substring(6, desc.length() - 1);
                 String innerCanonical = innerCanon(canon, "[", "]");
+                if (innerCanonical == null) {
+                    innerCanonical = canonicalDesc(inner);
+                }
                 for (int i = 0; i < array.length; i++) {
                     Object elem = i < array.elements.size() ? array.elements.get(i)
                         : MISSING;
@@ -2755,6 +2758,22 @@ public final class JvmRuntime {
             return MISSING;
         }
         return elem;
+    }
+
+    /**
+     * The closed canonical spelling of one runtime-internal descriptor text
+     * (the semantic oracle's {@code canonicalSpecText} over the same
+     * descriptor): a boundary check emitted without the canonical trailer
+     * still projects the canonical element text in its E8003 row.
+     */
+    static String canonicalDesc(String desc) {
+        if (desc.startsWith("array(") && desc.endsWith(")")) {
+            return "[" + canonicalDesc(desc.substring(6, desc.length() - 1)) + "]";
+        }
+        if (desc.startsWith("nullable(") && desc.endsWith(")")) {
+            return "?" + canonicalDesc(desc.substring(9, desc.length() - 1));
+        }
+        return desc;
     }
 
     /** The ARRAY_ELEMENT_ASSIGNMENT/ARRAY_ELEMENT_DELETE cells. */

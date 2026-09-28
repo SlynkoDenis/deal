@@ -856,9 +856,9 @@ public final class BoundaryExecutor {
                     ? null : ActualKind.canonicalToken(view.kind(), view.classId());
             case RuntimeDescriptor.Bytes ignored -> throw new Defect(
                 "a bytes descriptor reached the closed JSON-serializability projection: "
-                    + "the closed boundary-assignment table has no bytes cell (bytes are "
-                    + "non-jsonable and bytes boundaries are backend-owned, ISSUE-0158) — "
-                    + "never a BOUNDARY op");
+                    + "the closed boundary-assignment table has no bytes-descriptor JSON "
+                    + "cell (bytes are non-jsonable and a bytes-typed @jsonable field is "
+                    + "the checker's E4007 rejection) — never a BOUNDARY op");
             case RuntimeDescriptor.Func ignored ->
                 ActualKind.canonicalToken(view.kind(), view.classId());
         };
