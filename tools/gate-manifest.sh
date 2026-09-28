@@ -1359,4 +1359,28 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # and the untagged-carrier residue executed on the oracle and both
   # production artifacts), with the closed-set guard unchanged.
   'fg|=== Running Dynamic Dispatch Battery Tests (ISSUE-0682) ===|java -ea -cp build deal.test.DynamicDispatchBatteryTest'
+  # ISSUE-0700 (the Lua transfer protocol and the loop-target label battery;
+  # the task's rule 1 and rule 2 of dispatched-corpus-production-realization
+  # R6 and the transfer and loop-target-label contract): the four named
+  # runtime-ok fixtures (nested-break-in-try, nested-continue-in-try,
+  # nested-try-break-continue, for-of-break-continue) compile through the
+  # release-owned production invocation, their artifacts load under real
+  # luajit and execute every exported zero-arity function with the pinned
+  # outcomes; the structural label check proves every goto's label is
+  # defined in the same emitted Lua function and every targeted loop op
+  # defines the label its transfers use (with the two mechanism probes —
+  # the protected-level jump and the missing FOR_EACH exit label — rejected
+  # by the same check, so each correction is load-bearing, and the
+  # transfer-protocol probes for the target loop inside the same protected
+  # body, the loop between two protected bodies inside a function factory,
+  # and the async body factory); the
+  # three-consumer callback matrix (the semantic oracle, the shared LuaJIT
+  # artifact under real luajit, and the shared JVM artifact under
+  # javac --release 25 -proc:none plus java) runs every fixture's test
+  # function event-for-event with the pinned result; and the invariant holds
+  # over the control-flow, control-flow-errors, and error-handling corpus
+  # families. The zero-arg Lua callback driver of SemanticDifferentialHarness
+  # is repaired in the same change (the empty argument list emitted a
+  # dangling separator).
+  'fg|=== Running Lua Transfer Protocol / Loop-Target Label Tests (ISSUE-0700) ===|java -ea -cp build deal.test.LoopTransferLabelEmissionTest'
 )

@@ -79,7 +79,16 @@ import java.util.Objects;
  *       continue landing is before the update; block code follows the
  *       {@code StructuredBodyTable} membership; catches are limited to
  *       DEAL errors (an infrastructure failure is never caught or
- *       reified).</li>
+ *       reified); every loop form a {@code break}/{@code continue}
+ *       targets emits the labels its transfers use (the {@code FOR_EACH}
+ *       exit label at the op's own {@code do … end} level, before its
+ *       SUCCESS event); and a transfer inside a protected
+ *       ({@code TRY_CATCH}) body crosses each enclosing protected
+ *       boundary as the re-raised marker, so its jump — to a loop exit, a
+ *       loop continue, or the return trampoline — is emitted only at the
+ *       level where the target label is defined in the same emitted Lua
+ *       function and no emitted {@code goto} references a label of
+ *       another function.</li>
  * </ul>
  *
  * <p>The artifact publishes its execution report on the dedicated trace
@@ -1815,6 +1824,38 @@ public final class LuaSemanticEmitter {
                 .append(", {}, __rawArgAtom(")
                 .append(luaString(staticKind(resultDescriptor))).append(", ")
                 .append(valueExpr).append("), nil)\n");
+        }
+
+        /**
+         * Whether a transfer's target label is defined in the emitted Lua
+         * function at the given op's emission level. The walk from the
+         * emitting op's block outward reaches the target loop before any
+         * TRY_CATCH ancestor exactly when the target's labels are emitted in
+         * the same function: the closer targets are at the current level and
+         * the farther ones lie outside the nearest
+         * {@code pcall(function() … end)} boundary (a different function). A
+         * target the walk never reaches is not an enclosing structure — it
+         * lives inside a protected body of this level — and is equally
+         * invisible. A RETURN's trampoline label lives at the enclosing
+         * function's top level, outside every protected body, so it is
+         * visible exactly when the level carries no enclosing boundary (the
+         * {@code null} target).
+         */
+        private boolean transferTargetVisible(SemanticOp emittingOp,
+                                              SemanticOp targetLoop) {
+            if (targetLoop == null) {
+                return tryDepth == 0;
+            }
+            for (SemanticOp ancestor
+                    : structureAncestors(opBlock.get(emittingOp.opId()))) {
+                if (ancestor.kind() == SemanticOpKind.TRY_CATCH) {
+                    return false;
+                }
+                if (ancestor.opId().equals(targetLoop.opId())) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** Emits the transfer closures of the ancestors down to (and including)
@@ -5861,6 +5902,7 @@ public final class LuaSemanticEmitter {
         private void emitForEach(SemanticOp op) {
             KindPayload.ForEachPayload payload = (KindPayload.ForEachPayload) op.payload();
             emitStart(op);
+            String exit = loopExit(op.opId());
             switch (payload.mode()) {
                 case ARRAY_VALUES -> {
                     String iterable = slot(payload.iterable());
@@ -5895,6 +5937,14 @@ public final class LuaSemanticEmitter {
                     emitLabeledBlock(payload.body());
                     out.append("    ::").append(cont).append("::\n");
                     out.append("  end\n");
+                    // The loop op's exit label (the FOR_EACH form a
+                    // BREAK/CONTINUE targets defines both labels its body's
+                    // transfers use): the no-protected-body transfer arm
+                    // emits its `goto X<id>` at this op's own emission level,
+                    // which is inside this `do … end` block, and the loop
+                    // op's SUCCESS event stays after the label so a break
+                    // exit emits it exactly once (the oracle's loop wrapper).
+                    out.append("  ::").append(exit).append("::\n");
                     out.append("end\n");
                 }
                 case STRING_SCALARS -> {
@@ -5909,6 +5959,7 @@ public final class LuaSemanticEmitter {
                     emitLabeledBlock(payload.body());
                     out.append("    ::").append(cont).append("::\n");
                     out.append("  end\n");
+                    out.append("  ::").append(exit).append("::\n");
                     out.append("end\n");
                 }
             }
@@ -5979,6 +6030,14 @@ public final class LuaSemanticEmitter {
          * {@code errorVar} names the pcall result the dispatch reads —
          * {@code __resT} for the try block, {@code __terrT} for the catch
          * block (its own pcall).
+         *
+         * <p>A transfer is applied at the level where its target label is
+         * defined in the same emitted Lua function: a target inside the
+         * level's own function takes the emitted jump, while a target
+         * outside the nearest enclosing protected body crosses that body as
+         * the re-raised marker (the next enclosing dispatch owns the jump) —
+         * no emitted jump may reference a label outside its emitted
+         * function.</p>
          */
         private void emitTransferDispatch(SemanticOp tryOp, BlockId block, String pad,
                                           String errorVar) {
@@ -5994,40 +6053,49 @@ public final class LuaSemanticEmitter {
                     case BREAK -> {
                         KindPayload.BreakPayload breakPayload =
                             (KindPayload.BreakPayload) transfer.payload();
+                        SemanticOp targetLoop = opsById.get(breakPayload.loopId());
+                        boolean visible = transferTargetVisible(tryOp, targetLoop);
                         out.append(pad).append("  if ").append(errorVar)
                             .append(".t == \"break\" and ").append(errorVar)
                             .append(".id == ")
                             .append(breakPayload.loopId().id()).append(" then\n");
                         emitPlainSuccess(tryOp);
-                        emitTransferClosures(tryOp, opsById.get(breakPayload.loopId()),
-                            false);
-                        out.append(pad).append("    goto ")
-                            .append(loopExit(breakPayload.loopId())).append("\n");
+                        emitTransferClosures(tryOp, targetLoop, !visible);
+                        out.append(pad).append("    ").append(visible
+                            ? "goto " + loopExit(breakPayload.loopId())
+                            : "error(" + errorVar + ", 0)").append("\n");
                         out.append(pad).append("  end\n");
                     }
                     case CONTINUE -> {
                         KindPayload.ContinuePayload continuePayload =
                             (KindPayload.ContinuePayload) transfer.payload();
+                        SemanticOp targetLoop = opsById.get(continuePayload.loopId());
+                        boolean visible = transferTargetVisible(tryOp, targetLoop);
                         out.append(pad)
                             .append("  if ").append(errorVar)
                             .append(".t == \"continue\" and ").append(errorVar)
                             .append(".id == ")
                             .append(continuePayload.loopId().id()).append(" then\n");
                         emitPlainSuccess(tryOp);
-                        emitTransferClosures(tryOp, opsById.get(continuePayload.loopId()),
-                            false);
-                        out.append(pad).append("    goto ")
-                            .append(loopCont(continuePayload.loopId())).append("\n");
+                        emitTransferClosures(tryOp, targetLoop, !visible);
+                        out.append(pad).append("    ").append(visible
+                            ? "goto " + loopCont(continuePayload.loopId())
+                            : "error(" + errorVar + ", 0)").append("\n");
                         out.append(pad).append("  end\n");
                     }
                     case RETURN -> {
+                        // The return trampoline label lives at the enclosing
+                        // function's top level: it is visible here exactly
+                        // when this level is not inside a protected body.
+                        boolean visible = transferTargetVisible(tryOp, null);
                         out.append(pad)
                             .append("  if ").append(errorVar)
                             .append(".t == \"return\" then\n");
                         emitPlainSuccess(tryOp);
-                        emitTransferClosures(tryOp, null, false);
-                        out.append(pad).append("    return ").append(errorVar)
-                            .append(".v\n");
+                        emitTransferClosures(tryOp, null, !visible);
+                        out.append(pad).append("    ").append(visible
+                            ? "return " + errorVar + ".v"
+                            : "error(" + errorVar + ", 0)").append("\n");
                         out.append(pad).append("  end\n");
                     }
                     default -> {
@@ -6129,7 +6197,7 @@ public final class LuaSemanticEmitter {
             out.append("__rvcT = __chkB\n");
             emitBoundarySuccess(boundary, "__rvcT", boundaryPayload.descriptor());
             emitPlainSuccess(op);
-            if (tryDepth > 0) {
+            if (!transferTargetVisible(op, null)) {
                 emitTransferClosures(op, null, true);
                 out.append("error({__tr = true, t = \"return\", v = __rvcT}, 0)\n");
             } else {
@@ -6155,13 +6223,14 @@ public final class LuaSemanticEmitter {
             KindPayload.BreakPayload payload = (KindPayload.BreakPayload) op.payload();
             emitStart(op);
             emitPlainSuccess(op);
-            if (tryDepth > 0) {
-                emitTransferClosures(op, opsById.get(payload.loopId()), true);
+            SemanticOp targetLoop = opsById.get(payload.loopId());
+            if (transferTargetVisible(op, targetLoop)) {
+                emitTransferClosures(op, targetLoop, false);
+                out.append("goto ").append(loopExit(payload.loopId())).append("\n");
+            } else {
+                emitTransferClosures(op, targetLoop, true);
                 out.append("error({__tr = true, t = \"break\", id = ")
                     .append(payload.loopId().id()).append("}, 0)\n");
-            } else {
-                emitTransferClosures(op, opsById.get(payload.loopId()), false);
-                out.append("goto ").append(loopExit(payload.loopId())).append("\n");
             }
         }
 
@@ -6169,13 +6238,14 @@ public final class LuaSemanticEmitter {
             KindPayload.ContinuePayload payload = (KindPayload.ContinuePayload) op.payload();
             emitStart(op);
             emitPlainSuccess(op);
-            if (tryDepth > 0) {
-                emitTransferClosures(op, opsById.get(payload.loopId()), true);
+            SemanticOp targetLoop = opsById.get(payload.loopId());
+            if (transferTargetVisible(op, targetLoop)) {
+                emitTransferClosures(op, targetLoop, false);
+                out.append("goto ").append(loopCont(payload.loopId())).append("\n");
+            } else {
+                emitTransferClosures(op, targetLoop, true);
                 out.append("error({__tr = true, t = \"continue\", id = ")
                     .append(payload.loopId().id()).append("}, 0)\n");
-            } else {
-                emitTransferClosures(op, opsById.get(payload.loopId()), false);
-                out.append("goto ").append(loopCont(payload.loopId())).append("\n");
             }
         }
 

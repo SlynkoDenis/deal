@@ -681,8 +681,8 @@ public final class SemanticDifferentialHarness {
             Files.writeString(driver,
                 "dofile(" + quoteLua(artifact.toAbsolutePath().toString()) + ")\n"
                     + "local __ok, __res = pcall(__callbacks["
-                    + quoteLua(callbackEntryName(callback.opId())) + "], "
-                    + argsText + ")\n"
+                    + quoteLua(callbackEntryName(callback.opId())) + "]"
+                    + (args.isEmpty() ? "" : ", " + argsText) + ")\n"
                     + "if __ok then\n"
                     + "  io.stderr:write(\"R|success|\"..__callbacks.__hostAtom(__res)"
                     + "..\"\\n\")\n"
