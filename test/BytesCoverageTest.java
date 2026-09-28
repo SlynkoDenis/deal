@@ -109,6 +109,12 @@ import java.util.Set;
  *       host module), and the shared JVM production artifact (a deployed
  *       host class over the emitted {@code $DealRt} host ABI), each
  *       running the fixture's own assertions.</li>
+ *   <li><b>The async-entry fixture.</b> The async-closure fixture's own
+ *       test export executes on the oracle's async-entry invocation, the
+ *       shared three-consumer async matrix (the trace parity of the oracle
+ *       and the two shared artifacts), and both production project
+ *       artifacts' async dispatch entries, running the fixture's own
+ *       TEST_FAIL battery and its bytes-typed dynamic dispatch.</li>
  * </ol>
  */
 public class BytesCoverageTest {
@@ -272,7 +278,18 @@ public class BytesCoverageTest {
      * other fixture (the generic drive asserts it).
      */
     private static final List<String> NESTED_DECLARATION_FIXTURES = List.of(
-        "bytes-boundary-order", "bytes-async-closure");
+        "bytes-boundary-order");
+
+    /**
+     * The async-entry fixtures: their own test export is async, so the
+     * generic sync-entry drive cannot call it. Each is driven through the
+     * oracle's async-entry invocation, the shared three-consumer async
+     * matrix (trace parity), and both production project artifacts' async
+     * dispatch entries — the fixture's own TEST_FAIL assertions and its
+     * bytes-typed dynamic dispatch execute on every consumer.
+     */
+    private static final Map<String, String> ASYNC_ENTRY_FIXTURES = Map.of(
+        "bytes-async-closure", "test_bytes_async_closure");
 
     /**
      * The fixture whose closure imports the host module
@@ -291,6 +308,10 @@ public class BytesCoverageTest {
         all.addAll(RUNTIME_OK);
         for (String nested : NESTED_DECLARATION_FIXTURES) {
             all.add(new BytesFixture(BYTES_DIR, nested, "main", "null", List.of(), null,
+                null, 0, 0));
+        }
+        for (String async : ASYNC_ENTRY_FIXTURES.keySet()) {
+            all.add(new BytesFixture(BYTES_DIR, async, "main", "null", List.of(), null,
                 null, 0, 0));
         }
         all.add(new BytesFixture(BYTES_DIR, "bytes_module_lib", "echo", "bytes",
@@ -623,6 +644,13 @@ public class BytesCoverageTest {
                 // The async-export host fixture: driven with its own
                 // bytes-aware host implementation on every consumer.
                 driveHostFixture(fixture);
+                continue;
+            }
+            if (ASYNC_ENTRY_FIXTURES.containsKey(fixture.relativePath())) {
+                // The async-export fixture: driven through the async-entry
+                // surface of every consumer.
+                driveAsyncFixture(fixture,
+                    ASYNC_ENTRY_FIXTURES.get(fixture.relativePath()));
                 continue;
             }
             Compiled compiled = compileFixture(fixture);
@@ -1192,6 +1220,162 @@ public class BytesCoverageTest {
             hostJvmProduction(drive, spec);
         } finally {
             deleteRecursively(compiled.root());
+        }
+    }
+
+    /**
+     * The async-entry fixture drive: the fixture's own async test export runs
+     * through the oracle's async-entry invocation, the shared three-consumer
+     * async matrix (the trace parity of the oracle and the two shared
+     * artifacts), and both production project artifacts' async dispatch
+     * entries, so the fixture's own TEST_FAIL battery and its bytes-typed
+     * dynamic dispatch execute on every consumer.
+     */
+    private static void driveAsyncFixture(BytesFixture spec, String export)
+            throws Exception {
+        Compiled compiled = compileFixture(spec);
+        if (compiled == null) {
+            return;
+        }
+        try {
+            Drive drive = lower(compiled, spec);
+            if (drive == null) {
+                return;
+            }
+            SemanticRuntimeModel.ConsumerRun oracle = SemanticOracle.invokeAsyncEntry(
+                drive.project(), drive.tables(), null, drive.fixtureModule(), export,
+                List.of());
+            check(oracle.terminal() instanceof SemanticRuntimeModel.Terminal.Success
+                    success && "int:0".equals(success.resultAtom()),
+                spec.what() + ": the oracle runs the async fixture's own test export "
+                    + "to the pinned success: " + oracle.terminal());
+            Path workspace = Files.createTempDirectory("bytes-async-");
+            SemanticDifferentialHarness.Verdict verdict;
+            try {
+                verdict = SemanticDifferentialHarness.runAsyncEntry(drive.project(),
+                    drive.tables(), export, List.of(),
+                    SemanticDifferentialHarness.Expectation.success(spec.what(),
+                        List.of(), "int:0"),
+                    workspace, null);
+            } finally {
+                deleteRecursively(workspace);
+            }
+            checkEq(3, verdict.runs().size(), spec.what() + ": the async drive produced "
+                + "the three consumers: " + verdict.failures());
+            check(verdict.pass(), spec.what() + ": the three-consumer async "
+                + "differential verdict passes (the fixture's own TEST_FAIL battery "
+                + "and its dispatch traces event-for-event): " + verdict.failures());
+            asyncLuaProduction(drive, spec, export);
+            asyncJvmProduction(drive, spec, export);
+        } finally {
+            deleteRecursively(compiled.root());
+        }
+    }
+
+    /** The shared LuaJIT production artifact of the async fixture, async-driven. */
+    private static void asyncLuaProduction(Drive drive, BytesFixture spec, String export)
+            throws Exception {
+        Path workspace = Files.createTempDirectory("bytes-async-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
+                drive.project(), drive.tables(), drive.registries(),
+                drive.compiled().surface()), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, ("""
+                local chunk = dofile("%s")
+                local ok, err = __dealMain()
+                if not ok then
+                  print("ERR:INIT|" .. tostring(err))
+                  os.exit(0)
+                end
+                local ok2, res = pcall(__asyncEntries["%s#%s"], "-", true)
+                if ok2 then
+                  print("OK:" .. tostring(res))
+                elseif type(res) == "table" and res.__d then
+                  print("ERR:ENTRY|" .. res.code .. "|" .. tostring(res.m))
+                else
+                  print("ERR:ENTRY|" .. tostring(res))
+                end
+                """).formatted(artifact.toAbsolutePath().toString(),
+                    drive.fixtureModule().path(), export), StandardCharsets.UTF_8);
+            String stdout = runLua(workspace, probe, true);
+            check(stdout.contains("OK:0") && !stdout.contains("ERR:"), spec.what()
+                + ": the LuaJIT production artifact runs the async fixture's own "
+                + "test export to the pinned outcome: " + stdout);
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The shared JVM production artifact of the async fixture, async-driven. */
+    private static void asyncJvmProduction(Drive drive, BytesFixture spec, String export)
+            throws Exception {
+        Path workspace = Files.createTempDirectory("bytes-async-jvm");
+        try {
+            String className = JvmBackend.classNameFor(
+                drive.project().entryModule().path());
+            JvmSemanticEmitter.EmissionResult emission =
+                JvmSemanticEmitter.emitProductionProject(drive.project(),
+                    drive.tables(), drive.registries(), className,
+                    drive.compiled().surface());
+            Files.writeString(workspace.resolve(className + ".java"), emission.source(),
+                StandardCharsets.UTF_8);
+            long entryId = -1;
+            for (SemanticOp op : drive.unit().ops()) {
+                if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                        && op.payload() instanceof KindPayload.ExternalEntryPayload payload
+                        && payload.async() && export.equals(payload.exportName())) {
+                    entryId = op.opId().id();
+                }
+            }
+            check(entryId >= 0, spec.what() + ": the fixture module records its async "
+                + "EXTERNAL_ENTRY");
+            if (entryId < 0) {
+                return;
+            }
+            Files.writeString(workspace.resolve("Probe.java"), ("""
+                final class Probe {
+                  public static void main(String[] args) {
+                    try {
+                      %s.dealMain();
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError e) {
+                      System.out.println("ERR:INIT|" + e.code + "|" + e.msg);
+                      return;
+                    }
+                    try {
+                      Object r = %s.ae%d("-", true, new Object[]{});
+                      System.out.println("OK:" + r);
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError e) {
+                      System.out.println("ERR:ENTRY|" + e.code + "|" + e.msg);
+                    }
+                  }
+                }
+                """).formatted(className, className, entryId), StandardCharsets.UTF_8);
+            Path classes = workspace.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            ProcessBuilder javac = new ProcessBuilder("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                className + ".java", "Probe.java");
+            javac.directory(workspace.toFile());
+            javac.redirectErrorStream(true);
+            Process compile = javac.start();
+            String compileOut = new String(compile.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+            int compileExit = compile.waitFor();
+            checkEq(0, compileExit, spec.what() + ": the JVM async fixture compiles "
+                + "with the emitted production artifact: " + compileOut);
+            if (compileExit != 0) {
+                return;
+            }
+            String stdout = runJava(classpath, classes, "Probe");
+            check(stdout.contains("OK:0") && !stdout.contains("ERR:"), spec.what()
+                + ": the JVM production artifact runs the async fixture's own test "
+                + "export to the pinned outcome: " + stdout);
+        } finally {
+            deleteRecursively(workspace);
         }
     }
 
