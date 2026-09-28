@@ -61,11 +61,12 @@ import java.util.Set;
  *
  * <ol>
  *   <li><b>The corpus pins.</b> Every {@code backend-runtime/bytes} sidecar
- *       keeps its pinned outcome: the twelve failure rows with their code,
+ *       keeps its pinned outcome: the fourteen failure rows with their code,
  *       message, line, and column (the negative allocation length, the
  *       index-below-zero read, the read at {@code i == b.length}, the write
  *       below zero, the write at {@code i == b.length}, the write range,
- *       and the bytes-bearing signature rows), and the runtime-ok fixtures
+ *       the bytes-bearing signature rows, and the two
+ *       {@code source-location/bytes-*} pins), and the runtime-ok fixtures
  *       their zero exit and empty streams.</li>
  *   <li><b>The corpus drive through the production entry.</b> Each
  *       driveable corpus fixture (classification headers stripped, the
@@ -94,9 +95,10 @@ import java.util.Set;
  *   <li><b>Zero bytes CONSTRUCT_UNLOWERED.</b> No checker-valid bytes
  *       fixture fails the lowering with a bytes-owned construct guard; the
  *       two fixtures whose closure additionally carries a nested function
- *       declaration (a sibling construct's arm) and the host-module fixture
- *       are recorded with their own blockers and their bytes constructs
- *       still lower.</li>
+ *       declaration (a sibling construct's arm), the host-module fixture
+ *       (whose declaration module the drive materializes, so its closure
+ *       lowers here too), and the emitter-budget and divergence family are
+ *       recorded with their own verified sibling reasons.</li>
  * </ol>
  */
 public class BytesCoverageTest {
@@ -125,31 +127,32 @@ public class BytesCoverageTest {
 
     private static final Path CORPUS = Path.of("test", "conformance");
     private static final String BYTES_DIR = "backend-runtime/bytes";
+    private static final String SOURCE_LOCATION_DIR = "backend-runtime/source-location";
 
     // =========================================================================
     // The bytes corpus table
     // =========================================================================
 
     /**
-     * One driveable bytes corpus fixture: its relative path, the export the
-     * drive's entry calls, the export's declared return type, its
-     * companions, and the pinned failure row ({@code null} for a
-     * runtime-ok fixture).
+     * One driveable bytes corpus fixture: its corpus directory, its
+     * relative path, the export the drive's entry calls, the export's
+     * declared return type, its companions, and the pinned failure row
+     * ({@code null} for a runtime-ok fixture).
      */
-    private record BytesFixture(String relativePath, String export, String resultType,
-                                List<String> companions, String code, String message,
-                                int line, int column) {
+    private record BytesFixture(String directory, String relativePath, String export,
+                                String resultType, List<String> companions, String code,
+                                String message, int line, int column) {
 
         boolean runtimeOk() {
             return code == null;
         }
 
         String fixtureFile() {
-            return BYTES_DIR + "/" + relativePath + ".deal";
+            return directory + "/" + relativePath + ".deal";
         }
 
         String sidecarFile() {
-            return BYTES_DIR + "/" + relativePath + ".expect.json";
+            return directory + "/" + relativePath + ".expect.json";
         }
 
         String what() {
@@ -159,12 +162,26 @@ public class BytesCoverageTest {
 
     private static BytesFixture ok(String path, String export, String type,
                                    String... companions) {
-        return new BytesFixture(path, export, type, List.of(companions), null, null, 0, 0);
+        return new BytesFixture(BYTES_DIR, path, export, type, List.of(companions), null,
+            null, 0, 0);
     }
 
     private static BytesFixture error(String path, String export, String type,
                                       String code, String message, int line, int column) {
-        return new BytesFixture(path, export, type, List.of(), code, message, line, column);
+        return new BytesFixture(BYTES_DIR, path, export, type, List.of(), code, message,
+            line, column);
+    }
+
+    /**
+     * One {@code source-location} bytes fixture: the same pinned rows with
+     * the error's own source coordinate (the acceptance's
+     * {@code source-location/bytes-*} clause).
+     */
+    private static BytesFixture sourceError(String path, String export, String type,
+                                            String code, String message, int line,
+                                            int column) {
+        return new BytesFixture(SOURCE_LOCATION_DIR, path, export, type, List.of(), code,
+            message, line, column);
     }
 
     /** The E8012/E8013 and bytes-bearing signature failure fixtures. */
@@ -197,7 +214,15 @@ public class BytesCoverageTest {
             8, 21),
         error("bytes-dynamic-nested-first-element-e8003",
             "test_bytes_dynamic_nested_first_element", "int", "E8003",
-            "array element 1 type mismatch", 10, 11));
+            "array element 1 type mismatch", 10, 11),
+        // The two source-location pins (the acceptance's
+        // source-location/bytes-* clause): the same rows at the error's own
+        // source coordinate — the indexing expression for E8012 and the
+        // assignment expression for E8013.
+        sourceError("bytes-index-bounds-source", "test_bytes_index_bounds_location",
+            "int", "E8012", "bytes index out of bounds", 9, 10),
+        sourceError("bytes-write-range-source", "test_bytes_write_range_location",
+            "null", "E8013", "bytes value out of range", 8, 3));
 
     /** The runtime-ok fixtures whose closure the drive owns. */
     private static final List<BytesFixture> RUNTIME_OK = List.of(
@@ -320,13 +345,15 @@ public class BytesCoverageTest {
         all.addAll(FAILURES);
         all.addAll(RUNTIME_OK);
         for (String blocked : NESTED_DECLARATION_FIXTURES) {
-            all.add(new BytesFixture(blocked, "main", "null", List.of(), null, null, 0, 0));
+            all.add(new BytesFixture(BYTES_DIR, blocked, "main", "null", List.of(), null,
+                null, 0, 0));
         }
-        all.add(new BytesFixture(HOST_FIXTURE, "main", "null", List.of(), null, null, 0, 0));
-        all.add(new BytesFixture("bytes_module_lib", "echo", "bytes", List.of(),
+        all.add(new BytesFixture(BYTES_DIR, HOST_FIXTURE, "main", "null", List.of(),
             null, null, 0, 0));
-        all.add(new BytesFixture("bytes-fn-xmod-lib", "makeId", "null", List.of(),
-            null, null, 0, 0));
+        all.add(new BytesFixture(BYTES_DIR, "bytes_module_lib", "echo", "bytes",
+            List.of(), null, null, 0, 0));
+        all.add(new BytesFixture(BYTES_DIR, "bytes-fn-xmod-lib", "makeId", "null",
+            List.of(), null, null, 0, 0));
         return all;
     }
 
