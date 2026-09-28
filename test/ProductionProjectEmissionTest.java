@@ -347,6 +347,30 @@ public class ProductionProjectEmissionTest {
         }
         """;
 
+    /**
+     * The still-fail-closed source: an arity-extended adapter call whose
+     * source identity is not statically fixed (a call-result
+     * REEVALUATE_THUNK source — the function-typed-value child's
+     * ISSUE-0531 residue), so the production lowering fails the module
+     * with the named E6005 CONSTRUCT_UNLOWERED rule before any emission.
+     */
+    private static final String ADAPTER_SOURCE_APP_SOURCE = """
+        export function main(): null {
+          let f: (a: int, b: int) => int = one
+          f(1, 2)
+          return null
+        }
+
+        function one(x: int): int {
+          return x
+        }
+        """;
+
+    private static Fixture adapterSourceFixture() throws Exception {
+        return compileProject(new LinkedHashMap<>(Map.of(
+                "src/app.deal", ADAPTER_SOURCE_APP_SOURCE)), Map.of());
+    }
+
     private static Fixture nestedDeclarationFixture() throws Exception {
         return compileProject(new LinkedHashMap<>(Map.of(
                 "src/app.deal", NESTED_DECLARATION_APP_SOURCE)), Map.of());
@@ -718,11 +742,38 @@ public class ProductionProjectEmissionTest {
             deleteRecursively(bytes.root());
         }
 
-        // The failing lowering: a nested function declaration (a sibling
-        // slice's construct — the CALLS family's nested-declaration arm)
-        // fails CONSTRUCT_UNLOWERED. The live root is pre-populated with a
-        // previous artifact set.
-        Fixture failing = nestedDeclarationFixture();
+        // ISSUE-0626: the nested-declaration arm is production-covered (a
+        // declaration inside a function body owns its lowering context), so
+        // the nested-declaration fixture emits its one project artifact
+        // instead of failing closed.
+        Fixture nested = nestedDeclarationFixture();
+        Path nestedOut = nested.root().resolve("out-arm");
+        try {
+            PublicationStager stager = PublicationStager.forRoot(nestedOut);
+            ProductionProjectEmission.Result result;
+            try {
+                result = emit(nested, Backend.LUAJIT, stager, false);
+                check(result.emitted(), "the nested-declaration run emits: "
+                    + result.diagnostics());
+                check(result.diagnostics().isEmpty(),
+                    "the nested declaration carries no diagnostic: "
+                        + result.diagnostics());
+                checkEq("app.lua", result.artifactRelativePath(),
+                    "the nested-declaration run stages the entry module's chunk");
+                check(stager.stagedSet().artifact("app.lua").isPresent(),
+                    "the nested-declaration run stages its one project artifact");
+            } finally {
+                stager.discard();
+            }
+        } finally {
+            deleteRecursively(nested.root());
+        }
+
+        // The failing lowering: an arity-extended adapter call whose source
+        // identity is not statically fixed (the function-typed-value
+        // child's ISSUE-0531 residue) fails CONSTRUCT_UNLOWERED. The live
+        // root is pre-populated with a previous artifact set.
+        Fixture failing = adapterSourceFixture();
         Path out = failing.root().resolve("out-arm");
         try {
             writeFileIn(out, "app.lua", "-- previous artifact\n");
@@ -743,7 +794,7 @@ public class ProductionProjectEmissionTest {
                     + result.diagnostics());
             check(result.firstDiagnostic() != null
                     && result.firstDiagnostic().message().contains("CONSTRUCT_UNLOWERED"),
-                "the nested-declaration construct is the named fail-closed rule: "
+                "the adapter-source construct is the named fail-closed rule: "
                     + result.diagnostics());
             checkEq(before, snapshotTree(out),
                 "the failing lowering leaves the previous artifact set byte-identical");
@@ -755,9 +806,8 @@ public class ProductionProjectEmissionTest {
         // realized CALL(EXTERNAL) SHARED_BODY arm — the callee unit's
         // EXTERNAL_ENTRY runs inside the one project artifact — so the
         // production run stages its one artifact over the previous set
-        // (the atomic staging property stays covered by the nested-
-        // declaration case above, whose lowering fails before any
-        // emission).
+        // (the atomic staging property stays covered by the adapter-source
+        // case above, whose lowering fails before any emission).
         Fixture sync = twoModuleFixture(SYNC_CALL_APP_SOURCE);
         Path syncOut = sync.root().resolve("out-arm");
         try {
