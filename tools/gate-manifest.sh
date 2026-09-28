@@ -1406,4 +1406,27 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # module/class on the two production artifacts) — compiles, lowers, and
   # validates, with no fixture skipped by any drive.
   'fg|=== Running Bytes Coverage and Element Contract Tests (ISSUE-0626) ===|java -ea -cp build deal.test.BytesCoverageTest'
+  # ISSUE-0701 (the closure capture resolution and the per-iteration
+  # incarnations; design source dispatched-corpus-production-realization R4
+  # item 5, R7, and the capture contract; luajit-jvm-single-lowering-
+  # production-cutover C1/C2/C10): the five named fixtures
+  # (control-flow/for-of-closure, closures/for-loop-closure-values,
+  # closures/nested-loop-closure-capture, functions/for-loop-closure,
+  # functions/for-loop-closure-array) compile through the release-owned
+  # production invocation on LuaJIT and JVM with zero E6005, publish one
+  # project artifact per target with no retained emission, and execute as
+  # their own entry module under the real toolchains with their pinned
+  # runtime-ok sidecar transcripts; each fixture's exported zero-arity probe
+  # is driven through a driver entry module that asserts its pinned value
+  # (123, 6, 22, 12, 12) through the one project lowering and the
+  # differential matrix (oracle + shared LuaJIT + shared JVM,
+  # event-for-event); every closure created inside a loop iteration captures
+  # the creation-site incarnation (the for-let per-iteration generation 1,
+  # the FOR_EACH iteration generation) and the emitted factories pass that
+  # cell and read their capture parameters; the two fail-closed capture arms
+  # (a non-dominating incarnation and a missing registration) carry the
+  # landed CAPTURE_RESOLUTION rule naming the binding, the op, and the
+  # function; the alias cell's in-place commit and the byte-identical
+  # repeated lowering/emission are asserted.
+  'fg|=== Running Closure Capture Resolution Tests (ISSUE-0701) ===|java -ea -cp build deal.test.ClosureCaptureResolutionTest'
 )

@@ -11,6 +11,7 @@ import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
 import deal.semantic.ir.BindingCellKind;
+import deal.semantic.ir.BindingGeneration;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BlockId;
 import deal.semantic.ir.BoundaryKind;
@@ -390,7 +391,76 @@ public final class LuaSemanticEmitter {
         /** Each op id → its single membership block (the transfer-closure source). */
         final Map<OpId, BlockId> opBlock = new LinkedHashMap<>();
         final Map<OpId, SemanticOp> opsById = new HashMap<>();
-        final Map<BindingId, BindingCellKind> cellKinds = new HashMap<>();
+        /**
+         * The derived cell kind of every binding incarnation, keyed by
+         * {@code {binding, generation}} (B2: the final kind is a property
+         * of the <em>incarnation</em> — a for-let counter's generation-0
+         * cell stays {@code DIRECT} while its captured per-iteration
+         * generation-1 cell is {@code SHARED_CELL}; keying by binding
+         * alone let the first ALLOC's kind shadow every later
+         * incarnation). A missing entry is {@code DIRECT}.
+         */
+        final Map<BindingId, Map<Long, BindingCellKind>> cellKinds = new HashMap<>();
+        /**
+         * The function factory currently being emitted (null in the module
+         * region and in the detached class-default/thunk emitters): its
+         * {@code captures} name the factory parameters, so a reference to a
+         * captured binding inside its body reads the capture itself (never
+         * a module-global cell slot) and a nested creation passes the
+         * captured cell along.
+         */
+        LoweredFunction currentFunction;
+
+        /** The derived cell kind of one binding incarnation ({@code DIRECT} when unknown). */
+        BindingCellKind cellKindOf(BindingId binding, long generation) {
+            Map<Long, BindingCellKind> generations = cellKinds.get(binding);
+            if (generations == null) {
+                return BindingCellKind.DIRECT;
+            }
+            return generations.getOrDefault(generation, BindingCellKind.DIRECT);
+        }
+
+        /** Registers one incarnation's derived cell kind (first emission wins). */
+        void registerCellKind(BindingId binding, long generation, BindingCellKind kind) {
+            cellKinds.computeIfAbsent(binding, k -> new HashMap<>())
+                .putIfAbsent(generation, kind);
+        }
+
+        /** The capture parameter name of one captured binding. */
+        String captureCell(BindingId binding) {
+            return "c" + binding.id();
+        }
+
+        /**
+         * True iff the function factory being emitted captures the binding
+         * (its factory parameter is the body's binding source).
+         */
+        boolean isCurrentCapture(BindingId binding) {
+            return currentFunction != null && currentFunction.captureOf(binding) != null;
+        }
+
+        /**
+         * The cell expression of one {@code {binding, generation}} reference
+         * at the current emission context: the enclosing factory's capture
+         * parameter when the binding is one of its captures, otherwise the
+         * module-scoped cell slot naming the creation-site incarnation.
+         */
+        String cellSource(BindingId binding, long generation) {
+            return isCurrentCapture(binding) ? captureCell(binding)
+                : cell(binding, generation);
+        }
+
+        /**
+         * One {@code CLOSURE_NEW}/group-member/general-invocation capture
+         * argument: the enclosing factory's capture parameter when the
+         * creating body captured the binding (the cell travels the chain),
+         * otherwise the module-scoped cell slot of the creation-site
+         * incarnation (never a hard-coded generation 0 — a for-let capture
+         * names the per-iteration incarnation).
+         */
+        String captureArg(BindingGeneration capture) {
+            return cellSource(capture.binding(), capture.generation());
+        }
         /**
          * Each op's owning module (the export-surface key): the module
          * whose unit carries the op, statically known at emission — the
@@ -718,7 +788,19 @@ public final class LuaSemanticEmitter {
                 if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
                     KindPayload.BindingAllocPayload payload =
                         (KindPayload.BindingAllocPayload) op.payload();
-                    cellKinds.putIfAbsent(payload.binding(), payload.cellKind());
+                    registerCellKind(payload.binding(), payload.generation(),
+                        payload.cellKind());
+                }
+                if (op.kind() == SemanticOpKind.FOR_EACH) {
+                    // B2: a FOR_EACH iteration binding is always
+                    // SHARED_CELL (the closed payload records no cell-kind
+                    // field): the iteration allocates a fresh iteration
+                    // cell, so a closure created in the body captures that
+                    // iteration's incarnation.
+                    KindPayload.ForEachPayload payload =
+                        (KindPayload.ForEachPayload) op.payload();
+                    registerCellKind(payload.binding(), payload.generation(),
+                        BindingCellKind.SHARED_CELL);
                 }
                 if (op.kind() == SemanticOpKind.RECURSIVE_GROUP_INIT) {
                     // B2: every group member cell is SHARED_CELL by
@@ -729,7 +811,7 @@ public final class LuaSemanticEmitter {
                     KindPayload.RecursiveGroupInitPayload payload =
                         (KindPayload.RecursiveGroupInitPayload) op.payload();
                     for (BindingId binding : payload.bindings()) {
-                        cellKinds.put(binding, BindingCellKind.SHARED_CELL);
+                        registerCellKind(binding, 0, BindingCellKind.SHARED_CELL);
                     }
                 }
             }
@@ -1601,13 +1683,13 @@ public final class LuaSemanticEmitter {
         /** Emits one function factory: a closure over the passed capture cells. */
         private void emitFunctionFactory(LoweredFunction function) {
             FunctionId functionId = function.functionId();
-            List<BindingId> captures = function.captures();
+            List<BindingGeneration> captures = function.captures();
             StringBuilder params = new StringBuilder();
-            for (BindingId captureId : captures) {
+            for (BindingGeneration capture : captures) {
                 if (params.length() > 0) {
                     params.append(", ");
                 }
-                params.append("c" + captureId.id());
+                params.append(captureCell(capture.binding()));
             }
             out.append(fnFactory(functionId)).append(" = function(")
                 .append(params).append(")\n");
@@ -1616,6 +1698,7 @@ public final class LuaSemanticEmitter {
             int argIndex = 1;
             List<OpId> bodyOps = tableOfFunction(function).blockOps().get(function.body());
             currentFunctionId = functionId;
+            currentFunction = function;
             int paramCount = function.descriptor().paramTypes().size();
             for (int i = 0; i < paramCount && i < bodyOps.size(); i++) {
                 SemanticOp op = opsById.get(bodyOps.get(i));
@@ -1624,8 +1707,7 @@ public final class LuaSemanticEmitter {
                 }
                 KindPayload.BindingAllocPayload payload =
                     (KindPayload.BindingAllocPayload) op.payload();
-                BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
-                    BindingCellKind.DIRECT);
+                BindingCellKind kind = cellKindOf(payload.binding(), payload.generation());
                 out.append("    ").append(cell(payload.binding(), payload.generation())).append(" = ")
                     .append(kind == BindingCellKind.SHARED_CELL
                         ? "{__args[" + argIndex + "]}" : "__args[" + argIndex + "]")
@@ -1648,6 +1730,7 @@ public final class LuaSemanticEmitter {
             out.append("  end\n");
             out.append("end\n");
             currentFunctionId = null;
+            currentFunction = null;
         }
 
         /** The membership table of the unit owning one lowered function. */
@@ -2924,7 +3007,7 @@ public final class LuaSemanticEmitter {
                 emitPlainSuccess(op);
                 return;
             }
-            switch (payload.cellKind()) {
+            switch (cellKindOf(payload.binding(), payload.generation())) {
                 case DIRECT -> out.append(cell(payload.binding(), payload.generation())).append(" = nil\n");
                 case SHARED_CELL -> out.append(cell(payload.binding(), payload.generation())).append(" = {}\n");
             }
@@ -2954,8 +3037,7 @@ public final class LuaSemanticEmitter {
             KindPayload.BindingInitPayload payload =
                 (KindPayload.BindingInitPayload) op.payload();
             emitStart(op);
-            BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
-                BindingCellKind.DIRECT);
+            BindingCellKind kind = cellKindOf(payload.binding(), payload.generation());
             String valueExpr = intrinsicCarrierExpr(payload.value());
             if (valueExpr == null) {
                 valueExpr = hasProducer(payload.value())
@@ -2966,10 +3048,10 @@ public final class LuaSemanticEmitter {
                 // by captures and adapters, so the commit writes the cell
                 // slot (never a replacement — the oracle's Cell.value
                 // mutation).
-                out.append(cell(payload.binding(), payload.generation()))
+                out.append(cellSource(payload.binding(), payload.generation()))
                     .append("[1] = ").append(valueExpr).append("\n");
             } else {
-                out.append(cell(payload.binding(), payload.generation()))
+                out.append(cellSource(payload.binding(), payload.generation()))
                     .append(" = ").append(valueExpr).append("\n");
             }
             emitPlainSuccess(op);
@@ -3125,11 +3207,11 @@ public final class LuaSemanticEmitter {
             KindPayload.BindingLoadPayload payload =
                 (KindPayload.BindingLoadPayload) op.payload();
             emitStart(op);
-            BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
-                BindingCellKind.DIRECT);
+            BindingCellKind kind = cellKindOf(payload.binding(), payload.generation());
             out.append(slot((ValueId) op.result())).append(" = ")
                 .append(kind == BindingCellKind.SHARED_CELL
-                    ? cell(payload.binding(), payload.generation()) + "[1]" : cell(payload.binding(), payload.generation()))
+                    ? cellSource(payload.binding(), payload.generation()) + "[1]"
+                    : cellSource(payload.binding(), payload.generation()))
                 .append("\n");
             emitResultSuccess(op, slot((ValueId) op.result()),
                 (RuntimeDescriptor) op.resultType());
@@ -3139,16 +3221,15 @@ public final class LuaSemanticEmitter {
             KindPayload.BindingStorePayload payload =
                 (KindPayload.BindingStorePayload) op.payload();
             emitStart(op);
-            BindingCellKind kind = cellKinds.getOrDefault(payload.binding(),
-                BindingCellKind.DIRECT);
+            BindingCellKind kind = cellKindOf(payload.binding(), payload.generation());
             if (kind == BindingCellKind.SHARED_CELL) {
                 // In-place publication: captures and adapters hold the
                 // cell table by identity (the oracle's Cell.value
                 // mutation — never a replacement).
-                out.append(cell(payload.binding(), payload.generation()))
+                out.append(cellSource(payload.binding(), payload.generation()))
                     .append("[1] = ").append(slot(payload.value())).append("\n");
             } else {
-                out.append(cell(payload.binding(), payload.generation()))
+                out.append(cellSource(payload.binding(), payload.generation()))
                     .append(" = ").append(slot(payload.value())).append("\n");
             }
             emitPlainSuccess(op);
@@ -3160,11 +3241,11 @@ public final class LuaSemanticEmitter {
             emitStart(op);
             String target = slot((ValueId) op.result());
             StringBuilder args = new StringBuilder();
-            for (BindingId captureId : payload.captures()) {
+            for (BindingGeneration capture : payload.captures()) {
                 if (args.length() > 0) {
                     args.append(", ");
                 }
-                args.append(cell(captureId, 0));
+                args.append(captureArg(capture));
             }
             out.append(target).append(" = {__fn = ").append(fnFactory(payload.function()))
                 .append("(").append(args).append("), __sig = ")
@@ -3217,7 +3298,7 @@ public final class LuaSemanticEmitter {
                     out.append(", __value = ").append(valueExpr);
                 case AdaptSourceRef.SharedCell cell ->
                     out.append(", __cell = ")
-                        .append(cell(cell.binding(), cell.generation()));
+                        .append(cellSource(cell.binding(), cell.generation()));
                 case AdaptSourceRef.Thunk thunk ->
                     out.append(", __thunk = ").append(thunkFn(op.opId()));
             }
@@ -3291,11 +3372,11 @@ public final class LuaSemanticEmitter {
                         + " has no LoweredFunction record (producer defect)");
                 }
                 StringBuilder args = new StringBuilder();
-                for (BindingId captureId : function.captures()) {
+                for (BindingGeneration capture : function.captures()) {
                     if (args.length() > 0) {
                         args.append(", ");
                     }
-                    args.append(cell(captureId, 0));
+                    args.append(captureArg(capture));
                 }
                 out.append(groupTemp(op, i)).append(" = {__fn = ")
                     .append(fnFactory(functionId)).append("(").append(args)
@@ -3624,18 +3705,30 @@ public final class LuaSemanticEmitter {
                     String savedState = emitInvocationStateSave(callee, op.opId());
                     out.append("table.insert(__frames, 1, ")
                         .append(luaString(String.valueOf(callee.id()))).append(")\n");
-                    out.append("__okT, __resT = pcall(").append(fnFactory(callee))
-                        .append("(");
-                    LoweredFunction calleeFunction = unit.functions().get(callee);
-                    List<BindingId> captures = calleeFunction == null
-                        ? List.of() : calleeFunction.captures();
-                    for (int i = 0; i < captures.size(); i++) {
-                        if (i > 0) {
-                            out.append(", ");
+                    out.append("__okT, __resT = pcall(");
+                    if (payload.callee()
+                            instanceof KindPayload.CallCallee.Indirect indirect) {
+                        // The value-carried invocation (a body with
+                        // creation-site captures): the closure value the
+                        // binding holds runs its own invoker, whose
+                        // captured cells are the ones its creation
+                        // published — never a call-site re-resolution of
+                        // a per-iteration incarnation.
+                        out.append("__unfn(").append(slot(indirect.callee()))
+                            .append(")");
+                    } else {
+                        out.append(fnFactory(callee)).append("(");
+                        LoweredFunction calleeFunction = unit.functions().get(callee);
+                        List<BindingGeneration> captures = calleeFunction == null
+                            ? List.of() : calleeFunction.captures();
+                        for (int i = 0; i < captures.size(); i++) {
+                            if (i > 0) {
+                                out.append(", ");
+                            }
+                            out.append(captureArg(captures.get(i)));
                         }
-                        out.append(cell(captures.get(i), 0));
+                        out.append(")");
                     }
-                    out.append(")");
                     for (int i = 0; i < payload.parameterBoundaryOpIds().size(); i++) {
                         out.append(", ");
                         SemanticOp boundary =
@@ -3764,12 +3857,12 @@ public final class LuaSemanticEmitter {
                 .append(")\n");
             out.append("__okT, __resT = pcall(")
                 .append(fnFactory(entryPayload.function())).append("(");
-            List<BindingId> captures = calleeFunction.captures();
+            List<BindingGeneration> captures = calleeFunction.captures();
             for (int i = 0; i < captures.size(); i++) {
                 if (i > 0) {
                     out.append(", ");
                 }
-                out.append(cell(captures.get(i), 0));
+                out.append(captureArg(captures.get(i)));
             }
             out.append(")");
             for (OpId boundaryId : payload.parameterBoundaryOpIds()) {
@@ -3893,8 +3986,9 @@ public final class LuaSemanticEmitter {
                         }
                     }
                     case KindPayload.ClosureNewPayload payload -> {
-                        for (BindingId binding : payload.captures()) {
-                            addCellStateKey(keys, binding, 0);
+                        for (BindingGeneration capture : payload.captures()) {
+                            addCellStateKey(keys, capture.binding(),
+                                capture.generation());
                         }
                     }
                     case KindPayload.ModuleImportPayload payload -> {
@@ -3929,8 +4023,7 @@ public final class LuaSemanticEmitter {
         /** A body-private cell key: {@code DIRECT} cells only (shared state stays shared). */
         private void addCellStateKey(java.util.Set<String> keys, BindingId binding,
                                      long generation) {
-            if (cellKinds.getOrDefault(binding, BindingCellKind.DIRECT)
-                    == BindingCellKind.SHARED_CELL) {
+            if (cellKindOf(binding, generation) == BindingCellKind.SHARED_CELL) {
                 return;
             }
             keys.add(cell(binding, generation));
@@ -4053,6 +4146,26 @@ public final class LuaSemanticEmitter {
         }
 
         /**
+         * The registered execution binding of one allocation identity. The
+         * project session's units share one identity space (every semantic
+         * id is globally unique within the closure), so the registration is
+         * resolved across the closure's units: an {@code Indirect} callee
+         * value of one unit may name an identity whose producing
+         * {@code CLOSURE_NEW} sits in a dependency module (the same
+         * resolution the semantic oracle's {@code bindingOf} performs).
+         */
+        private FunctionExecutionBinding bindingOfIdentity(ValueId identity) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
+                    new FunctionAllocationIdentity(identity.id()));
+                if (found != null) {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        /**
          * The statically resolved execution binding of one CALL: the
          * inline Static binding or the unit's registered binding of an
          * Indirect callee identity (the same registration the semantic
@@ -4065,8 +4178,7 @@ public final class LuaSemanticEmitter {
             FunctionExecutionBinding binding = switch (payload.callee()) {
                 case KindPayload.CallCallee.Static staticCallee -> staticCallee.binding();
                 case KindPayload.CallCallee.Indirect indirect ->
-                    unit.functionBindings().get(
-                        new FunctionAllocationIdentity(indirect.callee().id()));
+                    bindingOfIdentity(indirect.callee());
                 case KindPayload.CallCallee.Dynamic ignored -> null;
             };
             if (binding == null
@@ -6171,7 +6283,7 @@ public final class LuaSemanticEmitter {
                         .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
                         .append(luaString(descriptorText(elementDescriptorOf(op))))
                         .append(", __elemT, ").append(luaString(originOf(op))).append(")\n");
-                    out.append("    ").append(cellName).append(" = __elemT\n");
+                    out.append("    ").append(cellName).append(" = {__elemT}\n");
                     emitLabeledBlock(payload.body());
                     out.append("    ::").append(cont).append("::\n");
                     out.append("  end\n");
@@ -6193,7 +6305,7 @@ public final class LuaSemanticEmitter {
                     out.append("  __itT = ").append(iterable).append("\n");
                     out.append("  for __i = 1, #__itT do\n");
                     out.append("    ").append(cellName)
-                        .append(" = __u8sub(__itT, __i, __i)\n");
+                        .append(" = {__u8sub(__itT, __i, __i)}\n");
                     emitLabeledBlock(payload.body());
                     out.append("    ::").append(cont).append("::\n");
                     out.append("  end\n");
@@ -6661,14 +6773,14 @@ public final class LuaSemanticEmitter {
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     LoweredFunction function = unit.functions().get(body.functionId());
-                    List<BindingId> captures = function == null
+                    List<BindingGeneration> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();
-                    for (BindingId captureId : captures) {
+                    for (BindingGeneration capture : captures) {
                         if (caps.length() > 0) {
                             caps.append(", ");
                         }
-                        caps.append(cell(captureId, 0));
+                        caps.append(captureArg(capture));
                     }
                     out.append("  table.insert(__frames, 1, ")
                         .append(luaString(String.valueOf(body.functionId().id())))
@@ -6929,14 +7041,14 @@ public final class LuaSemanticEmitter {
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
                     LoweredFunction function = unit.functions().get(body.functionId());
-                    List<BindingId> captures = function == null
+                    List<BindingGeneration> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();
-                    for (BindingId captureId : captures) {
+                    for (BindingGeneration capture : captures) {
                         if (caps.length() > 0) {
                             caps.append(", ");
                         }
-                        caps.append(cell(captureId, 0));
+                        caps.append(captureArg(capture));
                     }
                     out.append("__asyncStartTask(").append(token.tokenId())
                         .append(", \"DEAL_BODY_TASK\", coroutine.create(function()\n");
@@ -7362,14 +7474,14 @@ public final class LuaSemanticEmitter {
             KindPayload.ExternalEntryPayload payload =
                 (KindPayload.ExternalEntryPayload) op.payload();
             LoweredFunction function = owner.functions().get(payload.function());
-            List<BindingId> captures = function == null
+            List<BindingGeneration> captures = function == null
                 ? List.of() : function.captures();
             StringBuilder caps = new StringBuilder();
-            for (BindingId captureId : captures) {
+            for (BindingGeneration capture : captures) {
                 if (caps.length() > 0) {
                     caps.append(", ");
                 }
-                caps.append(cell(captureId, 0));
+                caps.append(captureArg(capture));
             }
             String ownerPath = owner.moduleId().path();
             out.append("__asyncEntries[")
@@ -7549,8 +7661,7 @@ public final class LuaSemanticEmitter {
             String surface = "__exportSurfaces["
                 + luaString(payload.resolvedModule().path()) + "]";
             for (BindingId aliasCell : payload.aliasCells()) {
-                BindingCellKind kind = cellKinds.getOrDefault(aliasCell,
-                    BindingCellKind.DIRECT);
+                BindingCellKind kind = cellKindOf(aliasCell, 0);
                 if (kind == BindingCellKind.SHARED_CELL) {
                     out.append(cell(aliasCell, 0)).append("[1] = ")
                         .append(surface).append("\n");

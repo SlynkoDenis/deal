@@ -7236,10 +7236,7 @@ public final class SemanticLowerer {
                 captureBorders.pop();
                 emitTargets.pop();
             }
-            List<BindingId> captureIds = new ArrayList<>();
-            for (CapturedCell capture : captured) {
-                captureIds.add(capture.cell().id);
-            }
+            List<BindingGeneration> captureIds = captureGenerations(captured);
             emitClosureNew(functionId, closureIdentity, signature, captureIds, bodyBlock,
                 function.span(), captured);
             emitUserNullOp(SemanticOpKind.BINDING_INIT,
@@ -7326,7 +7323,7 @@ public final class SemanticLowerer {
             // resolve because every member binding registered before any
             // body walk.
             List<List<SemanticOp>> bodyOpLists = new ArrayList<>();
-            List<List<BindingId>> captureIdLists = new ArrayList<>();
+            List<List<BindingGeneration>> captureIdLists = new ArrayList<>();
             List<BlockId> bodyBlocks = new ArrayList<>();
             List<RuntimeDescriptor.Func> signatures = new ArrayList<>();
             List<List<CapturedCell>> capturedLists = new ArrayList<>();
@@ -7410,10 +7407,7 @@ public final class SemanticLowerer {
                     captureBorders.pop();
                     emitTargets.pop();
                 }
-                List<BindingId> captureIds = new ArrayList<>();
-                for (CapturedCell capture : captured) {
-                    captureIds.add(capture.cell().id);
-                }
+                List<BindingGeneration> captureIds = captureGenerations(captured);
                 memberFunctions.add(functionId);
                 bodyOpLists.add(bodyOps);
                 captureIdLists.add(captureIds);
@@ -7439,7 +7433,7 @@ public final class SemanticLowerer {
             for (int i = 0; i < members.size(); i++) {
                 FunctionDeclaration member = members.get(i);
                 FunctionId functionId = memberFunctions.get(i);
-                List<BindingId> captureIds = captureIdLists.get(i);
+                List<BindingGeneration> captureIds = captureIdLists.get(i);
                 BlockId bodyBlock = bodyBlocks.get(i);
                 RuntimeDescriptor.Func signature = signatures.get(i);
                 ValueId identity = memberIdentities.get(i);
@@ -8278,6 +8272,25 @@ public final class SemanticLowerer {
         }
 
         /**
+         * The generation-pinned capture entries of one closed detached-body
+         * walk: each captured cell's identity paired with the incarnation the
+         * capture resolved to at the creation site (the frame-level dominant
+         * incarnation at the reference site — the same resolution the
+         * walk-finalization cell-kind derivation uses). The emitted
+         * {@code CLOSURE_NEW}/{@code LoweredFunction} pairs name the
+         * creation-site incarnation, never generation 0 by construction.
+         */
+        private static List<BindingGeneration> captureGenerations(
+                List<CapturedCell> captured) {
+            List<BindingGeneration> captures = new ArrayList<>();
+            for (CapturedCell capture : captured) {
+                captures.add(new BindingGeneration(capture.cell().id,
+                    capture.incarnation().generation()));
+            }
+            return captures;
+        }
+
+        /**
          * Emits one {@code CLOSURE_NEW} op publishing the given
          * function-allocation identity, registers the {@code LoweredBody}
          * execution binding through the registry seam and the
@@ -8288,8 +8301,8 @@ public final class SemanticLowerer {
          */
         private void emitClosureNew(FunctionId functionId, ValueId result,
                                     RuntimeDescriptor.Func signature,
-                                    List<BindingId> captures, BlockId bodyBlock, Span span,
-                                    List<CapturedCell> captured) {
+                                    List<BindingGeneration> captures, BlockId bodyBlock,
+                                    Span span, List<CapturedCell> captured) {
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             OpId opId = ids.nextOpId(module, nextOrdinal++, 0);
             FunctionExecutionBinding.LoweredBody binding =
@@ -8485,6 +8498,7 @@ public final class SemanticLowerer {
             BlockId bodyBlock = allocateBlock();
             ValueId iterable = lowerExpression(stmt.iterable());
             ForEachFrame frame = openForEachScope(stmt.varName());
+            openForEachBindingFrame(stmt.varName(), frame, bodyBlock);
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             OpId opId = ids.nextOpId(module, nextOrdinal++, 0);
             SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(stmt.span()),
@@ -8502,9 +8516,43 @@ public final class SemanticLowerer {
                 popLoopTarget();
                 popBlock();
                 popBlockParent();
+                closeForEachBindingFrame();
                 closeForEachScope();
             }
             return opId;
+        }
+
+        /**
+         * Opens the iteration binding's environment frame of one for-of arm
+         * in the closure-core walk: the binding joins the binding
+         * environment as an ordinary frame entry whose producing allocation
+         * is the {@code FOR_EACH} op and whose incarnation is the pinned
+         * {@code SHARED_CELL} iteration cell. A detached body's reference to
+         * the iteration binding therefore resolves through the same frame
+         * walk as any other binding and registers a capture
+         * ({@code maybeRegisterCapture}), so the emitted closure publishes
+         * the creation-site iteration incarnation and the body reads its
+         * capture (B3/B9 R2; R4 item 5). The non-closure windows keep the
+         * loop-frame-only environment (E6's arm).
+         */
+        private void openForEachBindingFrame(String name, ForEachFrame frame,
+                                            BlockId bodyBlock) {
+            if (!closureCore) {
+                return;
+            }
+            pushBindingFrame();
+            BindingCoreIncarnation iteration = new BindingCoreIncarnation(
+                frame.generation(), bodyBlock, BindingCellKind.SHARED_CELL, false,
+                BindingProducer.FOR_EACH, true);
+            registerBinding(name, frame.binding(), iteration);
+        }
+
+        /** Closes the iteration binding's environment frame (a no-op off closure-core). */
+        private void closeForEachBindingFrame() {
+            if (!closureCore) {
+                return;
+            }
+            popBindingFrame();
         }
 
         /**
@@ -8544,6 +8592,7 @@ public final class SemanticLowerer {
             BlockId bodyBlock = allocateBlock();
             ValueId iterable = lowerExpression(stmt.iterable());
             ForEachFrame frame = openForEachScope(stmt.varName());
+            openForEachBindingFrame(stmt.varName(), frame, bodyBlock);
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             OpId opId = ids.nextOpId(module, nextOrdinal++, 0);
             SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(stmt.span()),
@@ -8561,6 +8610,7 @@ public final class SemanticLowerer {
                 popLoopTarget();
                 popBlock();
                 popBlockParent();
+                closeForEachBindingFrame();
                 closeForEachScope();
             }
             return opId;
@@ -10084,7 +10134,7 @@ public final class SemanticLowerer {
                     && !(registration
                         instanceof FunctionExecutionBinding.DynamicFunctionValue)) {
                 return lowerIndirectCall(call, slot, registration, dynamicCallee,
-                    describeDynamicCallee(call.callee()));
+                    describeDynamicCallee(call.callee()), false);
             }
             return lowerDynamicCall(call, slot, describeDynamicCallee(call.callee()),
                 dynamicCallee);
@@ -10242,7 +10292,30 @@ public final class SemanticLowerer {
                 // carrier read.
                 return lowerDynamicCall(call, slot, identifier.name(), calleeValue);
             }
-            return lowerIndirectCall(call, slot, binding, calleeValue, identifier.name());
+            return lowerIndirectCall(call, slot, binding, calleeValue, identifier.name(),
+                valueCarriedClosure(binding));
+        }
+
+        /**
+         * True iff the callee binding is a value-carried closure whose body
+         * carries creation-site captures (the per-creation cell sources of
+         * the capture contract): the captured cells are reachable only
+         * through the closure value the binding holds, so the invocation
+         * records {@code CallCallee.Indirect} over the callee value — the
+         * emitters run that value's own invoker (the cells its creation
+         * published) and the oracle installs the value's captured cells —
+         * instead of re-creating the factory at the call site, whose
+         * capture arguments would re-resolve a per-iteration incarnation to
+         * the loop's latest one. A capture-free body's factory re-creation
+         * is the landed direct-invocation shape (its invocation installs no
+         * captures).
+         */
+        private boolean valueCarriedClosure(FunctionExecutionBinding binding) {
+            if (!(binding instanceof FunctionExecutionBinding.LoweredBody body)) {
+                return false;
+            }
+            LoweredFunction function = functions.get(body.functionId());
+            return function != null && !function.captures().isEmpty();
         }
 
         /**
@@ -10584,7 +10657,8 @@ public final class SemanticLowerer {
          */
         private ValueId lowerIndirectCall(CallExpr call, ValueId slot,
                                           FunctionExecutionBinding binding,
-                                          ValueId calleeValue, String calleeName) {
+                                          ValueId calleeValue, String calleeName,
+                                          boolean valueCarried) {
             Type calleeCheckedType = checkedType(call.callee());
             if (!(calleeCheckedType instanceof Type.Func funcType)
                     || !(ContainerPayloadDescriptors.resultDescriptorOf(funcType)
@@ -10846,7 +10920,9 @@ public final class SemanticLowerer {
             }
             emit(buildOp(callOpId, SemanticOpKind.CALL,
                 new KindPayload.CallPayload(CallMode.INDIRECT,
-                    new KindPayload.CallCallee.Static(binding),
+                    valueCarried
+                        ? new KindPayload.CallCallee.Indirect(calleeValue)
+                        : new KindPayload.CallCallee.Static(binding),
                     signature, parameterBoundaryIds, returnBoundaryOpId, null, bodyBlock,
                     externalEntryRef),
                 result, resultType, args, argTypes,
@@ -12958,6 +13034,18 @@ public final class SemanticLowerer {
             Type type = checkedType(identifier);
             for (ForEachFrame frame : frames) {
                 if (frame.name().equals(identifier.name())) {
+                    if (closureCore) {
+                        // The iteration binding is a free reference of every
+                        // open detached-body walk whose scope chain excludes
+                        // it: register the capture through the same frame
+                        // resolution the environment serves (R4 item 5).
+                        FrameResolution loopResolution = resolveFrame(frame.name());
+                        if (loopResolution != null
+                                && loopResolution.entry().cell().id.equals(
+                                    frame.binding())) {
+                            maybeRegisterCapture(frame.name(), loopResolution);
+                        }
+                    }
                     return emitDynamicAwareLoad(
                         new KindPayload.BindingLoadPayload(frame.binding(),
                             frame.generation()),
@@ -13284,10 +13372,7 @@ public final class SemanticLowerer {
                 captureBorders.pop();
                 emitTargets.pop();
             }
-            List<BindingId> captureIds = new ArrayList<>();
-            for (CapturedCell capture : captured) {
-                captureIds.add(capture.cell().id);
-            }
+            List<BindingGeneration> captureIds = captureGenerations(captured);
             ValueId result = slot != null ? slot : ids.nextValueId(module, nextOrdinal++, 0);
             emitClosureNew(functionId, result, signature, captureIds, bodyBlock,
                 functionExpr.span(), captured);

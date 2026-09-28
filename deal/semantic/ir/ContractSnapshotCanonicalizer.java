@@ -753,7 +753,8 @@ public final class ContractSnapshotCanonicalizer {
             case KindPayload.ClosureNewPayload p -> CanonicalJson.obj(
                 CanonicalJson.e("binding", bindingJson(p.binding())),
                 CanonicalJson.e("captures", CanonicalJson.arr(
-                    p.captures().stream().map(ContractSnapshotCanonicalizer::semanticIdJson).toList())),
+                    p.captures().stream().map(
+                        ContractSnapshotCanonicalizer::bindingGenerationJson).toList())),
                 CanonicalJson.e("function", semanticIdJson(p.function())),
                 CanonicalJson.e("signature", descriptorText(p.signature())));
             case KindPayload.FunctionAdaptPayload p -> CanonicalJson.obj(

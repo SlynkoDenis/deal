@@ -383,9 +383,9 @@ public class RecursiveGroupLoweringTest {
             "g's LoweredBody registration keyed by g's member identity");
         LoweredFunction fRecord = unit.functions().get(fMember.functionId());
         LoweredFunction gRecord = unit.functions().get(gMember.functionId());
-        check(fRecord != null && fRecord.captures().equals(List.of(g.binding())),
+        check(fRecord != null && fRecord.captureBindings().equals(List.of(g.binding())),
             "f's LoweredFunction record carries captures = [g] (capture-by-binding, B3)");
-        check(gRecord != null && gRecord.captures().equals(List.of(f.binding())),
+        check(gRecord != null && gRecord.captureBindings().equals(List.of(f.binding())),
             "g's LoweredFunction record carries captures = [f] (capture-by-binding, B3)");
         check(fMember.captures().size() == 1
                 && fMember.captures().get(0).binding().equals(g.binding())

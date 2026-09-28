@@ -1466,9 +1466,9 @@ public final class ClassConstructionValidator {
                         case CLOSURE_NEW -> {
                             KindPayload.ClosureNewPayload closurePayload =
                                 (KindPayload.ClosureNewPayload) member.payload();
-                            for (BindingId capture : closurePayload.captures()) {
+                            for (BindingGeneration capture : closurePayload.captures()) {
                                 Optional<CompilerDiagnostic> failure = admitReference(op,
-                                    capture, producingBlocks, admitted);
+                                    capture.binding(), producingBlocks, admitted);
                                 if (failure.isPresent()) {
                                     return failure;
                                 }

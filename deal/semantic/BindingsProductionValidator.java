@@ -463,8 +463,11 @@ public final class BindingsProductionValidator {
         final Map<BlockId, SemanticOp> detachingOfThunk = new LinkedHashMap<>();
         /** The detaching op of every default-block region root (the CLASS_DEFAULT op). */
         final Map<BlockId, SemanticOp> detachingOfDefault = new LinkedHashMap<>();
-        /** The captures list of every function-body region root (LoweredFunction record). */
-        final Map<BlockId, List<BindingId>> capturesOfRegion = new LinkedHashMap<>();
+        /** The generation-pinned captures of every function-body region root
+         * (LoweredFunction record; each entry names the creation-site
+         * incarnation of the captured binding). */
+        final Map<BlockId, List<BindingGeneration>> capturesOfRegion =
+            new LinkedHashMap<>();
         /** The pinned captures of every thunk region root. */
         final Map<BlockId, List<BindingGeneration>> thunkCapturesOfRegion =
             new LinkedHashMap<>();
@@ -752,6 +755,21 @@ public final class BindingsProductionValidator {
             return model;
         }
 
+        /**
+         * True iff the region's generation-pinned captures name the
+         * binding (the own-region-or-captures membership test of R2; the
+         * paired generation is checked where the reference carries one).
+         */
+        boolean capturesBinding(BlockId regionRoot, BindingId binding) {
+            for (BindingGeneration capture : capturesOfRegion.getOrDefault(regionRoot,
+                    List.of())) {
+                if (capture.binding().equals(binding)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         void registerAllocation(BindingId binding, SemanticOp op, long generation) {
             BlockId block = blockOf(op.opId());
             allocationsByBinding.computeIfAbsent(binding, k -> new ArrayList<>())
@@ -987,7 +1005,7 @@ public final class BindingsProductionValidator {
                         .map(allocation -> new ResolvedCapture(allocation.op,
                             allocation.generation));
                 }
-                if (!capturesOfRegion.getOrDefault(root, List.of()).contains(binding)) {
+                if (!capturesBinding(root, binding)) {
                     return Optional.empty();
                 }
                 SemanticOp detaching = detachingOfFunction.get(root);
@@ -1083,7 +1101,7 @@ public final class BindingsProductionValidator {
                 if (matches.size() > 1) {
                     return new Resolution(null, false);
                 }
-                if (!capturesOfRegion.getOrDefault(root, List.of()).contains(binding)) {
+                if (!capturesBinding(root, binding)) {
                     return new Resolution(null, false);
                 }
                 SemanticOp detaching = detachingOfFunction.get(root);
@@ -1247,8 +1265,9 @@ public final class BindingsProductionValidator {
         boolean captured(IncarnationKey key) {
             for (SemanticOp op : unit.ops()) {
                 if (op.payload() instanceof KindPayload.ClosureNewPayload closure) {
-                    for (BindingId binding : closure.captures()) {
-                        Optional<ResolvedCapture> resolved = resolveCaptureBinding(binding, op);
+                    for (BindingGeneration capture : closure.captures()) {
+                        Optional<ResolvedCapture> resolved =
+                            resolveCaptureBinding(capture.binding(), op);
                         if (resolved.isPresent() && resolvesTo(resolved.get(), key)) {
                             return true;
                         }
@@ -1402,8 +1421,12 @@ public final class BindingsProductionValidator {
             SemanticOp detaching = model.detachingOfFunction.get(root);
             // Every captures entry resolves at the detaching op's creation
             // site (a chain closing with zero or multiple producing
-            // allocations is invalid).
-            for (BindingId binding : function.captures()) {
+            // allocations is invalid), and the entry names exactly the
+            // creation-site incarnation: a capture whose generation is not
+            // the dominant producing allocation's generation at the creation
+            // site does not dominate the creation and fails closed.
+            for (BindingGeneration capture : function.captures()) {
+                BindingId binding = capture.binding();
                 if (detaching == null) {
                     return fail(model, CAPTURE_RESOLUTION, "the body " + root + " of "
                         + function.functionId() + " has capture entries but no detaching "
@@ -1415,6 +1438,13 @@ public final class BindingsProductionValidator {
                     return fail(model, CAPTURE_RESOLUTION, "the capture " + binding
                         + " of " + function.functionId() + " resolves to zero or multiple "
                         + "producing allocations at the detaching op's creation site");
+                }
+                if (resolved.get().generation != capture.generation()) {
+                    return fail(model, CAPTURE_RESOLUTION, "the capture " + binding
+                        + " of " + function.functionId() + " names generation "
+                        + capture.generation() + " while the creation site resolves "
+                        + "generation " + resolved.get().generation
+                        + " (the capture does not name the creating incarnation)");
                 }
             }
             // Every free reference inside the body resolves own-region or
@@ -1458,13 +1488,21 @@ public final class BindingsProductionValidator {
             if (!(op.payload() instanceof KindPayload.ClosureNewPayload closure)) {
                 continue;
             }
-            for (BindingId binding : closure.captures()) {
+            for (BindingGeneration capture : closure.captures()) {
                 Optional<ResolvedCapture> resolved =
-                    model.resolveCaptureBinding(binding, op);
+                    model.resolveCaptureBinding(capture.binding(), op);
                 if (resolved.isEmpty()) {
                     return fail(model, CAPTURE_RESOLUTION, "the CLOSURE_NEW capture "
-                        + binding + " of op " + op.opId() + " resolves to zero or multiple "
+                        + capture.binding() + " of op " + op.opId()
+                        + " resolves to zero or multiple "
                         + "producing allocations at the creation site");
+                }
+                if (resolved.get().generation != capture.generation()) {
+                    return fail(model, CAPTURE_RESOLUTION, "the CLOSURE_NEW capture "
+                        + capture.binding() + " of op " + op.opId() + " names generation "
+                        + capture.generation() + " while the creation site resolves "
+                        + "generation " + resolved.get().generation
+                        + " (the capture does not name the creating incarnation)");
                 }
             }
         }
@@ -1479,7 +1517,7 @@ public final class BindingsProductionValidator {
             return Optional.empty();
         }
         List<Allocation> own = model.visibleAllocations(binding, site);
-        if (own.isEmpty() && !function.captures().contains(binding)) {
+        if (own.isEmpty() && function.captureOf(binding) == null) {
             return fail(model, CAPTURE_RESOLUTION, "the detached-body reference "
                 + binding + " of op " + carrier.opId() + " is outside the captures "
                 + "list of " + function.functionId());

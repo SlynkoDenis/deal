@@ -394,8 +394,17 @@ public class BindingsValidationTest {
             null, null, FailurePolicyId.NO_DEAL_FAILURE, null);
     }
 
+    /** The generation-0-pinned capture entries of one hand-built seed. */
+    private static List<BindingGeneration> pins(BindingId... bindings) {
+        List<BindingGeneration> entries = new java.util.ArrayList<>();
+        for (BindingId binding : bindings) {
+            entries.add(new BindingGeneration(binding, 0));
+        }
+        return entries;
+    }
+
     private static SemanticOp closureNewOp(FunctionId function, RuntimeDescriptor.Func signature,
-            List<BindingId> captures, BlockId body, ValueId result) {
+            List<BindingGeneration> captures, BlockId body, ValueId result) {
         return op(SemanticOpKind.CLOSURE_NEW,
             new KindPayload.ClosureNewPayload(function, signature, captures,
                 new FunctionExecutionBinding.LoweredBody(function, body)),
@@ -486,7 +495,7 @@ public class BindingsValidationTest {
         SemanticOp alloc1 = allocOp(counter, loopBody, 1);
         SemanticOp init1Value = constInt();
         SemanticOp init1 = initOp(counter, 1, (ValueId) init1Value.result());
-        SemanticOp closure = closureNewOp(closureFn, SIG0, List.of(counter), closureBody,
+        SemanticOp closure = closureNewOp(closureFn, SIG0, pins(counter), closureBody,
             closureIdentity);
         SemanticOp condition2 = opWith(nextOpId(), SemanticOpKind.BINDING_LOAD,
             new KindPayload.BindingLoadPayload(counter, 0),
@@ -495,7 +504,7 @@ public class BindingsValidationTest {
             new KindPayload.BindingLoadPayload(counter, closureBodyGeneration),
             nextValue(), INT, List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE, null);
         LoweredModuleUnit unit = unit(
-            Map.of(closureFn, function(closureFn, SIG0, List.of(counter), closureBody)),
+            Map.of(closureFn, function(closureFn, SIG0, pins(counter), closureBody)),
             Map.of(new FunctionAllocationIdentity(closureIdentity.id()),
                 new FunctionExecutionBinding.LoweredBody(closureFn, closureBody)),
             List.of(loop, alloc0, init0Value, init0, condition1, alloc1, init1Value, init1,
@@ -533,7 +542,7 @@ public class BindingsValidationTest {
     }
 
     private static LoweredFunction function(FunctionId id, RuntimeDescriptor.Func signature,
-            List<BindingId> captures, BlockId body) {
+            List<BindingGeneration> captures, BlockId body) {
         return new LoweredFunction(id, signature, captures, body);
     }
 
@@ -853,7 +862,7 @@ public class BindingsValidationTest {
         SemanticOp closureF = closureNewOp(fFunction, SIG0, List.of(), fBody, fIdentity);
         SemanticOp initF = initOp(fBinding, 0, fIdentity);
         SemanticOp allocX = allocOp(xBinding, fBody, 0);
-        SemanticOp captureClosure = closureNewOp(closureFunction, SIG0, List.of(xBinding),
+        SemanticOp captureClosure = closureNewOp(closureFunction, SIG0, pins(xBinding),
             closureBody, closureIdentity);
         SemanticOp filler = op(SemanticOpKind.CONST,
             new KindPayload.ConstPayload(new ScalarValue.Int(1)),
@@ -864,7 +873,7 @@ public class BindingsValidationTest {
             nextValue(), INT, List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE, null);
         LoweredModuleUnit unit = unit(
             Map.of(fFunction, function(fFunction, SIG0, List.of(), fBody),
-                closureFunction, function(closureFunction, SIG0, List.of(xBinding),
+                closureFunction, function(closureFunction, SIG0, pins(xBinding),
                     closureBody)),
             Map.of(new FunctionAllocationIdentity(fIdentity.id()),
                 new FunctionExecutionBinding.LoweredBody(fFunction, fBody),
@@ -935,7 +944,7 @@ public class BindingsValidationTest {
         FunctionId fn = nextFunctionId();
         BlockId body = nextBlock();
         LoweredModuleUnit unit = unit(
-            Map.of(fn, function(fn, SIG0, List.of(ghost), body)),
+            Map.of(fn, function(fn, SIG0, pins(ghost), body)),
             Map.of(), List.of());
         StructuredBodyTable table = tableOf(Map.of(INIT_BLOCK, List.of(),
             body, List.of()));
@@ -954,10 +963,10 @@ public class BindingsValidationTest {
         SemanticOp alloc1 = allocOp(ambiguous, arm1, 0);
         SemanticOp alloc2 = allocOp(ambiguous, arm2, 0);
         SemanticOp branch = branchOp(arm1, arm2);
-        SemanticOp closure = closureNewOp(closureFn, SIG0, List.of(ambiguous), closureBody,
+        SemanticOp closure = closureNewOp(closureFn, SIG0, pins(ambiguous), closureBody,
             identity);
         LoweredModuleUnit unitM = unit(
-            Map.of(closureFn, function(closureFn, SIG0, List.of(ambiguous), closureBody)),
+            Map.of(closureFn, function(closureFn, SIG0, pins(ambiguous), closureBody)),
             Map.of(new FunctionAllocationIdentity(identity.id()),
                 new FunctionExecutionBinding.LoweredBody(closureFn, closureBody)),
             List.of(branch, closure, alloc1, alloc2));

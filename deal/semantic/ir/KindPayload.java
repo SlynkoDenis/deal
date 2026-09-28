@@ -513,18 +513,32 @@ public sealed interface KindPayload
     /**
      * {@code CLOSURE_NEW} — function, exact signature, ordered captures
      * (binding references per the spec), and the {@code LoweredBody}
-     * binding; publishes a fresh function identity.
+     * binding; publishes a fresh function identity. Each capture entry is
+     * generation-pinned ({@link BindingGeneration}): the entry names the
+     * <em>creation-site incarnation</em> of the captured binding — the
+     * dominant producing allocation at the creation site — so a closure
+     * created inside a loop iteration captures that iteration's incarnation
+     * and the emitted factory's capture parameter is the body's binding
+     * source (the thunk source's generation-pinned captures are the same
+     * closed pair).
      */
     record ClosureNewPayload(FunctionId function, RuntimeDescriptor.Func signature,
-                             List<BindingId> captures, FunctionExecutionBinding.LoweredBody binding)
+                             List<BindingGeneration> captures,
+                             FunctionExecutionBinding.LoweredBody binding)
         implements KindPayload {
 
         public ClosureNewPayload(FunctionId function, RuntimeDescriptor.Func signature,
-                                 List<BindingId> captures, FunctionExecutionBinding.LoweredBody binding) {
+                                 List<BindingGeneration> captures,
+                                 FunctionExecutionBinding.LoweredBody binding) {
             this.function = Objects.requireNonNull(function, "function must not be null");
             this.signature = Objects.requireNonNull(signature, "signature must not be null");
             this.captures = List.copyOf(captures);
             this.binding = Objects.requireNonNull(binding, "binding must not be null");
+        }
+
+        /** The captured binding identities in capture order (the capture keys). */
+        public List<BindingId> captureBindings() {
+            return captures.stream().map(BindingGeneration::binding).toList();
         }
     }
 

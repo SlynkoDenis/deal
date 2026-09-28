@@ -306,7 +306,7 @@ public class ClosureLoweringTest {
                 fail("CLOSURE_NEW payload shape (producer defect)");
                 continue;
             }
-            if (payload.captures().contains(y.binding())) {
+            if (payload.captureBindings().contains(y.binding())) {
                 hClosure = op;
             }
         }
@@ -316,7 +316,7 @@ public class ClosureLoweringTest {
         }
         KindPayload.ClosureNewPayload hPayload =
             (KindPayload.ClosureNewPayload) hClosure.payload();
-        check(hPayload.captures().equals(List.of(y.binding(), x.binding())),
+        check(hPayload.captureBindings().equals(List.of(y.binding(), x.binding())),
             "captures = [y, x] in first-reference order; got " + hPayload.captures());
         check(hClosure.result() != null
                 && hClosure.resultType() instanceof RuntimeDescriptor.Func func
@@ -487,11 +487,11 @@ public class ClosureLoweringTest {
             (KindPayload.ClosureNewPayload) innerClosureNew.payload();
         check(testPayload.captures().isEmpty(),
             "test_nested_closure_mutation's CLOSURE_NEW payload carries no captures");
-        check(makePayload.captures().equals(List.of(x.binding())),
+        check(makePayload.captureBindings().equals(List.of(x.binding())),
             "make's CLOSURE_NEW payload carries captures = [x] (the inner closure's "
                 + "creation site lies inside make's body, so x is a free binding of "
                 + "make's body region too — B9 R2(ii)); got " + makePayload.captures());
-        check(innerPayload.captures().equals(List.of(x.binding())),
+        check(innerPayload.captureBindings().equals(List.of(x.binding())),
             "inner's CLOSURE_NEW payload carries captures = [x]");
 
         // The closure facts records agree with the payloads: make records
@@ -610,10 +610,10 @@ public class ClosureLoweringTest {
             (KindPayload.ClosureNewPayload) innerClosureNew.payload();
         check(outerPayload.captures().isEmpty(),
             "outer's CLOSURE_NEW payload carries no captures (x is outer's own local)");
-        check(midPayload.captures().equals(List.of(x.binding())),
+        check(midPayload.captureBindings().equals(List.of(x.binding())),
             "mid's CLOSURE_NEW payload carries captures = [x] (transitive propagation; z "
                 + "is mid's own local, so it never enters mid's captures)");
-        check(innerPayload.captures().equals(List.of(x.binding(), z.binding())),
+        check(innerPayload.captureBindings().equals(List.of(x.binding(), z.binding())),
             "inner's CLOSURE_NEW payload carries captures = [x, z] in first-reference "
                 + "order; got " + innerPayload.captures());
 
@@ -735,7 +735,7 @@ public class ClosureLoweringTest {
         int laterFnPayloadCaptures = 0;
         for (SemanticOp op : ofKind(ops, SemanticOpKind.CLOSURE_NEW)) {
             if (op.payload() instanceof KindPayload.ClosureNewPayload payload
-                    && payload.captures().equals(List.of(laterFn.binding()))) {
+                    && payload.captureBindings().equals(List.of(laterFn.binding()))) {
                 laterFnPayloadCaptures++;
             }
         }
@@ -936,19 +936,20 @@ public class ClosureLoweringTest {
             if (!(op.payload() instanceof KindPayload.ClosureNewPayload payload)) {
                 continue;
             }
-            if (!payload.captures().contains(x.binding())) {
+            if (!payload.captureBindings().contains(x.binding())) {
                 continue;
             }
             sawCapture = true;
-            // The captures slot is a List<BindingId>: exactly one entry
+            // The captures slot is generation-pinned: exactly one entry
             // for x, carrying no type and no narrowed variant.
-            check(payload.captures().stream()
+            check(payload.captureBindings().stream()
                     .filter(x.binding()::equals).count() == 1,
                 "exactly one capture entry for x (no narrowed-type duplicate)");
             LoweredFunction function =
                 result.lowering().unit().functions().get(payload.function());
             check(function != null && function.captures().equals(payload.captures()),
-                "the LoweredFunction repeats the BindingId capture list verbatim");
+                "the LoweredFunction repeats the generation-pinned capture list "
+                    + "verbatim");
             check(function != null && function.descriptor()
                     .equals(new RuntimeDescriptor.Func(List.of(),
                         RuntimeDescriptor.Null.INSTANCE)),
@@ -1049,7 +1050,7 @@ public class ClosureLoweringTest {
                 if (closureNews.size() == 1) {
                     KindPayload.ClosureNewPayload payload =
                         (KindPayload.ClosureNewPayload) closureNews.get(0).payload();
-                    check(payload.captures().equals(List.of(f.binding())),
+                    check(payload.captureBindings().equals(List.of(f.binding())),
                         "the own name is a capture entry (size-1 SCC own-name arm)");
                     int closureIndex = indexOf(ops, closureNews.get(0).opId());
                     boolean initImmediatelyAfter = closureIndex + 1 < ops.size()

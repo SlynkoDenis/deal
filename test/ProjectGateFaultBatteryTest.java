@@ -1266,11 +1266,18 @@ public class ProjectGateFaultBatteryTest {
     /**
      * The SHA-256 of the {@link #payloadShapeBaseline()} text of the real
      * loaded payload records, with {@code ModuleImportPayload}'s recorded
-     * alias-cell component excluded: the frozen pre-slice payload-record
-     * shapes. The one recorded addition is asserted structurally.
+     * alias-cell component excluded: the frozen payload-record shapes plus
+     * the two recorded component-type additions the earlier slices landed —
+     * the {@code ModuleImportPayload} alias-cell list (structurally
+     * asserted below) and the {@code ClosureNewPayload} captures
+     * generation pin (the bytes/semantics slice's representation gap: the
+     * capture entry names the creation-site incarnation, so the component
+     * is {@code List<BindingGeneration>} instead of
+     * {@code List<BindingId>}; the component name, position, and cardinality
+     * are unchanged).
      */
     private static final String PAYLOAD_SHAPE_BASELINE_SHA256 =
-        "22df0512f1b66f7de4aa3e1094b2d4332d4ada29f0f0517bbec42389636105a9";
+        "d43e0a8d8a68b2aa469612b2d15ec4abdf4e5eff9929457cbf01916018fab5e2";
 
     private static void testFrozenClosedSets() {
         System.out.println("-- frozen surfaces: the closed sets --");
@@ -1380,8 +1387,26 @@ public class ProjectGateFaultBatteryTest {
             sorted(keysOf(payloadJson)),
             "the canonical MODULE_IMPORT payload carries exactly the four keys");
 
-        // Every other payload record keeps the frozen pre-slice shape: the
-        // baseline text excludes only the recorded alias-cell component.
+        // The second recorded payload component change: the closure capture
+        // list is generation-pinned (the capture entry names the
+        // creation-site incarnation), so the component's element type is
+        // BindingGeneration — the component name, position, and cardinality
+        // are unchanged.
+        RecordComponent[] closureComponents =
+            KindPayload.ClosureNewPayload.class.getRecordComponents();
+        checkEq(4, closureComponents.length,
+            "CLOSURE_NEW carries its four unchanged components");
+        if (closureComponents.length == 4) {
+            checkEq("captures", closureComponents[2].getName(),
+                "the third CLOSURE_NEW component keeps its name");
+            checkEq("java.util.List<deal.semantic.ir.BindingGeneration>",
+                closureComponents[2].getGenericType().getTypeName(),
+                "the capture list is the generation-pinned entry list");
+        }
+
+        // Every other payload record keeps its frozen component shape: the
+        // baseline text excludes only the recorded alias-cell component and
+        // carries the recorded capture generation pin.
         String baseline = payloadShapeBaseline();
         String digest = CanonicalJson.sha256Hex(
             baseline.getBytes(StandardCharsets.UTF_8));
@@ -1391,8 +1416,9 @@ public class ProjectGateFaultBatteryTest {
             System.err.println("--- end baseline ---");
         }
         checkEq(PAYLOAD_SHAPE_BASELINE_SHA256, digest,
-            "every payload record except MODULE_IMPORT keeps the frozen pre-slice "
-                + "shape (the baseline excludes only the recorded alias-cell component)");
+            "every payload record keeps its frozen component shape (the baseline "
+                + "excludes only the recorded alias-cell component and carries the "
+                + "recorded capture generation pin)");
     }
 
     /**

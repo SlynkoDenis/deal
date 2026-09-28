@@ -7,6 +7,7 @@ import deal.semantic.ir.AsyncLinkKind;
 import deal.semantic.ir.AsyncStartSource;
 import deal.semantic.ir.AsyncTokenId;
 import deal.semantic.ir.AsyncTokenOwner;
+import deal.semantic.ir.BindingGeneration;
 import deal.semantic.ir.CallMode;
 import deal.semantic.ir.CaptureMode;
 import deal.semantic.ir.DynamicResolutionKind;
@@ -119,11 +120,12 @@ import java.util.function.Supplier;
  *       {@code BINDING_INIT}/{@code BINDING_STORE} commit into it,
  *       {@code BINDING_LOAD} reads it (generation-checked). Closures
  *       capture the cells current at {@code CLOSURE_NEW} execution
- *       ({@code captures} are binding identities; loads inside the body
- *       carry their incarnation generations). A {@code FOR_EACH}
- *       iteration replaces the iteration binding's cell with a fresh one
- *       per iteration, so closures created in the body observe
- *       per-iteration values.</li>
+ *       ({@code captures} are generation-pinned binding references; loads
+ *       inside the body carry their incarnation generations). Every
+ *       {@code BINDING_ALLOC} execution publishes a fresh cell for its
+ *       incarnation and a {@code FOR_EACH} iteration allocates the
+ *       iteration binding's cell per iteration, so closures created in
+ *       the body observe per-iteration values.</li>
  *   <li>Parameters: a callee body block's leading {@code BINDING_ALLOC}
  *       ops in list order are its parameter cells (the lowerer's
  *       body-entry parameter ALLOCs); a {@code CALL} binds the
@@ -1346,6 +1348,14 @@ public final class SemanticOracle {
              * those at the consuming child's position).
              */
             final Set<OpId> ownedChildren;
+            /**
+             * The unit's catch bindings: a catch binding's cell is created
+             * and written by its {@code TRY_CATCH} arm (the pinned
+             * initializing write), so the catch block's leading
+             * {@code BINDING_ALLOC} never re-allocates it (the emitted
+             * artifacts' {@code isCatchBinding} skip).
+             */
+            final Set<BindingId> catchBindings = new HashSet<>();
 
             UnitState(LoweredModuleUnit unit, StructuredBodyTable table) {
                 this.unit = unit;
@@ -1372,6 +1382,11 @@ public final class SemanticOracle {
                 for (SemanticOp op : unit.ops()) {
                     if (op.kind() == SemanticOpKind.CLASS_DEFAULT) {
                         ownedChildren.add(op.opId());
+                    }
+                }
+                for (SemanticOp op : unit.ops()) {
+                    if (op.payload() instanceof KindPayload.TryCatchPayload tryCatch) {
+                        catchBindings.add(tryCatch.catchBinding());
                     }
                 }
                 // The nested source ASYNC_START of an adapter-over-async
@@ -1622,6 +1637,28 @@ public final class SemanticOracle {
         }
 
         /**
+         * Allocates a fresh cell for one incarnation in the current scope
+         * and publishes it as that scope's cell for the key: a re-executed
+         * {@code BINDING_ALLOC} — a for-let per-iteration incarnation, a
+         * loop-body local, any per-execution allocation — replaces the slot
+         * with a fresh cell, so closures created in different iterations
+         * capture distinct cells and each observes its own iteration's
+         * value (the emitted artifacts' per-execution {@code BINDING_ALLOC}
+         * write). The previously published cell stays reachable through
+         * every closure that captured it.
+         */
+        Cell freshCellOf(BindingId binding, long generation) {
+            Cell cell = new Cell(binding, generation);
+            String key = binding + "#" + generation;
+            if (cellOverlays.isEmpty()) {
+                cells.put(key, cell);
+            } else {
+                cellOverlays.peek().put(key, cell);
+            }
+            return cell;
+        }
+
+        /**
          * The cell a write commits to: the in-scope cell the same
          * binding's read resolves — the innermost invocation overlay's
          * cell, or an outer invocation's cell a closure captured in the
@@ -1635,31 +1672,6 @@ public final class SemanticOracle {
         Cell storeCellOf(BindingId binding, long generation) {
             Cell existing = cellOf(binding, generation, false);
             return existing != null ? existing : cellOf(binding, generation, true);
-        }
-
-        /** The binding's current (latest-generation) cell (overlays innermost-first). */
-        Cell currentCellOf(BindingId binding) {
-            for (Map<String, Cell> overlay : cellOverlays) {
-                Cell latest = null;
-                for (Cell cell : overlay.values()) {
-                    if (cell.binding.equals(binding)
-                            && (latest == null || cell.generation > latest.generation)) {
-                        latest = cell;
-                    }
-                }
-                if (latest != null) {
-                    return latest;
-                }
-            }
-            Cell latest = null;
-            for (Cell cell : cells.values()) {
-                if (cell.binding.equals(binding)) {
-                    if (latest == null || cell.generation > latest.generation) {
-                        latest = cell;
-                    }
-                }
-            }
-            return latest;
         }
 
         /**
@@ -3941,7 +3953,13 @@ public final class SemanticOracle {
         private String executeBindingAlloc(SemanticOp op) {
             KindPayload.BindingAllocPayload payload =
                 (KindPayload.BindingAllocPayload) op.payload();
-            cellOf(payload.binding(), payload.generation(), true);
+            if (stateOf(op.opId()).catchBindings.contains(payload.binding())) {
+                // The catch binding's cell is the TRY_CATCH arm's pinned
+                // initializing write; a re-allocation here would clobber
+                // the caught value.
+                return null;
+            }
+            freshCellOf(payload.binding(), payload.generation());
             return null;
         }
 
@@ -4002,13 +4020,13 @@ public final class SemanticOracle {
             KindPayload.ClosureNewPayload payload =
                 (KindPayload.ClosureNewPayload) op.payload();
             Map<BindingId, Cell> captures = new HashMap<>();
-            for (BindingId binding : payload.captures()) {
-                Cell current = currentCellOf(binding);
+            for (BindingGeneration capture : payload.captures()) {
+                Cell current = cellOf(capture.binding(), capture.generation(), false);
                 if (current == null) {
                     throw new IllegalStateException("closure capture of unknown binding "
-                        + binding);
+                        + capture.binding() + "#" + capture.generation());
                 }
-                captures.put(binding, current);
+                captures.put(capture.binding(), current);
             }
             Value.FuncValue closure = new Value.FuncValue(payload.function(),
                 payload.signature(), captures);
@@ -4058,13 +4076,14 @@ public final class SemanticOracle {
                         + " has no LoweredFunction record (producer defect)");
                 }
                 Map<BindingId, Cell> captures = new HashMap<>();
-                for (BindingId binding : function.captures()) {
-                    Cell current = currentCellOf(binding);
+                for (BindingGeneration capture : function.captures()) {
+                    Cell current = cellOf(capture.binding(), capture.generation(), false);
                     if (current == null) {
                         throw new IllegalStateException("group member capture of "
-                            + "unknown binding " + binding);
+                            + "unknown binding " + capture.binding() + "#"
+                            + capture.generation());
                     }
-                    captures.put(binding, current);
+                    captures.put(capture.binding(), current);
                 }
                 Value.FuncValue closure = new Value.FuncValue(functionId,
                     function.descriptor(), captures);
@@ -6456,7 +6475,7 @@ public final class SemanticOracle {
                         // at the FOR_EACH origin before the body runs).
                         Value checked = checkForEachElement(op, element, elementDescriptor);
                         // Fresh binding per iteration.
-                        Cell cell = cellOf(payload.binding(), payload.generation(), true);
+                        Cell cell = freshCellOf(payload.binding(), payload.generation());
                         cell.value = checked;
                         cell.initialized = true;
                         try {
@@ -6479,7 +6498,7 @@ public final class SemanticOracle {
                     int[] scalars = string.value().codePoints().toArray();
                     for (int scalar : scalars) {
                         String single = new String(Character.toChars(scalar));
-                        Cell cell = cellOf(payload.binding(), payload.generation(), true);
+                        Cell cell = freshCellOf(payload.binding(), payload.generation());
                         cell.value = new Value.StrValue(single);
                         cell.initialized = true;
                         try {
@@ -6503,8 +6522,32 @@ public final class SemanticOracle {
         /** The FOR_EACH element descriptor: the iterable producer's array element. */
         private RuntimeDescriptor elementDescriptorOf(SemanticOp op) {
             KindPayload.ForEachPayload payload = (KindPayload.ForEachPayload) op.payload();
-            for (SemanticOp producer : opsById.values()) {
-                if (payload.iterable().equals(producer.result())) {
+            // The iterable's producing op belongs to the FOR_EACH op's own
+            // unit; the closure-wide search admits a producer another unit
+            // of the closure holds (the identity space is global).
+            UnitState owner = stateOf(op.opId());
+            RuntimeDescriptor found = elementDescriptorAmong(owner.opsById, payload.iterable());
+            if (found != null) {
+                return found;
+            }
+            for (UnitState state : units.values()) {
+                if (state == owner) {
+                    continue;
+                }
+                found = elementDescriptorAmong(state.opsById, payload.iterable());
+                if (found != null) {
+                    return found;
+                }
+            }
+            throw new IllegalStateException("FOR_EACH(ARRAY_VALUES) iterable producer is "
+                + "absent from the validated closure");
+        }
+
+        /** One unit's result descriptor of one iterable value, or {@code null}. */
+        private static RuntimeDescriptor elementDescriptorAmong(
+                Map<OpId, SemanticOp> ops, ValueId iterable) {
+            for (SemanticOp producer : ops.values()) {
+                if (iterable.equals(producer.result())) {
                     if (producer.resultType() instanceof RuntimeDescriptor.Array array) {
                         return array.element();
                     }
@@ -6512,8 +6555,7 @@ public final class SemanticOracle {
                         ? descriptor : RuntimeDescriptor.String.INSTANCE;
                 }
             }
-            throw new IllegalStateException("FOR_EACH(ARRAY_VALUES) iterable producer is "
-                + "absent from the validated unit");
+            return null;
         }
 
         /** The FOR_EACH op's own TYPE_DESCRIPTOR terminal check (C-D5). */

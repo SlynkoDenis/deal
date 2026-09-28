@@ -20,6 +20,7 @@ import deal.semantic.ModuleFact;
 import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.ir.AnchorId;
+import deal.semantic.ir.BindingGeneration;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BoundaryKind;
 import deal.semantic.ir.BlockId;
@@ -824,7 +825,7 @@ public class ClassConstructionValidatorTest {
             new RuntimeDescriptor.Func(List.of(), RuntimeDescriptor.Int.INSTANCE, false);
         KindPayload.ClosureNewPayload closurePayload = new KindPayload.ClosureNewPayload(
             new deal.semantic.ir.FunctionId(97_771), closureSignature,
-            List.of(foreignBinding),
+            List.of(new BindingGeneration(foreignBinding, 0)),
             new deal.semantic.ir.FunctionExecutionBinding.LoweredBody(
                 new deal.semantic.ir.FunctionId(97_771), closureBody));
         String closureDigest = ContractSnapshotCanonicalizer.digest(new

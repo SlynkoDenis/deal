@@ -1744,10 +1744,10 @@ public class BindingsIntegrationVerificationTest {
             if (!(closure.payload() instanceof KindPayload.ClosureNewPayload payload)) {
                 continue;
             }
-            for (BindingId capture : payload.captures()) {
+            for (BindingGeneration capture : payload.captures()) {
                 for (SemanticLowerer.BindingCoreBinding binding
                         : result.bindingFacts().bindings()) {
-                    if (!binding.binding().equals(capture)) {
+                    if (!binding.binding().equals(capture.binding())) {
                         continue;
                     }
                     for (SemanticLowerer.BindingCoreIncarnation incarnation
