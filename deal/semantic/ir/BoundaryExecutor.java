@@ -548,8 +548,21 @@ public final class BoundaryExecutor {
     }
 
     private static CoreResult kindFail(RuntimeDescriptor descriptor, BoundaryValueView view) {
-        return new CoreFail(FailureCase.KIND_MISMATCH, descriptor.canonicalSpecText(),
+        return new CoreFail(FailureCase.KIND_MISMATCH, kindExpected(descriptor),
             ActualKind.canonicalToken(view.kind(), view.classId()), 0, null);
+    }
+
+    /**
+     * The kind-mismatch expected token of one descriptor: an array keeps
+     * the fixed {@code array} token the unchanged reference runtime and
+     * every shared producer print ({@code expected array, got table}) —
+     * the descriptor's canonical {@code [D]} text is the E8003 element
+     * projection's spelling, never the array kind row's — while every
+     * other descriptor projects its canonical text.
+     */
+    private static String kindExpected(RuntimeDescriptor descriptor) {
+        return descriptor instanceof RuntimeDescriptor.Array
+            ? "array" : descriptor.canonicalSpecText();
     }
 
     /**

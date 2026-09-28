@@ -337,7 +337,11 @@ public final class SharedStdlibSemantics {
         /**
          * A value outside the JSON-shaped set: exactly the actual kinds
          * {@code missing}, {@code function}, {@code async-operation},
-         * and {@code class} (with the canonical class-id atom text).
+         * {@code class} (with the canonical class-id atom text), and
+         * {@code bytes} (the K6 item 12 stdlib projection of a bytes
+         * buffer: JSON_STRINGIFY rejects it with the corpus-pinned
+         * {@code unsupported type for JSON encoding: bytes}, so no other
+         * algorithm may receive it as a serializable value).
          * {@code JSON_STRINGIFY} reports it through its canonical
          * {@link ActualKind} token ({@code class:<ClassId>} for a class
          * value, never a target class name); no other algorithm consumes
@@ -356,7 +360,7 @@ public final class SharedStdlibSemantics {
                                     + "non-null and non-empty");
                         }
                     }
-                    case MISSING, FUNCTION, ASYNC_OPERATION -> {
+                    case MISSING, FUNCTION, ASYNC_OPERATION, BYTES -> {
                         if (classId != null) {
                             throw new IllegalArgumentException(
                                 "only a CLASS Other view carries a class id");
@@ -364,7 +368,8 @@ public final class SharedStdlibSemantics {
                     }
                     default -> throw new IllegalArgumentException(
                         "an Other view carries a value outside the JSON-shaped set "
-                            + "(missing, function, async-operation, class); got " + kind);
+                            + "(missing, function, async-operation, class, bytes); got "
+                            + kind);
                 }
             }
 

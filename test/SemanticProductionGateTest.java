@@ -651,10 +651,14 @@ public class SemanticProductionGateTest {
                 // the builtin Error construct).
                 // ISSUE-0626 retargeted the bytes-length case: the bytes
                 // element contract is production-covered, so the fixture
-                // compiles to the one project artifact and runs.
+                // compiles to the one project artifact and runs; the nested
+                // declaration's body-invocation arm (landed with the same
+                // slice) covers the direct-recursion fixture's nested
+                // self-recursive declaration the same way.
                 boolean productionCovered = fixture.getKey().startsWith("stored-closure")
                     || fixture.getKey().equals("closure-capture")
-                    || fixture.getKey().equals("bytes-length");
+                    || fixture.getKey().equals("bytes-length")
+                    || fixture.getKey().equals("direct-recursion");
                 if (productionCovered) {
                     CompilationOrchestrator production =
                         compileProject(project, "src/main.deal", "out");

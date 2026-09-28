@@ -892,12 +892,16 @@ final class JvmHostAbiEmission {
      * projection at the crossing (H7): a declared array or function
      * return is materialized back into the production value carriers
      * (a {@link JvmRuntime.Array} / the bridged production function
-     * carrier) instead of the host-facing carrier class. Every other
-     * position's carrier is the production value itself.
+     * carrier) instead of the host-facing carrier class, and a declared
+     * bytes return is projected from the host's {@code $DealRt.Bytes}
+     * view onto the production {@link JvmRuntime.BytesValue} carrier
+     * (the identity-preserving pair of {@code __hostBytesToDeal}).
+     * Every other position's carrier is the production value itself.
      */
     boolean needsReturnProjection(Type type) {
         Type inner = unwrapNullable(type);
-        return inner instanceof Type.Array || inner instanceof Type.Func;
+        return inner instanceof Type.Array || inner instanceof Type.Func
+            || inner instanceof Type.Bytes;
     }
 
     /** The declared return cell of one wrapper. */
@@ -1110,6 +1114,8 @@ final class JvmHostAbiEmission {
      */
     private void emitCrossings(StringBuilder out) {
         out.append("  // ---- The host-boundary crossing projections (ISSUE-0651; H7) ----\n");
+        out.append("  static final java.util.IdentityHashMap<java.lang.Object, java.lang.Object> __hostBytesOutMap = new java.util.IdentityHashMap<>();\n");
+        out.append("  static final java.util.IdentityHashMap<java.lang.Object, java.lang.Object> __hostBytesInMap = new java.util.IdentityHashMap<>();\n");
         out.append("  static java.lang.Object __hostProjectArg(java.lang.String d, java.lang.Object v) {\n");
         out.append("    if (v == null) return null;\n");
         out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
@@ -1117,6 +1123,7 @@ final class JvmHostAbiEmission {
         out.append("    if (inner.startsWith(\"[\")) return __hostArrayFromDeal(inner, v);\n");
         out.append("    if (inner.equals(\"int\")) return java.lang.Integer.valueOf(((java.lang.Number) v).intValue());\n");
         out.append("    if (inner.equals(\"number\")) return java.lang.Double.valueOf(((java.lang.Number) v).doubleValue());\n");
+        out.append("    if (inner.equals(\"bytes\")) return __hostBytesToHost(v);\n");
         out.append("    return v;\n");
         out.append("  }\n\n");
         out.append("  static java.lang.Object __hostToDeal(java.lang.String d, java.lang.Object v) {\n");
@@ -1124,6 +1131,34 @@ final class JvmHostAbiEmission {
         out.append("    java.lang.String inner = d.startsWith(\"?\") ? d.substring(1) : d;\n");
         out.append("    if (inner.startsWith(\"(\") || inner.startsWith(\"async(\")) return __hostFnToDeal(inner, v);\n");
         out.append("    if (inner.startsWith(\"[\")) return __hostArrayToDeal(inner, v);\n");
+        out.append("    if (inner.equals(\"bytes\")) return __hostBytesToDeal(v);\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        // The bytes crossing (K6 item 13, H7): the production
+        // JvmRuntime.BytesValue is the compiler-side carrier while the
+        // deployed host compiles against the synthesized $DealRt.Bytes
+        // view, and the two views wrap one storage — the identity maps
+        // keep an out-and-back buffer the same object on both sides, so
+        // a retained host buffer stays one buffer (its writes observed
+        // through every alias) and a fresh host allocation stays fresh.
+        out.append("  static java.lang.Object __hostBytesToHost(java.lang.Object v) {\n");
+        out.append("    if (v instanceof JvmRuntime.BytesValue __b) {\n");
+        out.append("      java.lang.Object __w = __hostBytesOutMap.get(__b);\n");
+        out.append("      if (__w == null) { __w = new $DealRt.Bytes(__b.data);\n");
+        out.append("        __hostBytesOutMap.put(__b, __w);\n");
+        out.append("        __hostBytesInMap.put(__w, __b); }\n");
+        out.append("      return __w;\n");
+        out.append("    }\n");
+        out.append("    return v;\n");
+        out.append("  }\n\n");
+        out.append("  static java.lang.Object __hostBytesToDeal(java.lang.Object v) {\n");
+        out.append("    if (v instanceof $DealRt.Bytes __h) {\n");
+        out.append("      java.lang.Object __b = __hostBytesInMap.get(__h);\n");
+        out.append("      if (__b == null) { __b = new JvmRuntime.BytesValue(__h.data);\n");
+        out.append("        __hostBytesInMap.put(__h, __b);\n");
+        out.append("        __hostBytesOutMap.put(__b, __h); }\n");
+        out.append("      return __b;\n");
+        out.append("    }\n");
         out.append("    return v;\n");
         out.append("  }\n\n");
         emitFunctionCrossings(out);
@@ -1340,7 +1375,8 @@ final class JvmHostAbiEmission {
             case Type.Number ignored -> "((java.lang.Number) (" + expression + ")).doubleValue()";
             case Type.Boolean ignored -> "((java.lang.Boolean) (" + expression + ")).booleanValue()";
             case Type.String ignored -> "(java.lang.String) (" + expression + ")";
-            case Type.Bytes ignored -> "($DealRt.Bytes) (" + expression + ")";
+            case Type.Bytes ignored -> "(($DealRt.Bytes) __hostBytesToHost("
+                + expression + "))";
             case Type.Class cls -> "($DealRt." + recordSimpleNameOf(cls) + ") ("
                 + expression + ")";
             default -> "(" + expression + ")";
@@ -1362,6 +1398,7 @@ final class JvmHostAbiEmission {
                 + expression + ")).doubleValue())";
             case Type.Boolean ignored -> "java.lang.Boolean.valueOf(((java.lang.Boolean) ("
                 + expression + ")).booleanValue())";
+            case Type.Bytes ignored -> "__hostBytesToDeal(" + expression + ")";
             default -> "(" + expression + ")";
         };
         if (nullable) {

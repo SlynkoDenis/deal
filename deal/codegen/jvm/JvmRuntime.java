@@ -2941,6 +2941,18 @@ public final class JvmRuntime {
             this.data = new byte[length];
             this.length = length;
         }
+
+        /**
+         * Wraps one existing storage (the host boundary's projection of the
+         * deployed host's own bytes carrier): the logical length is the
+         * storage's length, exactly the host carrier's contract.
+         *
+         * @param data the storage; non-null
+         */
+        public BytesValue(byte[] data) {
+            this.data = java.util.Objects.requireNonNull(data, "data must not be null");
+            this.length = data.length;
+        }
     }
 
     /**

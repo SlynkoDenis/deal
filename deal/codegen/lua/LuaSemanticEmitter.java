@@ -103,6 +103,32 @@ import java.util.Objects;
  */
 public final class LuaSemanticEmitter {
 
+    /**
+     * The chunk's hoisted shared scratch temps (goto can never jump into a
+     * local's scope, so every check/return temp is a top-level
+     * assignment). The chunk declares them for the module-init walk, and
+     * every emitted body function re-declares the same names as its own
+     * locals so a body never captures them as upvalues: LuaJIT binds a
+     * closure with more than 60 upvalues, and the large bodies of the
+     * corpus would otherwise cross that limit through the chunk's helper
+     * functions, factories, and temps alone.
+     */
+    private static final String HOISTED_TEMPS =
+        "__chk, __rvT, __rvcT, __okT, __resT, __terrT, "
+            + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
+            + "__okD, __chkD, "
+            + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT, "
+            + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE, "
+            + "__tA, __okH, __errH, __oA";
+
+    /**
+     * The number of state slots one emitted save/restore statement
+     * carries. LuaJIT rejects a single multi-assignment with more than 200
+     * variable names and an over-long expression, so a body with hundreds
+     * of state slots is written in bounded statements.
+     */
+    private static final int STATE_CHUNK = 40;
+
     private LuaSemanticEmitter() {
     }
 
@@ -1096,12 +1122,12 @@ public final class LuaSemanticEmitter {
             out.append("local S = {}\n");
             // Hoisted shared temps (goto can never jump into a local's
             // scope; every check/return temp is a top-level assignment).
-            out.append("local __chk, __rvT, __rvcT, __okT, __resT, __terrT, "
-                + "__cerrT, __wrappedT, __itT, __itnT, __elemT, __okB, __chkB, "
-                + "__okD, __chkD, "
-                + "__instT, __fT, __eT, __jokT, __jresT, __jpathT, __jactT, __hbT, "
-                + "__dynC, __dynK, __dynM, __dynS, __dynSK, __dynA, __dynE, "
-                + "__tA, __okH, __errH, __oA\n");
+            // The module-init walk reads and writes these chunk-level
+            // temps; every function factory re-declares the same names as
+            // its own locals ({@link #emitBodyFunctionPreamble}), so a
+            // body never captures 30+ chunk temps as upvalues (LuaJIT's
+            // 60-upvalue limit binds a large body otherwise).
+            out.append("local ").append(HOISTED_TEMPS).append("\n");
 
             // Function factories first (capture cells are factory
             // arguments); the local names are pre-declared so bodies can
@@ -1559,6 +1585,19 @@ public final class LuaSemanticEmitter {
             return "T" + adaptOp.id();
         }
 
+        /**
+         * The fixed preamble of every emitted body function: the argument
+         * pack and the function's own copy of the hoisted scratch temps.
+         * The temps stay function-local so a body's closure captures the
+         * chunk's helpers, factories, and env table only — LuaJIT bounds a
+         * closure at 60 upvalues, and the chunk-level temps alone would
+         * consume a third of that budget on a large body.
+         */
+        private void emitBodyFunctionPreamble() {
+            out.append("    local __args = {...}\n");
+            out.append("    local ").append(HOISTED_TEMPS).append("\n");
+        }
+
         /** Emits one function factory: a closure over the passed capture cells. */
         private void emitFunctionFactory(LoweredFunction function) {
             FunctionId functionId = function.functionId();
@@ -1573,7 +1612,7 @@ public final class LuaSemanticEmitter {
             out.append(fnFactory(functionId)).append(" = function(")
                 .append(params).append(")\n");
             out.append("  return function(...)\n");
-            out.append("    local __args = {...}\n");
+            emitBodyFunctionPreamble();
             int argIndex = 1;
             List<OpId> bodyOps = tableOfFunction(function).blockOps().get(function.body());
             currentFunctionId = functionId;
@@ -2765,7 +2804,7 @@ public final class LuaSemanticEmitter {
                 .append(luaString(boundary.contract().canonicalDigest())).append(", ")
                 .append(luaString(parentKey(boundary.origin().parentOpId()))).append(", ")
                 .append(luaString(descriptorText(descriptor))).append(", ")
-                .append(luaString(descriptorText(inner))).append(", ")
+                .append(luaString(staticKind(inner))).append(", ")
                 .append(slot(payload.container())).append(", ")
                 .append(slot(payload.slot())).append(", ")
                 .append(nullable ? "true" : "false").append(", ")
@@ -3549,10 +3588,23 @@ public final class LuaSemanticEmitter {
                     (KindPayload.BoundaryPayload) boundary.payload();
                 emitBoundaryStart(boundary, slot(boundaryPayload.input()),
                     boundaryPayload.descriptor());
-                out.append("__chk = ")
-                    .append(bcheckExpr(boundaryPayload.descriptor(),
+                // The cell runs under the recorded call origin: a failing
+                // declared parameter reports the callee's parameter
+                // declaration (the pinned corpus span), and the boundary
+                // and the CALL each publish their own FAILURE terminal
+                // (the oracle's exact sequence).
+                out.append("__okB, __chk = pcall(__bcheck, ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(),
                         slot(boundaryPayload.input())))
+                    .append(")\n");
+                out.append("if not __okB then\n");
+                out.append("  __chk.o = ").append(luaString(originOf(boundary)))
                     .append("\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "__errtext(__chk)");
+                emitFailureEvent(op.opId(), op.kind().name(), op, "__errtext(__chk)");
+                out.append("  error(__chk, 0)\n");
+                out.append("end\n");
                 emitBoundarySuccess(boundary, "__chk", boundaryPayload.descriptor());
             }
             if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
@@ -3900,8 +3952,27 @@ public final class LuaSemanticEmitter {
             }
             long functionId = callee.id();
             out.append("__svStack[#__svStack + 1] = {__bodyActive[")
-                .append(functionId).append("], ")
-                .append(String.join(", ", keys)).append("}\n");
+                .append(functionId).append("]}\n");
+            // The frame's slots are filled in bounded chunks: one
+            // multi-assignment carrying every key of a large body would
+            // exceed LuaJIT's per-statement variable-name and
+            // expression-complexity limits (the bytes corpus' allocation
+            // and closure fixtures carry hundreds of slots per body).
+            for (int start = 0; start < keys.size(); start += STATE_CHUNK) {
+                int end = Math.min(start + STATE_CHUNK, keys.size());
+                StringBuilder targets = new StringBuilder();
+                StringBuilder values = new StringBuilder();
+                for (int i = start; i < end; i++) {
+                    if (i > start) {
+                        targets.append(", ");
+                        values.append(", ");
+                    }
+                    targets.append("__svStack[#__svStack][").append(i + 2)
+                        .append("]");
+                    values.append(keys.get(i));
+                }
+                out.append(targets).append(" = ").append(values).append("\n");
+            }
             out.append("__bodyActive[").append(functionId).append("] = true\n");
             return "__svStack[#__svStack]";
         }
@@ -3912,16 +3983,23 @@ public final class LuaSemanticEmitter {
                 return;
             }
             List<String> keys = bodyStateKeys(callee);
-            StringBuilder values = new StringBuilder();
-            for (int i = 0; i < keys.size(); i++) {
-                if (i > 0) {
-                    values.append(", ");
+            out.append("if ").append(frame).append("[1] then\n");
+            for (int start = 0; start < keys.size(); start += STATE_CHUNK) {
+                int end = Math.min(start + STATE_CHUNK, keys.size());
+                StringBuilder targets = new StringBuilder();
+                StringBuilder values = new StringBuilder();
+                for (int i = start; i < end; i++) {
+                    if (i > start) {
+                        targets.append(", ");
+                        values.append(", ");
+                    }
+                    targets.append(keys.get(i));
+                    values.append(frame).append("[").append(i + 2).append("]");
                 }
-                values.append(frame).append("[").append(i + 2).append("]");
+                out.append("  ").append(targets).append(" = ").append(values)
+                    .append("\n");
             }
-            out.append("if ").append(frame).append("[1] then ")
-                .append(String.join(", ", keys)).append(" = ")
-                .append(values).append(" end\n");
+            out.append("end\n");
             out.append("__bodyActive[").append(callee.id()).append("] = ")
                 .append(frame).append("[1]\n");
             out.append("__svStack[#__svStack] = nil\n");
@@ -10313,12 +10391,23 @@ local function __adaptInvoke(w, origin, ...)
   if type(src) == "table" then __fid = src.__fid end
   if type(src) == "function" then __fid = src.__fid end
   local __pushed = false
+  local __savedModule = __module
+  local __switched = false
   if __fid ~= nil then
+    -- The resolved source's own module carries the events of its body
+    -- (the oracle's owning-unit body run): a cross-module adapted
+    -- source reports its own module, never the invoking module's tag.
+    local __srcModule = __fnModules[__fid]
+    if __srcModule ~= nil then
+      __module = __srcModule
+      __switched = true
+    end
     table.insert(__frames, 1, tostring(__fid))
     __pushed = true
   end
   local __okA, __vA = pcall(__unfn(src), unpack(__cargs, 1, w.__m))
   if __pushed then table.remove(__frames, 1) end
+  if __switched then __module = __savedModule end
   if not __okA then error(__vA, 0) end
   return __vA
 end

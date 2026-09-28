@@ -290,7 +290,8 @@ public final class JvmSemanticEmitter {
             return "java.lang.Boolean.valueOf(((java.lang.Boolean) "
                 + expression + ").booleanValue())";
         }
-        if (inner instanceof Type.Array || inner instanceof Type.Func) {
+        if (inner instanceof Type.Array || inner instanceof Type.Func
+                || inner instanceof Type.Bytes) {
             return "__hostToDeal("
                 + Session.javaString(JvmHostAbiEmission.descriptorText(
                     declaredReturn))
@@ -2795,7 +2796,7 @@ public final class JvmSemanticEmitter {
                 .append(javaString(boundary.contract().canonicalDigest())).append(", ")
                 .append(javaString(parentKey(boundary.origin().parentOpId()))).append(", ")
                 .append(javaString(descriptorText(descriptor))).append(", ")
-                .append(javaString(descriptorText(inner))).append(", (JvmRuntime.Array) ")
+                .append(javaString(staticKind(inner))).append(", (JvmRuntime.Array) ")
                 .append(slot(payload.container())).append(", ((long[]) ")
                 .append(slot(payload.slot())).append(")[0], ")
                 .append(nullable ? "true" : "false").append(", ")
@@ -3595,12 +3596,34 @@ public final class JvmSemanticEmitter {
                     (KindPayload.BoundaryPayload) boundary.payload();
                 emitBoundaryStart(boundary, slot(boundaryPayload.input()),
                     boundaryPayload.descriptor(), indent);
-                out.append(indent(indent)).append("Object __pb_").append(boundary.opId().id())
-                    .append(" = ")
-                    .append(bcheckArgs(boundaryPayload.descriptor(), slot(boundaryPayload.input())))
+                // The cell runs under the recorded call origin: a failing
+                // declared parameter reports the callee's parameter
+                // declaration (the pinned corpus span), and the boundary
+                // and the CALL each publish their own FAILURE terminal
+                // (the oracle's exact sequence).
+                String cell = "__pb_" + boundary.opId().id();
+                out.append(indent(indent)).append("Object ").append(cell)
                     .append(";\n");
-                emitBoundarySuccess(boundary, "__pb_" + boundary.opId().id(),
-                    boundaryPayload.descriptor(), indent);
+                out.append(indent(indent)).append("try {\n");
+                out.append(indent(indent)).append("  ").append(cell).append(" = ")
+                    .append(bcheckArgs(boundaryPayload.descriptor(),
+                        slot(boundaryPayload.input())))
+                    .append(";\n");
+                out.append(indent(indent))
+                    .append("} catch (JvmRuntime.DealError __be) {\n");
+                out.append(indent(indent))
+                    .append("  JvmRuntime.DealError __bre = new JvmRuntime.DealError("
+                        + "__be.code, __be.msg, ")
+                    .append(javaString(originOf(boundary)))
+                    .append(", __be.expected, __be.actual, __be.frames, null);\n");
+                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+                emitFailureEvent(op.opId(), op.kind().name(), op,
+                    "JvmRuntime.errtext(__bre)", indent + 1);
+                out.append(indent(indent)).append("  throw __bre;\n");
+                out.append(indent(indent)).append("}\n");
+                emitBoundarySuccess(boundary, cell, boundaryPayload.descriptor(),
+                    indent);
             }
             if (payload.callee() instanceof KindPayload.CallCallee.Dynamic dynamic) {
                 // The dynamic dispatch (ISSUE-0658): the recorded parameter
@@ -3696,6 +3719,42 @@ public final class JvmSemanticEmitter {
                         args.append(slot(((KindPayload.BoundaryPayload) boundary.payload())
                             .input()));
                     }
+                    // The resolved source's own module carries the events of
+                    // its body (the oracle's owning-unit body run): a
+                    // cross-module adapted source reports its own module,
+                    // never the invoking module's tag, so the frame's body
+                    // resolves like a dynamic DEAL-body invocation's. A
+                    // REEVALUATE_THUNK source is only resolved by the
+                    // adapter protocol itself (a pre-resolution would run
+                    // the thunk twice), so its crossing keeps the landed
+                    // single evaluation.
+                    String adapterSuffix = String.valueOf(op.opId().id());
+                    boolean switchAdapterModule =
+                        adapter.captureMode() != deal.semantic.ir.CaptureMode
+                            .REEVALUATE_THUNK;
+                    if (switchAdapterModule) {
+                        out.append(indent(indent)).append("Object __as")
+                            .append(adapterSuffix).append(" = JvmRuntime.adapterSource("
+                                + "(JvmRuntime.AdapterValue) ")
+                            .append(adapterSlot).append(");\n");
+                        out.append(indent(indent)).append("String __am")
+                            .append(adapterSuffix).append(" = (__as")
+                            .append(adapterSuffix)
+                            .append(" instanceof JvmRuntime.FunctionValue __fv")
+                            .append(adapterSuffix).append(" && __fv")
+                            .append(adapterSuffix)
+                            .append(".fid != null) ? dealModuleOfFunction(__fv")
+                            .append(adapterSuffix).append(".fid) : null;\n");
+                        out.append(indent(indent)).append("String __pm")
+                            .append(adapterSuffix).append(" = MODULE;\n");
+                        out.append(indent(indent)).append("String __pr")
+                            .append(adapterSuffix)
+                            .append(" = JvmRuntime.currentModule();\n");
+                        out.append(indent(indent)).append("if (__am")
+                            .append(adapterSuffix).append(" != null) { MODULE = __am")
+                            .append(adapterSuffix)
+                            .append("; JvmRuntime.setModule(MODULE); }\n");
+                    }
                     out.append(indent(indent)).append("try {\n");
                     out.append(indent(indent)).append("  ")
                         .append(slot((ValueId) op.result()))
@@ -3707,7 +3766,16 @@ public final class JvmSemanticEmitter {
                     emitFailureEvent(op.opId(), op.kind().name(), op,
                         "JvmRuntime.errtext(__e)", indent + 1);
                     out.append(indent(indent)).append("  throw __e;\n");
-                    out.append(indent(indent)).append("}\n");
+                    if (switchAdapterModule) {
+                        out.append(indent(indent)).append("} finally {\n");
+                        out.append(indent(indent)).append("  MODULE = __pm")
+                            .append(adapterSuffix).append(";\n");
+                        out.append(indent(indent)).append("  JvmRuntime.setModule(__pr")
+                            .append(adapterSuffix).append(");\n");
+                        out.append(indent(indent)).append("}\n");
+                    } else {
+                        out.append(indent(indent)).append("}\n");
+                    }
                 }
                 case FunctionExecutionBinding.ExternalFunction external ->
                     emitExternalCall(op, payload, external, indent);

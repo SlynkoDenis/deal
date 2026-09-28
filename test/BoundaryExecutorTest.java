@@ -504,10 +504,14 @@ public class BoundaryExecutorTest {
             "[int] vs [3000000000.0]");
 
         // Non-array kind against an array descriptor is a plain E8001.
+        // The expected token is the fixed `array` spelling the unchanged
+        // reference runtime and every shared producer print; the array's
+        // canonical [D] text is the E8003 element projection's spelling
+        // (the corpus pins it there), never the kind row's.
         expectFail(checkCell(FailurePolicyId.TYPE_DESCRIPTOR, NUMBER_ARRAY,
                 BoundaryValueView.of(ActualKind.STRING)),
             FailurePolicyId.TYPE_DESCRIPTOR, DiagnosticCode.E8001,
-            "expected [number], got string", "[number]", "string", new LinkedHashMap<>(),
+            "expected array, got string", "array", "string", new LinkedHashMap<>(),
             null, "[number] vs string view");
 
         // An empty array passes with the same value.
@@ -740,7 +744,7 @@ public class BoundaryExecutorTest {
             FailurePolicyId.ARRAY_ELEMENT_DESCRIPTOR, DiagnosticCode.E8003,
             "array element 1 type mismatch", "[[int]]", "array",
             Map.of("oneBasedIndex", "1"),
-            expected(TD_ROW, 0, "[int]", "number", new LinkedHashMap<>(), null),
+            expected(TD_ROW, 0, "array", "number", new LinkedHashMap<>(), null),
             "nested array element vs [1.5]");
 
         BoundaryValueView ok = BoundaryValueView.ofInt(2);

@@ -4308,6 +4308,19 @@ public final class SemanticLowerer {
             final RuntimeDescriptor.Func signature;
             final OpId returnBoundaryOpId;
             final OpId callSiteOpId;
+            /**
+             * The declared parameter type-annotation spans in declaration
+             * order. A {@code CALL}'s {@code FUNCTION_PARAMETER} cell
+             * reports the failing parameter at the callee's own declaration
+             * site — the pinned corpus span of a parameter-boundary failure
+             * ({@code runtime-errors/type-mismatch-e8001} at the callee
+             * parameter's annotation; the unchanged JS and retained Lua
+             * wrappers emit exactly that span) — so every call of a lowered
+             * body carries them. A synthetic or generated body without a
+             * declaration leaves the list empty and the call site is the
+             * fallback.
+             */
+            final List<Span> parameterTypeSpans;
             boolean returnBoundaryEmitted;
             /**
              * Whether the body's single return cell was emitted by a
@@ -4324,11 +4337,26 @@ public final class SemanticLowerer {
             FunctionContext(FunctionId functionId, BlockId bodyBlock,
                             RuntimeDescriptor.Func signature, OpId returnBoundaryOpId,
                             OpId callSiteOpId) {
+                this(functionId, bodyBlock, signature, returnBoundaryOpId, callSiteOpId,
+                    List.of());
+            }
+
+            FunctionContext(FunctionId functionId, BlockId bodyBlock,
+                            RuntimeDescriptor.Func signature, OpId returnBoundaryOpId,
+                            OpId callSiteOpId, List<Span> parameterTypeSpans) {
                 this.functionId = functionId;
                 this.bodyBlock = bodyBlock;
                 this.signature = signature;
                 this.returnBoundaryOpId = returnBoundaryOpId;
                 this.callSiteOpId = callSiteOpId;
+                this.parameterTypeSpans = List.copyOf(parameterTypeSpans);
+            }
+
+            /** The parameter cell's origin span: the declared annotation, else the fallback. */
+            Span parameterSpan(int index, Span fallback) {
+                return index < parameterTypeSpans.size()
+                    && parameterTypeSpans.get(index) != null
+                    ? parameterTypeSpans.get(index) : fallback;
             }
 
             /**
@@ -5488,7 +5516,8 @@ public final class SemanticLowerer {
                         OpId returnBoundaryOpId = ids.nextOpId(module, nextOrdinal++, 0);
                         OpId callSiteOpId = ids.nextOpId(module, nextOrdinal++, 0);
                         FunctionContext context = new FunctionContext(functionId,
-                            bodyBlock, signature, returnBoundaryOpId, callSiteOpId);
+                            bodyBlock, signature, returnBoundaryOpId, callSiteOpId,
+                            parameterTypeSpans(function.params()));
                         if (e7Calls && isExported(function.name())
                                 && !"main".equals(function.name())) {
                             // The exported function's reserved shape op
@@ -7120,6 +7149,22 @@ public final class SemanticLowerer {
                 ? reservedContext.bodyBlock : allocateBlock();
             FunctionId functionId = reservedContext != null
                 ? reservedContext.functionId : ids.nextFunctionId(module, nextOrdinal++, 0);
+            if (reservedContext == null && fullProgram && !moduleLevel) {
+                // The nested-declaration body-invocation arm: a function
+                // declaration inside a function body owns its body context
+                // like a function expression (one reserved return boundary
+                // and one reserved call-site identity the CALL machine
+                // resolves), and the context registers under the
+                // declaration's name binding so a direct call (or await) of
+                // the local declaration resolves it (K12: every lowered
+                // body carries exactly one invocation identity).
+                reservedContext = new FunctionContext(functionId, bodyBlock,
+                    functionSignatureOf(function), ids.nextOpId(module, nextOrdinal++, 0),
+                    ids.nextOpId(module, nextOrdinal++, 0),
+                    parameterTypeSpans(function.params()));
+                contextsByFunctionId.put(functionId, reservedContext);
+                contextsByBindingId.put(nameBinding, reservedContext);
+            }
             ValueId closureIdentity;
             if (functionIdentity.containsKey(nameIncarnation)) {
                 // The hoist-time pre-allocated identity (B1: captures of
@@ -7416,6 +7461,20 @@ public final class SemanticLowerer {
             for (List<SemanticOp> bodyOps : bodyOpLists) {
                 emitTarget().addAll(bodyOps);
             }
+        }
+
+        /**
+         * The declared parameter type-annotation spans of one function
+         * declaration or expression, in declaration order: the origin a
+         * {@code FUNCTION_PARAMETER} cell reports when the cell fails
+         * (the callee's own declaration site — the pinned corpus span).
+         */
+        private static List<Span> parameterTypeSpans(List<Parameter> parameters) {
+            List<Span> spans = new ArrayList<>();
+            for (Parameter parameter : parameters) {
+                spans.add(parameter.type() == null ? null : parameter.type().span());
+            }
+            return spans;
         }
 
         /**
@@ -10104,8 +10163,8 @@ public final class SemanticLowerer {
                 SemanticOp boundary = buildChildBoundary(
                     entryInvocation ? BoundaryKind.EXTERNAL_PARAMETER
                         : BoundaryKind.FUNCTION_PARAMETER,
-                    context.signature.paramTypes().get(i), args.get(i), call.span(),
-                    callOpId);
+                    context.signature.paramTypes().get(i), args.get(i),
+                    context.parameterSpan(i, call.span()), callOpId);
                 parameterBoundaryOps.add(boundary);
                 parameterBoundaryIds.add(boundary.opId());
             }
@@ -10612,10 +10671,14 @@ public final class SemanticLowerer {
                     }
                 }
                 case FunctionExecutionBinding.LoweredBody body -> {
+                    FunctionContext bodyContext = contextsByFunctionId.get(
+                        body.functionId());
                     for (int i = 0; i < args.size(); i++) {
                         SemanticOp boundary = buildChildBoundary(
                             BoundaryKind.FUNCTION_PARAMETER,
-                            signature.paramTypes().get(i), args.get(i), call.span(),
+                            signature.paramTypes().get(i), args.get(i),
+                            bodyContext == null ? call.span()
+                                : bodyContext.parameterSpan(i, call.span()),
                             callOpId);
                         parameterBoundaryOps.add(boundary);
                         parameterBoundaryIds.add(boundary.opId());
@@ -10727,9 +10790,25 @@ public final class SemanticLowerer {
                             returnBoundaryOpId = emitHostReturnBoundary(
                                 intrinsic.descriptor(), result, call.span(),
                                 callOpId).opId();
-                        case FunctionExecutionBinding.DynamicFunctionValue dynamic ->
-                            throw dynamicCarrierDefect(dynamic, "the adapted call of '"
-                                + calleeName + "'");
+                        case FunctionExecutionBinding.DynamicFunctionValue ignored -> {
+                            // The adapter's source class is runtime-resolved
+                            // (the function-typed-value child's producing
+                            // registration: a call/read result whose class is
+                            // not statically tracked). The source value's own
+                            // registration at execution selects the class
+                            // path — the oracle's D15 source resolution and
+                            // the emitters' adapter protocol both resolve it
+                            // from the carrier — and the closed table admits
+                            // every per-source return cell for an adapter, so
+                            // the recorded cell is the runtime host source's
+                            // HOST_TO_DEAL family cell; a DEAL-body source
+                            // runs its own body's single return cell inside
+                            // the body and no caller-side cell, exactly the
+                            // static body-source shape.
+                            hostCrossing = emitHostReturnBoundary(
+                                adapter.sourceSignature(), result, call.span(), callOpId);
+                            returnBoundaryOpId = hostCrossing.opId();
+                        }
                         case FunctionExecutionBinding.AdapterBinding nested ->
                             throw new ConstructUnlowered("nested adapter source of '"
                                 + calleeName + "' (adapter-of-adapter invocation is "
@@ -11350,7 +11429,7 @@ public final class SemanticLowerer {
                         SemanticOp boundary = buildChildBoundary(
                             BoundaryKind.FUNCTION_PARAMETER,
                             context.signature.paramTypes().get(i), args.get(i),
-                            call.span(), startOpId);
+                            context.parameterSpan(i, call.span()), startOpId);
                         parameterBoundaryOps.add(boundary);
                         parameterBoundaryIds.add(boundary.opId());
                     }
@@ -13159,7 +13238,8 @@ public final class SemanticLowerer {
                     // (ISSUE-0635).
                     reservedClosureContext = new FunctionContext(functionId, bodyBlock,
                         signature, ids.nextOpId(module, nextOrdinal++, 0),
-                        ids.nextOpId(module, nextOrdinal++, 0));
+                        ids.nextOpId(module, nextOrdinal++, 0),
+                        parameterTypeSpans(functionExpr.params()));
                     contextsByFunctionId.put(functionId, reservedClosureContext);
                     functionStack.push(reservedClosureContext);
                 }

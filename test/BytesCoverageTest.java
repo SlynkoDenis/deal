@@ -92,13 +92,17 @@ import java.util.Set;
  *       keeps the logical length fixed, crosses a bytes value over a typed
  *       boundary, and compares two buffers by allocation identity
  *       ({@code BYTES_EQ}/{@code BYTES_NE}).</li>
- *   <li><b>Zero bytes CONSTRUCT_UNLOWERED.</b> No checker-valid bytes
- *       fixture fails the lowering with a bytes-owned construct guard; the
- *       two fixtures whose closure additionally carries a nested function
- *       declaration (a sibling construct's arm), the host-module fixture
- *       (whose declaration module the drive materializes, so its closure
- *       lowers here too), and the emitter-budget and divergence family are
- *       recorded with their own verified sibling reasons.</li>
+ *   <li><b>Zero bytes CONSTRUCT_UNLOWERED.</b> Every checker-valid bytes
+ *       fixture — the nested-declaration shapes, the host-module fixture,
+ *       the adapter and dynamic-function-value shapes, and the emitter
+ *       family — compiles and lowers with zero diagnostics, and no
+ *       fixture is skipped by any drive.</li>
+ *   <li><b>The host-ABI fixture.</b> The host-importing integration
+ *       fixture's async export executes on the oracle (a bytes-aware host
+ *       responder), the shared LuaJIT production artifact (a deployed Lua
+ *       host module), and the shared JVM production artifact (a deployed
+ *       host class over the emitted {@code $DealRt} host ABI), each
+ *       running the fixture's own assertions.</li>
  * </ol>
  */
 public class BytesCoverageTest {
@@ -248,108 +252,41 @@ public class BytesCoverageTest {
         ok("bytes-write-validation-order", "test_bytes_write_validation_after_rhs",
             "null"),
         ok("bytes-write-zero", "main", "null"),
-        ok("bytes-zero-length", "main", "null"),
+        ok("bytes-zero-length", "main", "null"),        // The host-importing integration fixture: runtime-ok, driven by the
+        // host-ABI section below (its test export is async), so the generic
+        // corpus loop routes it to that drive instead of the sync entry.
+        new BytesFixture(BYTES_DIR, "bytes-class-default-integration",
+            "test_bytes_class_default_integration", "int", List.of(), null, null, 0, 0),
         ok("bytes-fn-xmod", "test_bytes_fn_xmod", "int", "bytes-fn-xmod-lib"));
 
     /**
-     * The fixtures whose closure additionally carries a nested function
-     * declaration (the CALLS family's nested-declaration arm — a sibling
-     * construct the bytes slice never introduces): the nested body has no
-     * lowering context yet, so the closure fails the lowering with the
-     * non-bytes producer guard ("the LoweredBody/async body binding's
-     * function N has no lowering context"). The drive asserts the blocker
-     * is not a bytes-owned guard and records the sibling dependency
-     * instead of claiming their execution.
+     * The fixtures whose closure carries a nested function declaration (the
+     * CALLS family's nested-declaration arm, landed): the nested bodies own
+     * their lowering contexts, so the closure lowers and executes like every
+     * other fixture (the generic drive asserts it).
      */
     private static final List<String> NESTED_DECLARATION_FIXTURES = List.of(
         "bytes-boundary-order", "bytes-async-closure");
 
     /**
      * The fixture whose closure imports the host module
-     * {@code host/bytes_roundtrip}: it compiles, lowers, and passes the
-     * closed gates once the declaration module is materialized (verified),
-     * but its test export is {@code async}, so driving it through the
-     * production artifacts needs an async-export invocation surface (and a
-     * bytes-aware host responder for the oracle) — the host-ABI child's
-     * drive. Its bytes constructs are asserted through the
-     * {@code bytes-class-default} fixture and the host-free drives below.
+     * {@code host/bytes_roundtrip}: it compiles and lowers once its
+     * declaration module is materialized, and its async test export is
+     * driven by the host-ABI section with a bytes-aware host implementation
+     * on every consumer (the oracle's responder, the deployed Lua host
+     * module, and the deployed JVM host class), so the generic sync-entry
+     * loop routes it there.
      */
     private static final String HOST_FIXTURE = "bytes-class-default-integration";
-
-    /**
-     * The bytes corpus fixtures whose full drive is blocked by a
-     * <em>sibling</em> construct's gap, reproduced independently of bytes:
-     *
-     * <ul>
-     *   <li>{@code bytes-fn-adapter-e8010}: the pinned origin is the
-     *       declared parameter's annotation (the D15 adapter-creation rule
-     *       of the function-typed-value child); the shared route reports
-     *       the signature mismatch at the call site, and the emitted
-     *       adapter path drops the origin. The fixture's bytes signature
-     *       texts, code, and annotation coordinate are asserted verbatim by
-     *       the pin section.</li>
-     *   <li>{@code bytes-array-closure}: a nested-array-of-arrays read
-     *       divergence that reproduces with {@code int[][]} (the oracle
-     *       reads the element, both artifacts project {@code missing}) —
-     *       the containers construct's, never bytes'; and a LuaJIT
-     *       expression-complexity limit of the emitted cross-module chunk
-     *       ("function or expression too complex"), also independent of
-     *       bytes.</li>
-     *   <li>the emitter-budget family ({@code bytes-nested-arrays},
-     *       {@code bytes-array-container-ops}, {@code bytes-sync-fn-shapes}):
-     *       the emitted cross-module save/restore of the callee module's
-     *       static values packs one multi-assignment and exceeds LuaJIT's
-     *       200-local-per-function limit (or its expression-complexity
-     *       limit) — a parse-time emitter budget, never a bytes semantic;
-     *       the fixtures lower and the zero-{@code CONSTRUCT_UNLOWERED}
-     *       section asserts their bytes constructs.</li>
-     *   <li>{@code bytes-fn-xmod}: the adapter-over-dynamic-function-value
-     *       call fails the lowering closed (the function-typed-value
-     *       child's producing-registration arm).</li>
-     * </ul>
-     */
-    private static final Map<String, String> SIBLING_BLOCKED = Map.of(
-        "bytes-fn-adapter-e8010",
-        "the D15 adapter-creation origin rule: the oracle projects the pinned E8010 "
-            + "at the adapter-creation coordinate while both production artifacts "
-            + "project the row without the origin (the function-typed-value child's "
-            + "materialization-site origin)",
-        "bytes-array-closure",
-        "the nested-array-of-arrays read divergence (the oracle reads the element, "
-            + "both artifacts project missing; reproduces with int[][]) and the "
-            + "LuaJIT expression-complexity limit of the emitted cross-module chunk",
-        "bytes-array-container-ops",
-        "the emitted cross-module save/restore of the callee module's static values "
-            + "exceeds LuaJIT's 200-local-per-function limit (a parse-time emitter "
-            + "budget, never a bytes semantic); its bytes constructs lower and "
-            + "the zero-CONSTRUCT_UNLOWERED section asserts them",
-        "bytes-function-array-closure",
-        "the nested-array-of-arrays read divergence (the oracle reads the element, "
-            + "both artifacts project missing; reproduces with int[][])",
-        "bytes-nested-fn-shapes",
-        "the nested-array-of-arrays read divergence (reproduces with int[][])",
-        "bytes-nested-arrays",
-        "the LuaJIT 200-local-per-function limit of the emitted cross-module "
-            + "save/restore chunk (a parse-time emitter budget, never a bytes semantic)",
-        "bytes-sync-fn-shapes",
-        "the LuaJIT expression-complexity limit of the emitted cross-module chunk "
-            + "(a parse-time emitter budget, never a bytes semantic)",
-        "bytes-fn-xmod",
-        "the adapter-over-dynamic-function-value call (the function-typed-value "
-            + "child's producing-registration arm): the cross-module bytes-bearing "
-            + "function value's arity-extended call fails the lowering closed "
-            + "(\"has no statically classified execution in this slice\")");
 
     private static List<BytesFixture> allFixtures() {
         List<BytesFixture> all = new ArrayList<>();
         all.addAll(FAILURES);
         all.addAll(RUNTIME_OK);
-        for (String blocked : NESTED_DECLARATION_FIXTURES) {
-            all.add(new BytesFixture(BYTES_DIR, blocked, "main", "null", List.of(), null,
+        for (String nested : NESTED_DECLARATION_FIXTURES) {
+            all.add(new BytesFixture(BYTES_DIR, nested, "main", "null", List.of(), null,
                 null, 0, 0));
         }
-        all.add(new BytesFixture(BYTES_DIR, HOST_FIXTURE, "main", "null", List.of(),
-            null, null, 0, 0));
         all.add(new BytesFixture(BYTES_DIR, "bytes_module_lib", "echo", "bytes",
             List.of(), null, null, 0, 0));
         all.add(new BytesFixture(BYTES_DIR, "bytes-fn-xmod-lib", "makeId", "null",
@@ -672,11 +609,14 @@ public class BytesCoverageTest {
         System.out.println("-- the bytes corpus through the one production pipeline: "
             + "oracle + shared LuaJIT + shared JVM --");
         for (BytesFixture fixture : allFixtures()) {
-            if (NESTED_DECLARATION_FIXTURES.contains(fixture.relativePath())
-                    || HOST_FIXTURE.equals(fixture.relativePath())
-                    || SIBLING_BLOCKED.containsKey(fixture.relativePath())
-                    || "bytes_module_lib".equals(fixture.relativePath())
+            if ("bytes_module_lib".equals(fixture.relativePath())
                     || "bytes-fn-xmod-lib".equals(fixture.relativePath())) {
+                continue;
+            }
+            if (HOST_FIXTURE.equals(fixture.relativePath())) {
+                // The async-export host fixture: driven with its own
+                // bytes-aware host implementation on every consumer.
+                driveHostFixture(fixture);
                 continue;
             }
             Compiled compiled = compileFixture(fixture);
@@ -1029,6 +969,261 @@ public class BytesCoverageTest {
     }
 
     // =========================================================================
+    // 5b. The host-ABI fixture: the bytes-aware host on every consumer
+    // =========================================================================
+
+    /** The async test export of the host-importing integration fixture. */
+    private static final String HOST_EXPORT = "test_bytes_class_default_integration";
+
+    /**
+     * The deployed Lua host of the bytes fixture ({@code host/bytes_roundtrip}):
+     * the landed runtime's bytes carrier is the one representation, one fresh
+     * buffer per {@code makeBytes}, one retained buffer for {@code sharedBytes},
+     * and the fixture's phase-order counter.
+     */
+    private static final String HOST_BYTES_ROUNDTRIP_LUA = """
+        local rt = require("deal.runtime")
+        local calls = 0
+        local shared = rt.bytes_new(2)
+        return {
+          echoBytes = function(b) calls = calls + 1 return b end,
+          nullableBytes = function(b) calls = calls + 1 return b end,
+          makeBytes = function(n) calls = calls + 1 return rt.bytes_new(n) end,
+          sharedBytes = function() return shared end,
+          readByte = function(b) calls = calls + 1 return rt.bytes_get(b, 0) end,
+          callCount = function() return calls end,
+          badBytesReturn = function() calls = calls + 1 return "not-bytes" end,
+        }
+        """;
+
+    /**
+     * The deployed JVM host of the bytes fixture: the shared JVM host ABI's
+     * synthesized {@code $DealRt.Bytes} carrier is the declared bytes
+     * representation, with one fresh buffer per {@code makeBytes} and one
+     * retained buffer for {@code sharedBytes}.
+     */
+    private static final String HOST_BYTES_ROUNDTRIP_JAVA = """
+        public final class %s {
+          private static int calls;
+          private static $DealRt.Bytes shared = new $DealRt.Bytes(new byte[2]);
+          public static Object echoBytes($DealRt.Bytes b) { calls += 1; return b; }
+          public static Object nullableBytes($DealRt.Bytes b) { calls += 1; return b; }
+          public static Object makeBytes(int n) { calls += 1; return new $DealRt.Bytes(new byte[n]); }
+          public static Object sharedBytes() { return shared; }
+          public static int readByte($DealRt.Bytes b) { calls += 1; return b.data[0] & 0xFF; }
+          public static int callCount() { return calls; }
+          public static Object badBytesReturn() { calls += 1; return "not-bytes"; }
+        }
+        """;
+
+    /**
+     * The deterministic host half of the bytes fixture: one retained shared
+     * buffer and one call counter — the oracle-side analog of the deployed
+     * host module and host class.
+     */
+    private static final class BytesHostState {
+
+        private int calls;
+        private final SemanticOracle.Value.BytesValue shared =
+            new SemanticOracle.Value.BytesValue(2);
+
+        int calls() {
+            return calls;
+        }
+
+        SemanticOracle.HostResponder responder() {
+            return new SemanticOracle.HostResponder() {
+                @Override
+                public SyncOutcome call(ModuleId module, String export,
+                        RuntimeDescriptor.Func descriptor,
+                        List<SemanticOracle.Value> args) {
+                    if (!"host.bytes_roundtrip".equals(module.path())) {
+                        return new SyncOutcome.Thrown("E9001",
+                            "unknown host module " + module.path());
+                    }
+                    return switch (export) {
+                        case "echoBytes", "nullableBytes" -> {
+                            calls++;
+                            yield new SyncOutcome.Returned(args.get(0));
+                        }
+                        case "makeBytes" -> {
+                            calls++;
+                            long length =
+                                ((SemanticOracle.Value.IntValue) args.get(0)).value();
+                            yield new SyncOutcome.Returned(
+                                new SemanticOracle.Value.BytesValue((int) length));
+                        }
+                        case "sharedBytes" -> new SyncOutcome.Returned(shared);
+                        case "readByte" -> {
+                            calls++;
+                            SemanticOracle.Value.BytesValue buffer =
+                                (SemanticOracle.Value.BytesValue) args.get(0);
+                            yield new SyncOutcome.Returned(
+                                new SemanticOracle.Value.IntValue(buffer.read(0)));
+                        }
+                        case "callCount" -> new SyncOutcome.Returned(
+                            new SemanticOracle.Value.IntValue(calls));
+                        case "badBytesReturn" -> {
+                            calls++;
+                            yield new SyncOutcome.Returned(
+                                new SemanticOracle.Value.StrValue("not-bytes"));
+                        }
+                        default -> new SyncOutcome.Thrown("E9001",
+                            "unknown host export " + export);
+                    };
+                }
+            };
+        }
+    }
+
+    /**
+     * The host-importing integration fixture: the fixture's own async test
+     * export runs through the oracle's async-entry invocation, the shared
+     * LuaJIT production artifact (deferred main, then the recorded async
+     * entry), and the shared JVM production artifact (dealMain, then the
+     * emitted static async entry) — each with the same bytes-aware host
+     * implementation. The fixture's own assertions (the once-per-attempt
+     * default order, the isolated mutable buffers, the retained host-returned
+     * identity, both E8001 catches, and the {@code json.stringify} rejection)
+     * are the pinned outcome.
+     */
+    private static void driveHostFixture(BytesFixture spec) throws Exception {
+        BytesFixture entry = new BytesFixture(BYTES_DIR, spec.relativePath(), "main",
+            "null", List.of(), null, null, 0, 0);
+        Compiled compiled = compileFixture(entry);
+        if (compiled == null) {
+            return;
+        }
+        try {
+            Drive drive = lower(compiled, entry);
+            if (drive == null) {
+                return;
+            }
+            BytesHostState host = new BytesHostState();
+            SemanticRuntimeModel.ConsumerRun oracle = SemanticOracle.invokeAsyncEntry(
+                drive.project(), drive.tables(), host.responder(), drive.fixtureModule(),
+                HOST_EXPORT, List.of());
+            check(oracle.terminal() instanceof SemanticRuntimeModel.Terminal.Success,
+                spec.what() + ": the oracle runs the async host fixture to success: "
+                    + oracle.terminal());
+            checkEq(4, host.calls(), spec.what() + ": the oracle's host counter reaches "
+                + "the fixture's phase-order total");
+            hostLuaProduction(drive, spec);
+            hostJvmProduction(drive, spec);
+        } finally {
+            deleteRecursively(compiled.root());
+        }
+    }
+
+    /** The shared LuaJIT production artifact of the host fixture, host-driven. */
+    private static void hostLuaProduction(Drive drive, BytesFixture spec) throws Exception {
+        Path workspace = Files.createTempDirectory("bytes-host-lua");
+        try {
+            Path artifact = workspace.resolve("project.lua");
+            Files.writeString(artifact, LuaSemanticEmitter.emitProductionProject(
+                drive.project(), drive.tables(), drive.registries(),
+                drive.compiled().surface()), StandardCharsets.UTF_8);
+            deployRuntime(workspace);
+            Path hostDir = workspace.resolve("host");
+            Files.createDirectories(hostDir);
+            Files.writeString(hostDir.resolve("bytes_roundtrip.lua"),
+                HOST_BYTES_ROUNDTRIP_LUA, StandardCharsets.UTF_8);
+            Path probe = workspace.resolve("probe.lua");
+            Files.writeString(probe, ("""
+                local chunk = dofile("%s")
+                local ok, err = __dealMain()
+                if not ok then
+                  print("ERR:INIT|" .. tostring(err))
+                  os.exit(0)
+                end
+                local ok2, res = pcall(__asyncEntries["%s#%s"], "-", true)
+                if ok2 then
+                  print("OK")
+                else
+                  print("ERR:ENTRY|" .. tostring(res and res.code or res))
+                end
+                """).formatted(artifact.toAbsolutePath().toString(),
+                    drive.fixtureModule().path(), HOST_EXPORT), StandardCharsets.UTF_8);
+            String stdout = runLua(workspace, probe, true);
+            check(stdout.contains("OK") && !stdout.contains("ERR:"), spec.what()
+                + ": the LuaJIT production artifact runs the async host fixture to "
+                + "the pinned outcome: " + stdout);
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    /** The shared JVM production artifact of the host fixture, host-driven. */
+    private static void hostJvmProduction(Drive drive, BytesFixture spec) throws Exception {
+        Path workspace = Files.createTempDirectory("bytes-host-jvm");
+        try {
+            String className = JvmBackend.classNameFor(
+                drive.project().entryModule().path());
+            JvmSemanticEmitter.EmissionResult emission =
+                JvmSemanticEmitter.emitProductionProject(drive.project(),
+                    drive.tables(), drive.registries(), className,
+                    drive.compiled().surface());
+            Files.writeString(workspace.resolve(className + ".java"), emission.source(),
+                StandardCharsets.UTF_8);
+            String hostClass = JvmBackend.classNameFor("host/bytes_roundtrip");
+            Files.writeString(workspace.resolve(hostClass + ".java"),
+                HOST_BYTES_ROUNDTRIP_JAVA.formatted(hostClass), StandardCharsets.UTF_8);
+            long entryId = -1;
+            for (SemanticOp op : drive.unit().ops()) {
+                if (op.kind() == SemanticOpKind.EXTERNAL_ENTRY
+                        && op.payload() instanceof KindPayload.ExternalEntryPayload payload
+                        && payload.async() && HOST_EXPORT.equals(payload.exportName())) {
+                    entryId = op.opId().id();
+                }
+            }
+            check(entryId >= 0, spec.what() + ": the fixture module records its async "
+                + "EXTERNAL_ENTRY");
+            Files.writeString(workspace.resolve("Probe.java"), ("""
+                final class Probe {
+                  public static void main(String[] args) {
+                    try {
+                      %s.dealMain();
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError e) {
+                      System.out.println("ERR:INIT|" + e.code + "|" + e.msg);
+                      return;
+                    }
+                    try {
+                      Object r = %s.ae%d("-", true, new Object[]{});
+                      System.out.println("OK");
+                    } catch (deal.codegen.jvm.JvmRuntime.DealError e) {
+                      System.out.println("ERR:ENTRY|" + e.code + "|" + e.msg);
+                    }
+                  }
+                }
+                """).formatted(className, className, entryId), StandardCharsets.UTF_8);
+            Path classes = workspace.resolve("classes");
+            Files.createDirectories(classes);
+            String classpath = absoluteClasspath();
+            ProcessBuilder javac = new ProcessBuilder("javac", "--release", "25",
+                "-proc:none", "-cp", classpath, "-d", classes.toString(),
+                className + ".java", hostClass + ".java", "Probe.java");
+            javac.directory(workspace.toFile());
+            javac.redirectErrorStream(true);
+            Process compile = javac.start();
+            String compileOut = new String(compile.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+            int compileExit = compile.waitFor();
+            checkEq(0, compileExit, spec.what() + ": the JVM host fixture compiles "
+                + "with the emitted host ABI surface and the deployed host class: "
+                + compileOut);
+            if (compileExit != 0) {
+                return;
+            }
+            String stdout = runJava(classpath, classes, "Probe");
+            check(stdout.contains("OK") && !stdout.contains("ERR:"), spec.what()
+                + ": the JVM production artifact runs the async host fixture to the "
+                + "pinned outcome: " + stdout);
+        } finally {
+            deleteRecursively(workspace);
+        }
+    }
+
+    // =========================================================================
     // 6. Zero bytes CONSTRUCT_UNLOWERED
     // =========================================================================
 
@@ -1039,32 +1234,13 @@ public class BytesCoverageTest {
                     || "bytes-fn-xmod-lib".equals(fixture.relativePath())) {
                 continue;
             }
-            Compiled compiled = compileFixture(fixture, true);
+            Compiled compiled = compileFixture(HOST_FIXTURE.equals(fixture.relativePath())
+                ? new BytesFixture(BYTES_DIR, HOST_FIXTURE, "main", "null", List.of(),
+                    null, null, 0, 0)
+                : fixture, true);
+            check(compiled != null, fixture.what() + ": the corpus fixture compiles "
+                + "through the production frontend: " + compileDiagnostics(fixture));
             if (compiled == null) {
-                // A non-compiling fixture must be one of the recorded
-                // sibling blockers, and its failure must not be a
-                // bytes-owned construct guard.
-                boolean nested = NESTED_DECLARATION_FIXTURES.contains(
-                    fixture.relativePath());
-                boolean host = HOST_FIXTURE.equals(fixture.relativePath());
-                boolean sibling = SIBLING_BLOCKED.containsKey(fixture.relativePath());
-                // The host-importing fixture carries its declaration module
-                // in this drive, so its closure (and its bytes constructs)
-                // must compile and lower like every other fixture's.
-                check(!host, fixture.what() + ": the host-importing fixture compiles "
-                    + "and lowers once its declaration module is materialized: "
-                    + compileDiagnostics(fixture));
-                check(nested || host || sibling,
-                    fixture.what() + ": a non-compiling fixture is one of the "
-                        + "recorded sibling blockers");
-                for (CompilerDiagnostic diagnostic : compileDiagnostics(fixture)) {
-                    String message = diagnostic.message();
-                    check(!(message.contains("ISSUE-0158")
-                            || message.contains("bytes value semantics")
-                            || message.contains("bytes element")),
-                        fixture.what() + ": the blocker is not a bytes-owned construct "
-                            + "guard: " + message);
-                }
                 continue;
             }
             try {
@@ -1076,20 +1252,9 @@ public class BytesCoverageTest {
                         compiled.checkedProject().modules().get(0).ast().span()),
                     List.of(IntrinsicKind.INT_CONVERT, IntrinsicKind.NUMBER_CONVERT),
                     Set.of());
+                check(result.project() != null, fixture.what() + ": the fixture lowers "
+                    + "with zero diagnostics: " + result.diagnostics());
                 if (result.project() == null) {
-                    boolean bytesOwned = false;
-                    for (CompilerDiagnostic diagnostic : result.diagnostics()) {
-                        String message = diagnostic.message();
-                        if (message.contains("bytes")
-                                || message.contains("ISSUE-0158")) {
-                            bytesOwned = true;
-                        }
-                    }
-                    check(!bytesOwned, fixture.what() + ": the lowering failure is not a "
-                        + "bytes-owned construct guard: " + result.diagnostics());
-                    check(NESTED_DECLARATION_FIXTURES.contains(fixture.relativePath()),
-                        fixture.what() + ": a non-lowering fixture is one of the two "
-                        + "recorded nested-declaration blockers: " + result.diagnostics());
                     continue;
                 }
                 LoweredModuleUnit unit = null;
@@ -1109,6 +1274,14 @@ public class BytesCoverageTest {
             } finally {
                 deleteRecursively(compiled.root());
             }
+        }
+        // Every fixture named by the acceptance criteria's dynamic-fixture
+        // clause is driven without a skip.
+        for (String required : List.of("bytes-dynamic-boundary-ok",
+                "bytes-dynamic-nullable-function-ok", "bytes-dynamic-function-mismatch-e8010",
+                "bytes-dynamic-wrong-kind-e8001", "bytes-async-closure", HOST_FIXTURE)) {
+            check(allFixtures().stream().anyMatch(f -> f.relativePath().equals(required)),
+                "the drive covers the acceptance-listed fixture '" + required + "'");
         }
     }
 
@@ -1136,9 +1309,24 @@ public class BytesCoverageTest {
         if (!"main".equals(fixture.export())) {
             Files.writeString(entry, driver(fixture));
         }
+        // The host-importing fixture materializes its corpus declaration
+        // module and the externals mapping exactly like the driven compile,
+        // so the quiet compile reports the same closure's diagnostics.
+        Map<String, String> externals = null;
+        if (HOST_FIXTURE.equals(fixture.relativePath())) {
+            Path declaration = root.resolve("host").resolve("bytes_roundtrip.d.deal");
+            Files.createDirectories(declaration.getParent());
+            Files.writeString(declaration, ConformanceHarnessMetadata
+                .stripClassificationHeaders(Files.readString(Path.of("test",
+                    "conformance", "host-fixtures", "bytes_roundtrip.d.deal"),
+                    StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+            externals = new LinkedHashMap<>();
+            externals.put("host.bytes_roundtrip", declaration.toAbsolutePath().toString());
+            externals.put("host/bytes_roundtrip", declaration.toAbsolutePath().toString());
+        }
         CompilationOrchestrator orchestrator = new CompilationOrchestrator(
             entry.toAbsolutePath(), root.resolve("out"), false, false, false, false,
-            Backend.LUAJIT, null, List.of(root.toAbsolutePath()),
+            Backend.LUAJIT, externals, List.of(root.toAbsolutePath()),
             Path.of("std").toAbsolutePath().normalize(), null, productionInvocation());
         orchestrator.compile();
         List<CompilerDiagnostic> diagnostics =
