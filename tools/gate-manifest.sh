@@ -1394,12 +1394,16 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # seven-child write chain (the length child at position 3, the normalize's
   # currentLength referencing it, the BYTE_ELEMENT_ASSIGNMENT child under
   # BYTES_WRITE) with the read at i == b.length failing E8012 on all three
-  # consumers; the oracle realization (zero-fill allocation, the in-place
+  # consumers; the two bytes element cells' own {index, length} context (the
+  # pinned E8012/E8013 rows at the cells and the missing-context producer
+  # defect); the oracle realization (zero-fill allocation, the in-place
   # write observed through an alias, the fixed logical length, the bytes
   # boundary crossing, and the BYTES_EQ/NE identity comparison); and zero
-  # bytes CONSTRUCT_UNLOWERED over the corpus, with the sibling-blocked
-  # fixtures recorded by name and reason (the nested-declaration arm, the
-  # host-module fixture, the nested-array-of-arrays read divergence, the
-  # emitted-chunk parse budgets, and the adapter-over-dynamic-value call).
+  # bytes CONSTRUCT_UNLOWERED over the corpus: every driveable bytes fixture
+  # — the nested-declaration and function-adapter shapes, the emitter family,
+  # and the host-importing integration fixture (its async test export driven
+  # against a bytes-aware host responder on the oracle and a deployed host
+  # module/class on the two production artifacts) — compiles, lowers, and
+  # validates, with no fixture skipped by any drive.
   'fg|=== Running Bytes Coverage and Element Contract Tests (ISSUE-0626) ===|java -ea -cp build deal.test.BytesCoverageTest'
 )

@@ -414,7 +414,11 @@ public class BuiltinErrorConstructionTest {
         check(lua.contains("__instT = {__d = true, code = ")
                 && lua.contains(", m = "),
             "the LuaJIT artifact publishes the canonical __d err carrier");
-        check(lua.contains("__bcheck(\"@/Error\""),
+        // ISSUE-0626 retargeted this pin: the LuaJIT boundary arms run every
+        // runtime-validation cell through the pcall form (the recorded cell
+        // origin and the two FAILURE terminals), so the @/Error atom is still
+        // checked — under the current emission spelling.
+        check(lua.contains("pcall(__bcheck, \"@/Error\""),
             "the LuaJIT artifact checks the @/Error boundary atom");
         String jvm = JvmSemanticEmitter.emitModule(unit, table).source();
         check(jvm.contains("new JvmRuntime.ErrorValue("),

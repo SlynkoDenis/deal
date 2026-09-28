@@ -6,6 +6,7 @@ import deal.codegen.jvm.JvmBackend;
 import deal.codegen.jvm.JvmSemanticEmitter;
 import deal.codegen.lua.LuaSemanticEmitter;
 import deal.diagnostics.CompilerDiagnostic;
+import deal.diagnostics.DiagnosticCode;
 import deal.identity.CanonicalModuleIdentity;
 import deal.module.CompilationOrchestrator;
 import deal.semantic.CheckedProjectBuildResult;
@@ -19,7 +20,12 @@ import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticOracle;
 import deal.semantic.SemanticRequirementManifest;
 import deal.semantic.SemanticRuntimeModel;
+import deal.semantic.ir.BoundaryContext;
+import deal.semantic.ir.BoundaryExecutor;
+import deal.semantic.ir.BoundaryFailure;
 import deal.semantic.ir.BoundaryKind;
+import deal.semantic.ir.BoundaryOutcome;
+import deal.semantic.ir.BoundaryValueView;
 import deal.semantic.ir.ClassFactoryRegistry;
 import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.FailurePolicyId;
@@ -875,6 +881,80 @@ public class BytesCoverageTest {
     }
 
     // =========================================================================
+    // 4b. The bytes element cells: {index, length} and the pinned rows
+    // =========================================================================
+
+    /**
+     * The two bytes element cells receive exactly {@code {index, length}}
+     * (K6 item 3): the read at {@code i == b.length} and below zero
+     * projects the pinned E8012 row, the in-bounds read passes, the write
+     * cell runs the same bounds row first, the write's value-range
+     * projection is the pinned E8013 second template, and a cell executed
+     * without its context is a producer defect, never a DEAL projection.
+     */
+    private static void testBytesBoundaryContext() {
+        System.out.println("-- the bytes element cells receive {index, length} --");
+        BoundaryOutcome atEnd = BoundaryExecutor.check(FailurePolicyId.BYTES_READ,
+            RuntimeDescriptor.Int.INSTANCE, BoundaryValueView.ofInt(0),
+            BoundaryContext.bytesBounds(2, 2));
+        check(atEnd instanceof BoundaryOutcome.Fail endFail
+                && endFail.failure().code() == DiagnosticCode.E8012
+                && "bytes index out of bounds".equals(endFail.failure().message()),
+            "the BYTE_ELEMENT_READ cell at i == b.length projects the pinned E8012 "
+                + "row: " + atEnd);
+        BoundaryOutcome belowZero = BoundaryExecutor.check(FailurePolicyId.BYTES_READ,
+            RuntimeDescriptor.Int.INSTANCE, BoundaryValueView.ofInt(0),
+            BoundaryContext.bytesBounds(-1, 2));
+        check(belowZero instanceof BoundaryOutcome.Fail belowFail
+                && belowFail.failure().code() == DiagnosticCode.E8012
+                && "bytes index out of bounds".equals(belowFail.failure().message()),
+            "the BYTE_ELEMENT_READ cell below zero projects the pinned E8012 row: "
+                + belowZero);
+        BoundaryValueView byteView = BoundaryValueView.ofInt(7);
+        BoundaryOutcome inBounds = BoundaryExecutor.check(FailurePolicyId.BYTES_READ,
+            RuntimeDescriptor.Int.INSTANCE, byteView, BoundaryContext.bytesBounds(1, 2));
+        check(inBounds instanceof BoundaryOutcome.Pass pass
+                && byteView.equals(pass.value()),
+            "the in-bounds BYTE_ELEMENT_READ cell passes with the byte unchanged: "
+                + inBounds);
+        BoundaryOutcome writeAtEnd = BoundaryExecutor.check(FailurePolicyId.BYTES_WRITE,
+            RuntimeDescriptor.Int.INSTANCE, BoundaryValueView.ofInt(3),
+            BoundaryContext.bytesBounds(2, 2));
+        check(writeAtEnd instanceof BoundaryOutcome.Fail writeFail
+                && writeFail.failure().code() == DiagnosticCode.E8012
+                && "bytes index out of bounds".equals(writeFail.failure().message()),
+            "the BYTE_ELEMENT_ASSIGNMENT cell at i == b.length runs the pinned E8012 "
+                + "bounds row first: " + writeAtEnd);
+        BoundaryFailure range = BoundaryExecutor.bytesWriteRangeFailure();
+        check(range.code() == DiagnosticCode.E8013
+                && "bytes value out of range".equals(range.message()),
+            "the write's value-range projection is the pinned E8013 template: "
+                + range.message());
+        boolean readContextless = false;
+        try {
+            BoundaryExecutor.check(FailurePolicyId.BYTES_READ,
+                RuntimeDescriptor.Int.INSTANCE, BoundaryValueView.ofInt(0),
+                BoundaryContext.none());
+        } catch (BoundaryExecutor.Defect expected) {
+            readContextless = expected.getMessage() != null
+                && expected.getMessage().contains("index");
+        }
+        check(readContextless, "a BYTES_READ cell without its {index, length} "
+            + "context is a producer defect");
+        boolean writeContextless = false;
+        try {
+            BoundaryExecutor.check(FailurePolicyId.BYTES_WRITE,
+                RuntimeDescriptor.Int.INSTANCE, BoundaryValueView.ofInt(0),
+                BoundaryContext.none());
+        } catch (BoundaryExecutor.Defect expected) {
+            writeContextless = expected.getMessage() != null
+                && expected.getMessage().contains("index");
+        }
+        check(writeContextless, "a BYTE_ELEMENT_ASSIGNMENT cell without its "
+            + "{index, length} context is a producer defect");
+    }
+
+    // =========================================================================
     // 5. The oracle realization
     // =========================================================================
 
@@ -1629,6 +1709,7 @@ public class BytesCoverageTest {
         testCorpusPins();
         testCorpusDrive();
         testReadShapeAndWriteChain();
+        testBytesBoundaryContext();
         testOracleRealization();
         testZeroBytesConstructUnlowered();
         System.out.println();
