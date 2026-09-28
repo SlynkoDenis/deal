@@ -517,23 +517,34 @@ public class CanonicalFailureTextParityTest {
     }
 
     // =========================================================================
-    // 5. The unchanged surfaces (legacy profile, JS, corpus pins, retained
-    //    backends)
+    // 5. The unchanged surfaces (the re-pinned corpus fixture, JS, corpus
+    //    pins, retained backends)
     // =========================================================================
 
     static void testUnchangedSurfaces() throws Exception {
-        System.out.println("-- Unchanged surfaces: legacy profile, JS, corpus pins, "
-            + "retained backends --");
+        System.out.println("-- Unchanged surfaces: the re-pinned corpus excerpt, JS, "
+            + "corpus pins, retained backends --");
 
-        // The legacy-profile corpus pin keeps the legacy text.
-        String legacyPin = Files.readString(Path.of("test", "conformance",
+        // The re-pinned corpus fixture (the production-profile re-pin):
+        // the fixture declares no profile header, and its sidecar carries
+        // the production template at the same conversion expression,
+        // rebased onto the header-free raw coordinates.
+        String rePinnedFixture = Files.readString(Path.of("test", "conformance",
+            "backend-runtime", "runtime", "int-convert-range.deal"),
+            StandardCharsets.UTF_8);
+        check(!rePinnedFixture.contains("@profile:"),
+            "the re-pinned corpus fixture declares no profile header");
+        String rePinnedSidecar = Files.readString(Path.of("test", "conformance",
             "backend-runtime", "runtime", "int-convert-range.expect.json"),
             StandardCharsets.UTF_8);
-        check(legacyPin.contains("\"message\": \"" + LEGACY_INT32_TEMPLATE + "\""),
-            "the legacy-profile sidecar keeps the legacy template");
-        check(legacyPin.contains("\"sourceFile\": \"backend-runtime/runtime/"
-                + "int-convert-range.deal\""),
-            "the legacy-profile sidecar is the fixture's authority");
+        check(rePinnedSidecar.contains("\"message\": \"" + INT32_TEMPLATE + "\""),
+            "the re-pinned corpus sidecar carries the production template");
+        check(rePinnedSidecar.contains("\"sourceFile\": \"backend-runtime/runtime/"
+                + "int-convert-range.deal\"")
+                && rePinnedSidecar.contains("\"line\": 7")
+                && rePinnedSidecar.contains("\"column\": 10"),
+            "the re-pinned corpus sidecar pins the same conversion expression "
+                + "at the header-free raw coordinates");
 
         // The unchanged JS runtime keeps its profile split.
         String js = Files.readString(Path.of("deal", "runtime.js"),

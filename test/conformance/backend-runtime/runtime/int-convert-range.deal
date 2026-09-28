@@ -1,7 +1,6 @@
 // @spec: Runtime execution model — Runtime library
 // @description: int(1e308) raises E8004 at runtime
 // @expected: runtime-error E8004
-// @profile: legacy-safe-int
 // @features: runtime, int, conversion, error
 
 export function test_int_range(): int {

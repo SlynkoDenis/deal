@@ -3424,14 +3424,15 @@ public class FoundationIntegrationTest {
                         + "the activated-state verification");
 
                 check(catalogAuthorityProbe(tmp, true),
-                    "the intact catalog selects the legacy regression invocation and "
-                        + "the pinned legacy authority holds (E8004 'int out of "
-                        + "range' — the fixture's pinned transcript)");
+                    "the intact catalog resolves the fixture's declared "
+                        + "production profile and the pinned production "
+                        + "authority holds (E8004 'int out of safe range' — "
+                        + "the fixture's re-pinned transcript)");
                 check(catalogAuthorityProbe(tmp, false),
-                    "faulted catalog (the int-convert-range row removed — the v1.2 "
-                        + "seam selection runs the fixture and its outcome diverges "
-                        + "from the pinned legacy authority) fails the "
-                        + "verification");
+                    "faulted catalog (a wrong int-convert-range profile row "
+                        + "selecting the legacy regression seam runs the "
+                        + "fixture and its outcome diverges from the pinned "
+                        + "production authority) fails the verification");
 
                 CorpusConfig seamFault = new CorpusConfig();
                 seamFault.legacyLuaInvocation = true;
@@ -3472,22 +3473,24 @@ public class FoundationIntegrationTest {
         /**
          * The catalog authority probe: for the catalogued backend-runtime
          * fixture {@code runtime/int-convert-range.deal} the intact harness
-         * seam selects LEGACY_REGRESSION + LEGACY_SAFE_INT and the LuaJIT
-         * lane produces the pinned legacy authority outcome (E8004 with
-         * the legacy template the fixture's transcript pins). The intact
-         * probe returns true iff the catalog still carries the row and the
-         * observed outcome equals that pinned authority.
+         * seam resolves the fixture's declared profile (the production
+         * profile after the re-pin, with no {@code @profile} header) and
+         * the LuaJIT lane produces the pinned production authority outcome
+         * (E8004 with the production template the fixture's transcript
+         * pins). The intact probe returns true iff the catalog still
+         * carries the row and the observed outcome equals that pinned
+         * authority.
          *
          * <p>The faulted probe ({@code rowPresent == false}) never
-         * consults the catalog guard: it simulates the removed row by
-         * selecting the seam the catalog applies to an uncatalogued
-         * locator ({@code frontendInvocation()} — the v1.2 invocation),
-         * executes the real compile + LuaJIT run, and returns true iff the
-         * observed outcome diverges from the pinned legacy authority
-         * outcome. The faulted run therefore proves the anti-hollow
-         * requirement for the catalog constituent: a removed row makes the
-         * verification fail observably (E8004 with the v1.2 retained
-         * template instead of the pinned legacy template).</p>
+         * consults the catalog guard: it simulates a wrong row by
+         * selecting the legacy-regression seam
+         * ({@code LEGACY_REGRESSION + LEGACY_SAFE_INT}), executes the real
+         * compile + LuaJIT run, and returns true iff the observed outcome
+         * diverges from the pinned production authority outcome. The
+         * faulted run therefore proves the anti-hollow requirement for the
+         * catalog constituent: a wrong profile row makes the verification
+         * fail observably (E8004 with the legacy retained template instead
+         * of the pinned production template).</p>
          */
         private static boolean catalogAuthorityProbe(Path tmp, boolean rowPresent)
                 throws Exception {
@@ -3505,7 +3508,7 @@ public class FoundationIntegrationTest {
                     ConformanceHarnessMetadata.profileFromMetadata(source,
                         locator))
                 : ConformanceHarnessMetadata.invocation(
-                    SemanticProfile.DEAL_V1_2_INT32);
+                    SemanticProfile.LEGACY_SAFE_INT);
             Path runDir = tmp.resolve("catalog-" + rowPresent);
             Path src = runDir.resolve("src");
             Files.createDirectories(src);
@@ -3553,15 +3556,16 @@ public class FoundationIntegrationTest {
                 StandardCharsets.UTF_8).trim();
             p.waitFor();
             Map<String, String> fields = parseFieldOutput(output);
-            // The pinned legacy authority outcome: E8004 with the legacy
-            // LuaJIT branch template (the landed ISSUE-0332 branch).
-            boolean legacyAuthority = "E8004".equals(fields.get("CODE"))
-                && "int out of range".equals(fields.get("MESSAGE"));
-            // Intact: the observed outcome must equal the pinned legacy
-            // authority. Faulted (row removed): the v1.2 seam run must
-            // diverge from the pinned legacy authority — that divergence
-            // is the verification failure the fault matrix asserts.
-            return rowPresent ? legacyAuthority : !legacyAuthority;
+            // The pinned production authority outcome: E8004 with the
+            // production template of the shared v1.2 int32 gate.
+            boolean productionAuthority = "E8004".equals(fields.get("CODE"))
+                && "int out of safe range".equals(fields.get("MESSAGE"));
+            // Intact: the observed outcome must equal the pinned production
+            // authority. Faulted (a wrong profile row): the legacy seam run
+            // must diverge from the pinned production authority — that
+            // divergence is the verification failure the fault matrix
+            // asserts.
+            return rowPresent ? productionAuthority : !productionAuthority;
         }
     }
 }

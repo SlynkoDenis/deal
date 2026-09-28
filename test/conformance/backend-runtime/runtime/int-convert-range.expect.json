@@ -8,15 +8,15 @@
   "expected": {
     "mode": "runtime-error",
     "transcript": {
-      "stdout": "DEAL_ERROR_CODE: E8004\nDEAL_ERROR_SNAPSHOT: {\"code\":\"E8004\",\"message\":\"int out of range\",\"sourceFile\":\"backend-runtime/runtime/int-convert-range.deal\",\"line\":8,\"column\":10}\n",
+      "stdout": "DEAL_ERROR_CODE: E8004\nDEAL_ERROR_SNAPSHOT: {\"code\":\"E8004\",\"message\":\"int out of safe range\",\"sourceFile\":\"backend-runtime/runtime/int-convert-range.deal\",\"line\":7,\"column\":10}\n",
       "stderr": ""
     },
     "exitCode": 1,
     "error": {
       "code": "E8004",
-      "message": "int out of range",
+      "message": "int out of safe range",
       "sourceFile": "backend-runtime/runtime/int-convert-range.deal",
-      "line": 8,
+      "line": 7,
       "column": 10
     }
   }
