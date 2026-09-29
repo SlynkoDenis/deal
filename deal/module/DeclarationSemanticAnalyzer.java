@@ -3,7 +3,6 @@ package deal.module;
 import deal.ast.ClassDeclaration;
 import deal.ast.ClassField;
 import deal.ast.DeclarationDirective;
-import deal.ast.ExportDeclaration;
 import deal.ast.ExpressionNode;
 import deal.ast.ProgramNode;
 import deal.ast.StatementNode;
@@ -21,7 +20,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -125,7 +123,7 @@ public final class DeclarationSemanticAnalyzer {
         // plan.
         List<ClassDeclaration> structClasses = new ArrayList<>();
         for (StatementNode stmt : input.program().statements()) {
-            ClassDeclaration cd = classDeclarationOf(stmt);
+            ClassDeclaration cd = AstDeclarations.classDeclarationOf(stmt);
             if (cd != null && cd.directives().contains(
                     DeclarationDirective.C_STRUCT)) {
                 structClasses.add(cd);
@@ -158,7 +156,7 @@ public final class DeclarationSemanticAnalyzer {
         // 4. Plan each C-struct class with the shared gates and the
         // shared IR walk.
         DefaultDeclaringContext declaringContext =
-            declaringContextOf(input);
+            DefaultDeclaringContext.of(input.imports(), input.location());
         List<PlannedDefaultClass> planned = new ArrayList<>();
         for (ClassDeclaration cd : structClasses) {
             ModuleIdentityAssembly.ClassIdentityResult identityResult =
@@ -325,27 +323,4 @@ public final class DeclarationSemanticAnalyzer {
         return new PlannedDefaultClass(plan, cd, occurrences);
     }
 
-    private static ClassDeclaration classDeclarationOf(StatementNode stmt) {
-        if (stmt instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        if (stmt instanceof ExportDeclaration ed
-                && ed.declaration() instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        return null;
-    }
-
-    private static DefaultDeclaringContext declaringContextOf(
-            DefaultDeclarationModuleInput input) {
-        Map<String, SemanticModuleIdentity> aliases =
-            new java.util.LinkedHashMap<>();
-        for (Map.Entry<String, DefaultPlanImport> entry
-                : input.imports().entrySet()) {
-            aliases.put(entry.getKey(),
-                entry.getValue().location().semanticModuleIdentity());
-        }
-        return new DefaultDeclaringContext(
-            input.location().semanticModuleIdentity(), aliases);
-    }
 }

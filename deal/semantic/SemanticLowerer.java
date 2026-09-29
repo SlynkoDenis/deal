@@ -1405,6 +1405,81 @@ public final class SemanticLowerer {
     }
 
     /**
+     * The shared non-null preamble of the public lowering entries: the
+     * six required inputs of every per-module lowering request.
+     */
+    private static void requireLoweringInputs(CheckedModuleInput module,
+                                              SemanticProfile profile,
+                                              Map<ConstructKind, List<SemanticOpKind>>
+                                                  constructCoverage,
+                                              String interfaceHash,
+                                              String capabilityRegistryHash,
+                                              SemanticIdAllocator allocator) {
+        Objects.requireNonNull(module, "module must not be null");
+        Objects.requireNonNull(profile, "profile must not be null");
+        Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
+        Objects.requireNonNull(interfaceHash, "interfaceHash must not be null");
+        Objects.requireNonNull(capabilityRegistryHash, "capabilityRegistryHash must not be null");
+        Objects.requireNonNull(allocator, "allocator must not be null");
+    }
+
+    /**
+     * The I3 profile guard's rejection result: a non-DEAL_V1_2_INT32
+     * lowering request produces no unit and no partial session state.
+     */
+    private static LoweringResult legacyProfileRejection(
+            CheckedModuleInput module, SemanticProfile profile) {
+        return new LoweringResult(null, null, List.of(FailureContractRegistry.e6005(
+            new LoweringFailureDetail(module.moduleId().path(),
+                SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
+                profile, LoweredModuleUnit.FORMAT_VERSION, "SemanticLowerer"))));
+    }
+
+    /**
+     * The first two closed gates of a produced unit (the 14-rule unit
+     * validator and the address-chain protocol, in order): empty on
+     * pass, otherwise the first E6005 as a failed {@link LoweringResult}.
+     */
+    private static Optional<LoweringResult> validateUnitGates(
+            LoweredModuleUnit unit, String interfaceHash,
+            String capabilityRegistryHash) {
+        Optional<CompilerDiagnostic> validation = SemanticIrValidator.validate(unit,
+            new SemanticIrValidator.ComparisonFacts(interfaceHash,
+                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash));
+        if (validation.isPresent()) {
+            return Optional.of(new LoweringResult(null, null, List.of(validation.get())));
+        }
+        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
+        if (chainShape.isPresent()) {
+            return Optional.of(new LoweringResult(null, null, List.of(chainShape.get())));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The complete validator tail of a produced unit: the two shared
+     * gates, then the control-flow validator over the unit's block table
+     * (produced only after the gates pass); returns the validated unit
+     * plus its table, or the first failing gate's E6005.
+     */
+    private static LoweringResult finishLowering(ModuleLowerer lowerer,
+                                                 LoweredModuleUnit unit,
+                                                 String interfaceHash,
+                                                 String capabilityRegistryHash) {
+        Optional<LoweringResult> gates = validateUnitGates(unit, interfaceHash,
+            capabilityRegistryHash);
+        if (gates.isPresent()) {
+            return gates.get();
+        }
+        StructuredBodyTable table = lowerer.bodyTable();
+        Optional<CompilerDiagnostic> controlFlow = ControlFlowValidator.validate(unit, table);
+        if (controlFlow.isPresent()) {
+            return new LoweringResult(null, null, List.of(controlFlow.get()));
+        }
+        return new LoweringResult(unit, table, List.of());
+    }
+
+    /**
      * The result of the module-level unit production: the validated unit
      * plus its produced {@link StructuredBodyTable} (C-D1), or
      * {@code null}/{@code null} with exactly the first E6005 diagnostic
@@ -1570,20 +1645,13 @@ public final class SemanticLowerer {
                                              String interfaceHash,
                                              String capabilityRegistryHash,
                                              SemanticIdAllocator allocator) {
-        Objects.requireNonNull(module, "module must not be null");
-        Objects.requireNonNull(profile, "profile must not be null");
-        Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        Objects.requireNonNull(interfaceHash, "interfaceHash must not be null");
-        Objects.requireNonNull(capabilityRegistryHash, "capabilityRegistryHash must not be null");
-        Objects.requireNonNull(allocator, "allocator must not be null");
+        requireLoweringInputs(module, profile, constructCoverage, interfaceHash,
+            capabilityRegistryHash, allocator);
         // I3 profile guard: the rejection runs before any op is built and
         // before any id is allocated — a LEGACY_SAFE_INT lowering request
         // produces no unit and no partial session state.
         if (profile != SemanticProfile.DEAL_V1_2_INT32) {
-            return new LoweringResult(null, null, List.of(FailureContractRegistry.e6005(
-                new LoweringFailureDetail(module.moduleId().path(),
-                    SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
-                    profile, LoweredModuleUnit.FORMAT_VERSION, "SemanticLowerer"))));
+            return legacyProfileRejection(module, profile);
         }
         ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
             module.checks(), allocator);
@@ -1605,31 +1673,11 @@ public final class SemanticLowerer {
         LoweredModuleUnit unit = lowerer.buildUnit(constructCoverage,
             module.imports().stream().map(ResolvedImport::resolvedModuleId).toList(),
             interfaceHash, capabilityRegistryHash);
-        Optional<CompilerDiagnostic> validation = SemanticIrValidator.validate(unit,
-            new SemanticIrValidator.ComparisonFacts(interfaceHash,
-                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash));
-        if (validation.isPresent()) {
-            return new LoweringResult(null, null, List.of(validation.get()));
-        }
-        // E5 production-time check (A-D1): the closed address-chain
-        // protocol runs after the foundation validator — every produced
-        // ASSIGN/DELETE chain must match exactly one closed A-D9 shape
-        // with single evaluation; the first violation is the returned
-        // E6005 (ADDRESS_CHAIN_SHAPE | SINGLE_EVALUATION).
-        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
-        if (chainShape.isPresent()) {
-            return new LoweringResult(null, null, List.of(chainShape.get()));
-        }
-        // E5 production-time check (C-D2): the produced block-membership
-        // table of the unit must pass the control-flow validator — block
-        // tree, dominance, and exit checks; the first violation is the
-        // returned E6005 (CONTROL_BLOCK_TREE | CONTROL_EXIT).
-        StructuredBodyTable table = lowerer.bodyTable();
-        Optional<CompilerDiagnostic> controlFlow = ControlFlowValidator.validate(unit, table);
-        if (controlFlow.isPresent()) {
-            return new LoweringResult(null, null, List.of(controlFlow.get()));
-        }
-        return new LoweringResult(unit, table, List.of());
+        // E5 production-time checks (A-D1/C-D2): the closed validator,
+        // the address-chain protocol, and the block-membership table's
+        // control-flow validator, in order; the first violation is the
+        // returned E6005.
+        return finishLowering(lowerer, unit, interfaceHash, capabilityRegistryHash);
     }
 
     /**
@@ -1688,20 +1736,12 @@ public final class SemanticLowerer {
                                                            String interfaceHash,
                                                            String capabilityRegistryHash,
                                                            SemanticIdAllocator allocator) {
-        Objects.requireNonNull(module, "module must not be null");
-        Objects.requireNonNull(profile, "profile must not be null");
-        Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        Objects.requireNonNull(interfaceHash, "interfaceHash must not be null");
-        Objects.requireNonNull(capabilityRegistryHash, "capabilityRegistryHash must not be null");
-        Objects.requireNonNull(allocator, "allocator must not be null");
+        requireLoweringInputs(module, profile, constructCoverage, interfaceHash,
+            capabilityRegistryHash, allocator);
         // I3 profile guard: identical to lowerModule — a non-DEAL_V1_2_INT32
         // lowering request produces no unit and no partial session state.
         if (profile != SemanticProfile.DEAL_V1_2_INT32) {
-            return new BindingCoreResult(new LoweringResult(null, null,
-                List.of(FailureContractRegistry.e6005(
-                    new LoweringFailureDetail(module.moduleId().path(),
-                        SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
-                        profile, LoweredModuleUnit.FORMAT_VERSION, "SemanticLowerer")))),
+            return new BindingCoreResult(legacyProfileRejection(module, profile),
                 BindingCoreFacts.empty());
         }
         ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
@@ -1732,17 +1772,10 @@ public final class SemanticLowerer {
             module.imports().stream().map(ResolvedImport::resolvedModuleId).toList(),
             interfaceHash, capabilityRegistryHash,
             ContainerClaimingSeam.E6_GATE_ACTIVATION);
-        Optional<CompilerDiagnostic> validation = SemanticIrValidator.validate(unit,
-            new SemanticIrValidator.ComparisonFacts(interfaceHash,
-                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash));
-        if (validation.isPresent()) {
-            return new BindingCoreResult(new LoweringResult(null, null,
-                List.of(validation.get())), lowerer.bindingFacts());
-        }
-        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
-        if (chainShape.isPresent()) {
-            return new BindingCoreResult(new LoweringResult(null, null,
-                List.of(chainShape.get())), lowerer.bindingFacts());
+        Optional<LoweringResult> gates = validateUnitGates(unit, interfaceHash,
+            capabilityRegistryHash);
+        if (gates.isPresent()) {
+            return new BindingCoreResult(gates.get(), lowerer.bindingFacts());
         }
         return new BindingCoreResult(new LoweringResult(unit, lowerer.bodyTable(), List.of()),
             lowerer.bindingFacts());
@@ -1789,17 +1822,10 @@ public final class SemanticLowerer {
                                                         String interfaceHash,
                                                         String capabilityRegistryHash,
                                                         SemanticIdAllocator allocator) {
-        Objects.requireNonNull(module, "module must not be null");
-        Objects.requireNonNull(profile, "profile must not be null");
-        Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        Objects.requireNonNull(interfaceHash, "interfaceHash must not be null");
-        Objects.requireNonNull(capabilityRegistryHash, "capabilityRegistryHash must not be null");
-        Objects.requireNonNull(allocator, "allocator must not be null");
+        requireLoweringInputs(module, profile, constructCoverage, interfaceHash,
+            capabilityRegistryHash, allocator);
         if (profile != SemanticProfile.DEAL_V1_2_INT32) {
-            return new LoweringResult(null, null, List.of(FailureContractRegistry.e6005(
-                new LoweringFailureDetail(module.moduleId().path(),
-                    SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
-                    profile, LoweredModuleUnit.FORMAT_VERSION, "SemanticLowerer"))));
+            return legacyProfileRejection(module, profile);
         }
         ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
             module.checks(), allocator, true, true, module.ast().span(), true);
@@ -1835,22 +1861,7 @@ public final class SemanticLowerer {
             module.imports().stream().map(ResolvedImport::resolvedModuleId).toList(),
             interfaceHash, capabilityRegistryHash,
             ContainerClaimingSeam.E6_GATE_ACTIVATION);
-        Optional<CompilerDiagnostic> validation = SemanticIrValidator.validate(unit,
-            new SemanticIrValidator.ComparisonFacts(interfaceHash,
-                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash));
-        if (validation.isPresent()) {
-            return new LoweringResult(null, null, List.of(validation.get()));
-        }
-        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
-        if (chainShape.isPresent()) {
-            return new LoweringResult(null, null, List.of(chainShape.get()));
-        }
-        StructuredBodyTable table = lowerer.bodyTable();
-        Optional<CompilerDiagnostic> controlFlow = ControlFlowValidator.validate(unit, table);
-        if (controlFlow.isPresent()) {
-            return new LoweringResult(null, null, List.of(controlFlow.get()));
-        }
-        return new LoweringResult(unit, table, List.of());
+        return finishLowering(lowerer, unit, interfaceHash, capabilityRegistryHash);
     }
 
     /**
@@ -1886,21 +1897,13 @@ public final class SemanticLowerer {
             SemanticIdAllocator allocator, Map<ModuleId, ModuleRoute> calleeRoutes,
             Map<ModuleId, Map<String, OpId>> calleeExternalEntries,
             Set<String> callbackExports) {
-        Objects.requireNonNull(module, "module must not be null");
-        Objects.requireNonNull(profile, "profile must not be null");
-        Objects.requireNonNull(constructCoverage, "constructCoverage must not be null");
-        Objects.requireNonNull(interfaceHash, "interfaceHash must not be null");
-        Objects.requireNonNull(capabilityRegistryHash, "capabilityRegistryHash must not be null");
-        Objects.requireNonNull(allocator, "allocator must not be null");
+        requireLoweringInputs(module, profile, constructCoverage, interfaceHash,
+            capabilityRegistryHash, allocator);
         Objects.requireNonNull(calleeRoutes, "calleeRoutes must not be null");
         Objects.requireNonNull(calleeExternalEntries, "calleeExternalEntries must not be null");
         Objects.requireNonNull(callbackExports, "callbackExports must not be null");
         if (profile != SemanticProfile.DEAL_V1_2_INT32) {
-            return new FullProgramE7Result(new LoweringResult(null, null,
-                List.of(FailureContractRegistry.e6005(
-                    new LoweringFailureDetail(module.moduleId().path(),
-                        SemanticCapability.FOUNDATION_VALUES, LOWER_LEGACY_PROFILE_REJECTED,
-                        profile, LoweredModuleUnit.FORMAT_VERSION, "SemanticLowerer")))),
+            return new FullProgramE7Result(legacyProfileRejection(module, profile),
                 Map.of(), Map.of());
         }
         ModuleLowerer lowerer = new ModuleLowerer(module.moduleId(), module.sourceId(),
@@ -1943,25 +1946,8 @@ public final class SemanticLowerer {
             module.imports().stream().map(ResolvedImport::resolvedModuleId).toList(),
             interfaceHash, capabilityRegistryHash,
             ContainerClaimingSeam.E6_GATE_ACTIVATION);
-        Optional<CompilerDiagnostic> validation = SemanticIrValidator.validate(unit,
-            new SemanticIrValidator.ComparisonFacts(interfaceHash,
-                SemanticProfile.DEAL_V1_2_INT32, capabilityRegistryHash));
-        if (validation.isPresent()) {
-            return new FullProgramE7Result(new LoweringResult(null, null,
-                List.of(validation.get())), Map.of(), Map.of());
-        }
-        Optional<CompilerDiagnostic> chainShape = AddressChainProtocol.validate(unit);
-        if (chainShape.isPresent()) {
-            return new FullProgramE7Result(new LoweringResult(null, null,
-                List.of(chainShape.get())), Map.of(), Map.of());
-        }
-        StructuredBodyTable table = lowerer.bodyTable();
-        Optional<CompilerDiagnostic> controlFlow = ControlFlowValidator.validate(unit, table);
-        if (controlFlow.isPresent()) {
-            return new FullProgramE7Result(new LoweringResult(null, null,
-                List.of(controlFlow.get())), Map.of(), Map.of());
-        }
-        return new FullProgramE7Result(new LoweringResult(unit, table, List.of()),
+        return new FullProgramE7Result(
+            finishLowering(lowerer, unit, interfaceHash, capabilityRegistryHash),
             lowerer.recordedEntries(), lowerer.recordedCallbacks());
     }
 
@@ -6597,6 +6583,84 @@ public final class SemanticLowerer {
         }
 
         /**
+         * The VALUE arm's completed creation payload: the resolved
+         * operand and the payload proof (present iff the operand is the
+         * single proved binding load).
+         */
+        private record AdapterValueSource(ValueId operand,
+                                          BindingImmutabilityProof proof) {
+        }
+
+        /**
+         * Completes the adapted source's VALUE arm from the checked
+         * shape (B7): a first-class intrinsic function value resolves
+         * the seeded intrinsic identity; every other source lowers its
+         * expression, and a binding reference requires the recorded
+         * proof.
+         */
+        private AdapterValueSource completeAdapterValueSource(
+                ExpressionNode value, AdapterShapeMap.SourceShape shape,
+                Optional<BindingImmutabilityProof> proof) {
+            if (shape == AdapterShapeMap.SourceShape.INTRINSIC_FUNCTION_VALUE) {
+                // B7 arm (a): a first-class intrinsic function value —
+                // the seeded intrinsic identity is the materialized
+                // operand; no function-typed load of the intrinsic
+                // binding is emitted (a first-class intrinsic value has
+                // no closed FunctionExecutionBinding shape, B5).
+                String name = ((IdentifierExpr) value).name();
+                ValueId operand = intrinsicIdentities.get(name);
+                if (operand == null) {
+                    throw new IllegalStateException("the intrinsic identity of '"
+                        + name + "' was not seeded at module-init top (producer "
+                        + "defect)");
+                }
+                return new AdapterValueSource(operand, null);
+            }
+            ValueId operand = lowerExpression(value);
+            BindingImmutabilityProof payloadProof = null;
+            if (shape == AdapterShapeMap.SourceShape.BINDING_REFERENCE) {
+                // B7 arm (b): the single proved BINDING_LOAD at the
+                // proof's generation — the payload proof must name that
+                // binding/generation (the load emission resolves the
+                // dominant incarnation, the same resolution the proof
+                // fact names).
+                payloadProof = proof.orElseThrow(() ->
+                    new IllegalStateException("the closed shape map selects "
+                        + "VALUE over a binding only with the recorded proof "
+                        + "(producer defect)"));
+            }
+            return new AdapterValueSource(operand, payloadProof);
+        }
+
+        /**
+         * The SHARED_CELL arm's source reference (B8): resolves the
+         * dominant incarnation at the adaptation position, registers
+         * the B2 capture reference, and returns the shared-cell
+         * reference.
+         */
+        private AdaptSourceRef.SharedCell lowerAdapterSharedCellSource(
+                ExpressionNode value) {
+            IdentifierExpr identifier = (IdentifierExpr) value;
+            FrameResolution resolution = resolveFrame(identifier.name());
+            if (resolution == null) {
+                throw new ConstructUnlowered("the SHARED_CELL source '"
+                    + identifier.name() + "' is not a declared binding of the "
+                    + "walk's environment (B7: a binding source resolves its "
+                    + "dominant incarnation at the adaptation position)");
+            }
+            // The B2 capture arm: the SharedCell source reference makes
+            // the incarnation a shared cell (its cell is read per
+            // invocation, so later writes are observed); inside a
+            // detached body the enclosing closure must also capture the
+            // binding (the detaching chain).
+            maybeRegisterCapture(identifier.name(), resolution);
+            cellKinds.registerCaptureReference(resolution.entry().incarnation());
+            return new AdaptSourceRef.SharedCell(
+                resolution.entry().cell().id,
+                resolution.entry().incarnation().generation());
+        }
+
+        /**
          * The shape-map child's adapted {@code let} declaration (B6-B9):
          * the closed mode map selects exactly one mode from checker
          * facts (B7), the per-mode payload is built from birth (B8),
@@ -6656,58 +6720,17 @@ public final class SemanticLowerer {
             List<RuntimeDescriptor> operandTypes;
             switch (mode) {
                 case VALUE -> {
-                    if (shape == AdapterShapeMap.SourceShape.INTRINSIC_FUNCTION_VALUE) {
-                        // B7 arm (a): a first-class intrinsic function
-                        // value — the seeded intrinsic identity is the
-                        // materialized operand; no function-typed load
-                        // of the intrinsic binding is emitted (a
-                        // first-class intrinsic value has no closed
-                        // FunctionExecutionBinding shape, B5).
-                        String name = ((IdentifierExpr) decl.initializer()).name();
-                        operand = intrinsicIdentities.get(name);
-                        if (operand == null) {
-                            throw new IllegalStateException("the intrinsic identity of '"
-                                + name + "' was not seeded at module-init top (producer "
-                                + "defect)");
-                        }
-                    } else {
-                        operand = lowerExpression(decl.initializer());
-                        if (shape == AdapterShapeMap.SourceShape.BINDING_REFERENCE) {
-                            // B7 arm (b): the single proved BINDING_LOAD
-                            // at the proof's generation — the payload
-                            // proof must name that binding/generation
-                            // (the load emission resolves the dominant
-                            // incarnation, the same resolution the
-                            // proof fact names).
-                            payloadProof = proof.orElseThrow(() ->
-                                new IllegalStateException("the closed shape map selects "
-                                    + "VALUE over a binding only with the recorded proof "
-                                    + "(producer defect)"));
-                        }
-                    }
+                    AdapterValueSource source = completeAdapterValueSource(
+                        decl.initializer(), shape, proof);
+                    operand = source.operand();
+                    payloadProof = source.proof();
                     sourceRef = new AdaptSourceRef.Value(operand);
                     operands = List.of(operand);
                     operandTypes = List.of(sourceSignature);
                 }
                 case SHARED_CELL -> {
-                    IdentifierExpr identifier = (IdentifierExpr) decl.initializer();
-                    FrameResolution resolution = resolveFrame(identifier.name());
-                    if (resolution == null) {
-                        throw new ConstructUnlowered("the SHARED_CELL source '"
-                            + identifier.name() + "' is not a declared binding of the "
-                            + "walk's environment (B7: a binding source resolves its "
-                            + "dominant incarnation at the adaptation position)");
-                    }
-                    // The B2 capture arm: the SharedCell source reference
-                    // makes the incarnation a shared cell (its cell is
-                    // read per invocation, so later writes are observed);
-                    // inside a detached body the enclosing closure must
-                    // also capture the binding (the detaching chain).
-                    maybeRegisterCapture(identifier.name(), resolution);
-                    cellKinds.registerCaptureReference(resolution.entry().incarnation());
-                    sourceRef = new AdaptSourceRef.SharedCell(
-                        resolution.entry().cell().id,
-                        resolution.entry().incarnation().generation());
+                    sourceRef = lowerAdapterSharedCellSource(
+                        decl.initializer());
                     operands = List.of();
                     operandTypes = List.of();
                 }
@@ -7062,6 +7085,28 @@ public final class SemanticLowerer {
         }
 
         /**
+         * Registers one callee body's parameters at the body block's
+         * entry: a generation-0 {@code DIRECT} incarnation and its
+         * {@code BINDING_ALLOC} per parameter, in declaration order (the
+         * invoking machinery's parameter-transfer write follows, E7).
+         */
+        private void lowerParameterBindings(BlockId bodyBlock,
+                                            List<Parameter> params) {
+            for (Parameter parameter : params) {
+                BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
+                BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
+                    INITIAL_LOOP_GENERATION, bodyBlock, BindingCellKind.DIRECT,
+                    true, BindingProducer.BINDING_ALLOC, false);
+                registerBinding(parameter.name(), binding, incarnation);
+                parameterBindings.add(binding);
+                emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
+                    new KindPayload.BindingAllocPayload(binding, bodyBlock, true,
+                        cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
+                    parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
+            }
+        }
+
+        /**
          * The binding walk's function-declaration arm: the module-level
          * name ALLOC was hoisted (B1); a nested-scope declaration emits
          * its name ALLOC at the declaration position in the enclosing
@@ -7111,18 +7156,7 @@ public final class SemanticLowerer {
                 checkerScopeNodes.push(function);
                 pushBindingFrame();
                 blockStack.push(bodyBlock);
-                for (deal.ast.Parameter parameter : function.params()) {
-                    BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
-                    BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
-                        INITIAL_LOOP_GENERATION, bodyBlock, BindingCellKind.DIRECT,
-                        true, BindingProducer.BINDING_ALLOC, false);
-                    registerBinding(parameter.name(), binding, incarnation);
-                    parameterBindings.add(binding);
-                    emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
-                        new KindPayload.BindingAllocPayload(binding, bodyBlock, true,
-                            cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
-                        parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
-                }
+                lowerParameterBindings(bodyBlock, function.params());
                 checkerScopeNodes.push(function.body());
                 statementWalk.walk(function.body().statements(), false);
                 checkerScopeNodes.pop();
@@ -7185,18 +7219,7 @@ public final class SemanticLowerer {
                 checkerScopeNodes.push(function);
                 pushBindingFrame();
                 blockStack.push(bodyBlock);
-                for (deal.ast.Parameter parameter : function.params()) {
-                    BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
-                    BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
-                        INITIAL_LOOP_GENERATION, bodyBlock, BindingCellKind.DIRECT,
-                        true, BindingProducer.BINDING_ALLOC, false);
-                    registerBinding(parameter.name(), binding, incarnation);
-                    parameterBindings.add(binding);
-                    emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
-                        new KindPayload.BindingAllocPayload(binding, bodyBlock, true,
-                            cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
-                        parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
-                }
+                lowerParameterBindings(bodyBlock, function.params());
                 checkerScopeNodes.push(function.body());
                 if (reservedContext != null) {
                     functionStack.push(reservedContext);
@@ -7356,18 +7379,7 @@ public final class SemanticLowerer {
                     if (reservedContext != null) {
                         functionStack.push(reservedContext);
                     }
-                    for (deal.ast.Parameter parameter : member.params()) {
-                        BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
-                        BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
-                            INITIAL_LOOP_GENERATION, bodyBlock, BindingCellKind.DIRECT,
-                            true, BindingProducer.BINDING_ALLOC, false);
-                        registerBinding(parameter.name(), binding, incarnation);
-                        parameterBindings.add(binding);
-                        emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
-                            new KindPayload.BindingAllocPayload(binding, bodyBlock, true,
-                                cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
-                            parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
-                    }
+                    lowerParameterBindings(bodyBlock, member.params());
                     checkerScopeNodes.push(member.body());
                     boolean bodyComplete = false;
                     try {
@@ -8976,43 +8988,22 @@ public final class SemanticLowerer {
                 List<RuntimeDescriptor> operandTypes;
                 switch (mode) {
                     case VALUE -> {
-                        if (shape == AdapterShapeMap.SourceShape.INTRINSIC_FUNCTION_VALUE) {
-                            String name = ((IdentifierExpr) assignment.value()).name();
-                            operand = intrinsicIdentities.get(name);
-                            if (operand == null) {
-                                throw new IllegalStateException("the intrinsic identity "
-                                    + "of '" + name + "' was not seeded at module-init "
-                                    + "top (producer defect)");
-                            }
-                        } else {
-                            operand = lowerExpression(assignment.value());
+                        AdapterValueSource source = completeAdapterValueSource(
+                            assignment.value(), shape, proof);
+                        operand = source.operand();
+                        payloadProof = source.proof();
+                        if (shape
+                                != AdapterShapeMap.SourceShape
+                                    .INTRINSIC_FUNCTION_VALUE) {
                             valueOp = producerOpId(operand);
-                            if (shape == AdapterShapeMap.SourceShape.BINDING_REFERENCE) {
-                                payloadProof = proof.orElseThrow(() ->
-                                    new IllegalStateException("the closed shape map "
-                                        + "selects VALUE over a binding only with the "
-                                        + "recorded proof (producer defect)"));
-                            }
                         }
                         sourceRef = new AdaptSourceRef.Value(operand);
                         operands = List.of(operand);
                         operandTypes = List.of(sourceSignature);
                     }
                     case SHARED_CELL -> {
-                        IdentifierExpr identifier = (IdentifierExpr) assignment.value();
-                        FrameResolution resolution = resolveFrame(identifier.name());
-                        if (resolution == null) {
-                            throw new ConstructUnlowered("the SHARED_CELL source '"
-                                + identifier.name() + "' is not a declared binding of the "
-                                + "walk's environment (B7: a binding source resolves its "
-                                + "dominant incarnation at the adaptation position)");
-                        }
-                        maybeRegisterCapture(identifier.name(), resolution);
-                        cellKinds.registerCaptureReference(
-                            resolution.entry().incarnation());
-                        sourceRef = new AdaptSourceRef.SharedCell(
-                            resolution.entry().cell().id,
-                            resolution.entry().incarnation().generation());
+                        sourceRef = lowerAdapterSharedCellSource(
+                            assignment.value());
                         operands = List.of();
                         operandTypes = List.of();
                     }
@@ -12495,15 +12486,16 @@ public final class SemanticLowerer {
         }
 
         /**
-         * {@code ENTRY_INVOKE} — the E7 entry delegation: exactly one
-         * {@code CALL(DIRECT main)} (parented to the entry op, executed
-         * once by the entry arm) and the entry terminal exits the
-         * program; no separate boundary.
+         * The shared entry-delegation precondition and reservation: main
+         * absent returns null; the pinned signature gate and the
+         * single-call-site gate fail closed; the delegation reserves
+         * main's call site. {@code delegatedFrom} is the caller's
+         * message clause naming the delegation site.
          */
-        private void emitEntryInvokeDelegation() {
+        private FunctionContext entryMainForDelegation(String delegatedFrom) {
             FunctionContext main = moduleFunctionContexts.get("main");
             if (main == null) {
-                return;
+                return null;
             }
             if (!main.signature.paramTypes().isEmpty()
                     || !(main.signature.returnType() instanceof RuntimeDescriptor.Null)
@@ -12513,10 +12505,42 @@ public final class SemanticLowerer {
             }
             if (main.callSiteUsed) {
                 throw new ConstructUnlowered("entry main is called from source and "
-                    + "delegated from the entry (the ENTRY_INVOKE delegation is main's "
-                    + "call site)");
+                    + "delegated from " + delegatedFrom);
             }
             main.callSiteUsed = true;
+            return main;
+        }
+
+        /**
+         * Emits main's reserved call-site {@code CALL(DIRECT main)} with
+         * the caller's origin (the entry op's child or the module-init
+         * tail).
+         */
+        private void emitEntryMainCallOp(FunctionContext main, ValueId result,
+                                         SourceOrigin origin) {
+            emit(buildOp(main.callSiteOpId, SemanticOpKind.CALL,
+                new KindPayload.CallPayload(CallMode.DIRECT,
+                    new KindPayload.CallCallee.Static(
+                        new FunctionExecutionBinding.LoweredBody(main.functionId,
+                            main.bodyBlock)),
+                    main.signature, List.of(), main.returnBoundaryOpId, null,
+                    main.bodyBlock, null),
+                result, ContainerPayloadDescriptors.resultDescriptorOf(Type.Null.INSTANCE),
+                List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE, origin));
+        }
+
+        /**
+         * {@code ENTRY_INVOKE} — the E7 entry delegation: exactly one
+         * {@code CALL(DIRECT main)} (parented to the entry op, executed
+         * once by the entry arm) and the entry terminal exits the
+         * program; no separate boundary.
+         */
+        private void emitEntryInvokeDelegation() {
+            FunctionContext main = entryMainForDelegation(
+                "the entry (the ENTRY_INVOKE delegation is main's call site)");
+            if (main == null) {
+                return;
+            }
             main.assignShape(InvocationShape.SOURCE_CALL, main.callSiteOpId);
             AnchorId entryAnchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             OpId entryOpId = ids.nextOpId(module, nextOrdinal++, 0);
@@ -12529,15 +12553,7 @@ public final class SemanticLowerer {
             emit(buildOp(entryOpId, SemanticOpKind.ENTRY_INVOKE,
                 new KindPayload.EntryInvokePayload(module, main.functionId),
                 null, null, FailurePolicyId.NO_DEAL_FAILURE, entryOrigin));
-            emit(buildOp(main.callSiteOpId, SemanticOpKind.CALL,
-                new KindPayload.CallPayload(CallMode.DIRECT,
-                    new KindPayload.CallCallee.Static(
-                        new FunctionExecutionBinding.LoweredBody(main.functionId,
-                            main.bodyBlock)),
-                    main.signature, List.of(), main.returnBoundaryOpId, null,
-                    main.bodyBlock, null),
-                result, ContainerPayloadDescriptors.resultDescriptorOf(Type.Null.INSTANCE),
-                List.of(), List.of(), FailurePolicyId.NO_DEAL_FAILURE, callOrigin));
+            emitEntryMainCallOp(main, result, callOrigin);
         }
 
         /**
@@ -12551,35 +12567,17 @@ public final class SemanticLowerer {
          * ENTRY_INVOKE op itself is the modules epic's production).
          */
         private void emitEntryMainCall() {
-            FunctionContext main = moduleFunctionContexts.get("main");
+            FunctionContext main = entryMainForDelegation(
+                "module init (the carrier slice admits exactly one CALL site"
+                    + " per callee — the entry delegation is main's call site)");
             if (main == null) {
                 return;
             }
-            if (!main.signature.paramTypes().isEmpty()
-                    || !(main.signature.returnType() instanceof RuntimeDescriptor.Null)
-                    || main.signature.isAsync()) {
-                throw new ConstructUnlowered("entry main must have the pinned non-async "
-                    + "signature '(): null' (the orchestrator's E2011 pins this)");
-            }
-            if (main.callSiteUsed) {
-                throw new ConstructUnlowered("entry main is called from source and "
-                    + "delegated from module init (the carrier slice admits exactly one "
-                    + "CALL site per callee — the entry delegation is main's call site)");
-            }
-            main.callSiteUsed = true;
             ValueId result = ids.nextValueId(module, nextOrdinal++, 0);
             AnchorId anchor = ids.nextAnchorId(module, nextOrdinal++, 0);
             SourceOrigin origin = new SourceOrigin(sourceId, toSourceSpan(programSpan),
                 SourceOriginKind.SYNTHETIC, anchor, currentParent());
-            emit(buildOp(main.callSiteOpId, SemanticOpKind.CALL,
-                new KindPayload.CallPayload(CallMode.DIRECT,
-                    new KindPayload.CallCallee.Static(new FunctionExecutionBinding.LoweredBody(
-                        main.functionId, main.bodyBlock)),
-                    main.signature, List.of(), main.returnBoundaryOpId,
-                    null, main.bodyBlock, null),
-                result, ContainerPayloadDescriptors.resultDescriptorOf(
-                    Type.Null.INSTANCE), List.of(), List.of(),
-                FailurePolicyId.NO_DEAL_FAILURE, origin));
+            emitEntryMainCallOp(main, result, origin);
             emitNullOp(SemanticOpKind.DISCARD, new KindPayload.DiscardPayload(result),
                 programSpan, FailurePolicyId.NO_DEAL_FAILURE, SourceOriginKind.SYNTHETIC,
                 null);
@@ -13331,18 +13329,7 @@ public final class SemanticLowerer {
                     contextsByFunctionId.put(functionId, reservedClosureContext);
                     functionStack.push(reservedClosureContext);
                 }
-                for (deal.ast.Parameter parameter : functionExpr.params()) {
-                    BindingId binding = ids.nextBindingId(module, nextOrdinal++, 0);
-                    BindingCoreIncarnation incarnation = new BindingCoreIncarnation(
-                        INITIAL_LOOP_GENERATION, bodyBlock, BindingCellKind.DIRECT,
-                        true, BindingProducer.BINDING_ALLOC, false);
-                    registerBinding(parameter.name(), binding, incarnation);
-                    parameterBindings.add(binding);
-                    emitUserNullOp(SemanticOpKind.BINDING_ALLOC,
-                        new KindPayload.BindingAllocPayload(binding, bodyBlock, true,
-                            cellKinds.cellKindOf(incarnation), INITIAL_LOOP_GENERATION),
-                        parameter.span(), FailurePolicyId.NO_DEAL_FAILURE);
-                }
+                lowerParameterBindings(bodyBlock, functionExpr.params());
                 boolean closureBodyComplete = false;
                 try {
                     statementWalk.walk(functionExpr.body().statements(), false);

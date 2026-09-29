@@ -103,7 +103,7 @@ public final class DefaultSemanticPlanner {
         List<PlannedDefaultClass> planned = new ArrayList<>();
 
         DefaultDeclaringContext declaringContext =
-            declaringContextOf(input);
+            DefaultDeclaringContext.of(input.imports(), input.location());
         for (Map.Entry<ClassDeclaration, SymbolTable> entry
                 : input.checkResult().classScopes().entrySet()) {
             ClassDeclaration cd = entry.getKey();
@@ -280,23 +280,6 @@ public final class DefaultSemanticPlanner {
             classIdentity, input.location().semanticModuleIdentity(),
             entries, Set.of());
         return new PlannedDefaultClass(plan, cd, occurrences);
-    }
-
-    /**
-     * The declaring lexical/import context of the module: its private
-     * semantic identity plus the alias surface.
-     */
-    private static DefaultDeclaringContext declaringContextOf(
-            DefaultPlanModuleInput input) {
-        Map<String, SemanticModuleIdentity> aliases =
-            new java.util.LinkedHashMap<>();
-        for (Map.Entry<String, DefaultPlanImport> entry
-                : input.imports().entrySet()) {
-            aliases.put(entry.getKey(),
-                entry.getValue().location().semanticModuleIdentity());
-        }
-        return new DefaultDeclaringContext(
-            input.location().semanticModuleIdentity(), aliases);
     }
 
     /**

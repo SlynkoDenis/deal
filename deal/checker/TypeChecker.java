@@ -1622,19 +1622,7 @@ public final class TypeChecker {
         if (targetType instanceof Type.Table) {
             // Table write — always allowed
         } else if (!isAssignable(targetType, valueType)) {
-            // F10: Detect reverse arity for E5004
-            if (targetType instanceof Type.Func tf && valueType instanceof Type.Func af
-                    && isReverseArity(af, tf)) {
-                error(DiagnosticCode.E5004,
-                    "Arity extension failed: actual function has more parameters ("
-                    + af.paramTypes().size() + ") than target ("
-                    + tf.paramTypes().size() + ")",
-                    assign.span());
-            } else {
-                error(DiagnosticCode.E3001,
-                    "Cannot assign " + typeName(valueType) + " to " + typeName(targetType),
-                    assign.span());
-            }
+            reportAssignabilityError(targetType, valueType, assign.span());
         }
 
         if (assign.target() instanceof IdentifierExpr id) {
@@ -1659,19 +1647,27 @@ public final class TypeChecker {
         if (targetType == null || exprType == null) return;
         if (targetType == Type.Error.INSTANCE || exprType == Type.Error.INSTANCE) return;
         if (!isAssignable(targetType, exprType)) {
-            // F10: Detect reverse arity for E5004
-            if (targetType instanceof Type.Func tf && exprType instanceof Type.Func af
-                    && isReverseArity(af, tf)) {
-                error(DiagnosticCode.E5004,
-                    "Arity extension failed: actual function has more parameters ("
-                    + af.paramTypes().size() + ") than target ("
-                    + tf.paramTypes().size() + ")",
-                    span);
-            } else {
-                error(DiagnosticCode.E3001,
-                    "Cannot assign " + typeName(exprType) + " to " + typeName(targetType),
-                    span);
-            }
+            reportAssignabilityError(targetType, exprType, span);
+        }
+    }
+
+    /**
+     * The pinned assignability failure at {@code span}: E5004 for the
+     * reverse-arity extension case (F10), E3001 otherwise.
+     */
+    private void reportAssignabilityError(Type targetType, Type actualType, Span span) {
+        // F10: Detect reverse arity for E5004
+        if (targetType instanceof Type.Func tf && actualType instanceof Type.Func af
+                && isReverseArity(af, tf)) {
+            error(DiagnosticCode.E5004,
+                "Arity extension failed: actual function has more parameters ("
+                + af.paramTypes().size() + ") than target ("
+                + tf.paramTypes().size() + ")",
+                span);
+        } else {
+            error(DiagnosticCode.E3001,
+                "Cannot assign " + typeName(actualType) + " to " + typeName(targetType),
+                span);
         }
     }
 

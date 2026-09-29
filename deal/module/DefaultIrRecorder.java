@@ -343,17 +343,9 @@ final class DefaultIrRecorder {
                     // an imported module records the wrapper at the
                     // call-site range (pre-order: the callee's own
                     // member-access record is deduplicated away).
-                    SemanticResourceIdentity resource = importedResource(
-                        provider,
-                        LexicalDeclarationIdentity.DeclarationKind.FUNCTION,
-                        mae.field());
-                    recordOccurrence(
-                        RuntimeResourceReference.Kind
-                            .IMPORTED_FUNCTION_WRAPPER,
-                        provider, id.name(), resource,
-                        call.span().range());
-                    target = DefaultIrNode.Target.importedResource(
-                        ms.name() + "." + mae.field(), resource);
+                    target = recordImportedFunctionWrapper(provider,
+                        id.name(), ms.name() + "." + mae.field(),
+                        mae.field(), call.span().range());
                 }
             }
         } else if (call.callee() instanceof IdentifierExpr cid) {
@@ -402,17 +394,9 @@ final class DefaultIrRecorder {
                     // value: the wrapper reference records at the member
                     // access range (a call site records first at the
                     // call range and deduplicates this).
-                    SemanticResourceIdentity resource = importedResource(
-                        provider,
-                        LexicalDeclarationIdentity.DeclarationKind.FUNCTION,
-                        mae.field());
-                    recordOccurrence(
-                        RuntimeResourceReference.Kind
-                            .IMPORTED_FUNCTION_WRAPPER,
-                        provider, id.name(), resource,
-                        mae.span().range());
-                    target = DefaultIrNode.Target.importedResource(
-                        ms.name() + "." + mae.field(), resource);
+                    target = recordImportedFunctionWrapper(provider,
+                        id.name(), ms.name() + "." + mae.field(),
+                        mae.field(), mae.span().range());
                 } else if (exportType instanceof Type.Class clsType) {
                     // A class member in expression position cannot
                     // type-check; defensive target only, no occurrence
@@ -848,122 +832,66 @@ final class DefaultIrRecorder {
         return provider.modulePath();
     }
 
+    /**
+     * Records the imported-function wrapper reference of one imported
+     * call or first-class member read, and returns its target: the
+     * occurrence keys on the wrapper kind, the provider, the alias, and
+     * the call-site or member-access range.
+     */
+    private DefaultIrNode.Target recordImportedFunctionWrapper(
+            DefaultPlanImport provider, String alias, String qualifiedName,
+            String field, DiagnosticRange range) {
+        SemanticResourceIdentity resource = importedResource(provider,
+            LexicalDeclarationIdentity.DeclarationKind.FUNCTION, field);
+        recordOccurrence(
+            RuntimeResourceReference.Kind.IMPORTED_FUNCTION_WRAPPER,
+            provider, alias, resource, range);
+        return DefaultIrNode.Target.importedResource(qualifiedName, resource);
+    }
+
     private SemanticResourceIdentity sameModuleResource(
+            LexicalDeclarationIdentity.DeclarationKind kind, String name) {
+        return declarationResource(program, location.semanticModuleIdentity(),
+            modulePath, kind, name);
+    }
+
+    private SemanticResourceIdentity importedResource(
+            DefaultPlanImport provider,
+            LexicalDeclarationIdentity.DeclarationKind kind, String name) {
+        return declarationResource(provider.program(),
+            provider.location().semanticModuleIdentity(),
+            provider.modulePath(), kind, name);
+    }
+
+    /**
+     * The semantic resource identity of one same-module or imported
+     * declaration: the declaration's range when findable (a function's
+     * synthetic JSON export anchors on its class), the program's range
+     * otherwise.
+     */
+    private static SemanticResourceIdentity declarationResource(
+            ProgramNode program, SemanticModuleIdentity moduleIdentity,
+            String modulePath,
             LexicalDeclarationIdentity.DeclarationKind kind, String name) {
         StatementNode declaration = kind
                 == LexicalDeclarationIdentity.DeclarationKind.FUNCTION
-            ? findFunctionDeclaration(program, name)
-            : findClassDeclaration(program, name);
+            ? AstDeclarations.findFunctionDeclaration(program, name)
+            : AstDeclarations.findClassDeclaration(program, name);
         DiagnosticRange range;
         if (declaration != null) {
             range = declaration.span().range();
         } else if (kind
                 == LexicalDeclarationIdentity.DeclarationKind.FUNCTION) {
-            ClassDeclaration synthetic = jsonableClassForSynthetic(program,
-                name);
+            ClassDeclaration synthetic =
+                AstDeclarations.jsonableClassForSynthetic(program, name);
             range = synthetic != null ? synthetic.span().range()
                 : program.span().range();
         } else {
             range = program.span().range();
         }
         return new SemanticResourceIdentity(
-            location.semanticModuleIdentity(), kind,
+            moduleIdentity, kind,
             new LexicalDeclarationIdentity(kind, name, modulePath, range));
-    }
-
-    private SemanticResourceIdentity importedResource(
-            DefaultPlanImport provider,
-            LexicalDeclarationIdentity.DeclarationKind kind, String name) {
-        StatementNode declaration = kind
-                == LexicalDeclarationIdentity.DeclarationKind.FUNCTION
-            ? findFunctionDeclaration(provider.program(), name)
-            : findClassDeclaration(provider.program(), name);
-        DiagnosticRange range;
-        if (declaration != null) {
-            range = declaration.span().range();
-        } else if (kind
-                == LexicalDeclarationIdentity.DeclarationKind.FUNCTION) {
-            ClassDeclaration synthetic = jsonableClassForSynthetic(
-                provider.program(), name);
-            range = synthetic != null ? synthetic.span().range()
-                : provider.program().span().range();
-        } else {
-            range = provider.program().span().range();
-        }
-        return new SemanticResourceIdentity(
-            provider.location().semanticModuleIdentity(), kind,
-            new LexicalDeclarationIdentity(kind, name,
-                provider.modulePath(), range));
-    }
-
-    /**
-     * Finds a top-level function declaration by name (exported
-     * declarations included), or null.
-     */
-    private static FunctionDeclaration findFunctionDeclaration(
-            ProgramNode program, String name) {
-        for (StatementNode stmt : program.statements()) {
-            FunctionDeclaration fd = functionDeclarationOf(stmt);
-            if (fd != null && fd.name().equals(name)) {
-                return fd;
-            }
-        }
-        return null;
-    }
-
-    private static FunctionDeclaration functionDeclarationOf(
-            StatementNode stmt) {
-        if (stmt instanceof FunctionDeclaration fd) {
-            return fd;
-        }
-        if (stmt instanceof ExportDeclaration ed
-                && ed.declaration() instanceof FunctionDeclaration fd) {
-            return fd;
-        }
-        return null;
-    }
-
-    /**
-     * Finds a top-level class declaration by name (exported
-     * declarations included), or null.
-     */
-    private static ClassDeclaration findClassDeclaration(
-            ProgramNode program, String name) {
-        for (StatementNode stmt : program.statements()) {
-            ClassDeclaration cd = classDeclarationOf(stmt);
-            if (cd != null && cd.name().equals(name)) {
-                return cd;
-            }
-        }
-        return null;
-    }
-
-    private static ClassDeclaration classDeclarationOf(StatementNode stmt) {
-        if (stmt instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        if (stmt instanceof ExportDeclaration ed
-                && ed.declaration() instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        return null;
-    }
-
-    /**
-     * The class whose synthetic {@code C$fromJson}/{@code C$toJson}
-     * export carries the given name, or null.
-     */
-    private static ClassDeclaration jsonableClassForSynthetic(
-            ProgramNode program, String name) {
-        for (StatementNode stmt : program.statements()) {
-            ClassDeclaration cd = classDeclarationOf(stmt);
-            if (cd != null && cd.isJsonable()
-                    && (name.equals(cd.name() + "$fromJson")
-                        || name.equals(cd.name() + "$toJson"))) {
-                return cd;
-            }
-        }
-        return null;
     }
 
     /**

@@ -39,7 +39,7 @@ final class IntrinsicResolvers {
             return Type.Int.INSTANCE;
         }
         ctx.error(DiagnosticCode.E5001,
-            "int() argument must be number or int|null, got " + typeName(arg),
+            "int() argument must be number or int|null, got " + TypeChecker.typeName(arg),
             call.span());
         return Type.Error.INSTANCE;
     };
@@ -64,7 +64,7 @@ final class IntrinsicResolvers {
             return Type.Number.INSTANCE;
         }
         ctx.error(DiagnosticCode.E5001,
-            "number() argument must be int or number|null, got " + typeName(arg),
+            "number() argument must be int or number|null, got " + TypeChecker.typeName(arg),
             call.span());
         return Type.Error.INSTANCE;
     };
@@ -90,7 +90,7 @@ final class IntrinsicResolvers {
             return Type.Bytes.INSTANCE;
         }
         ctx.error(DiagnosticCode.E5001,
-            "bytes() argument must be int, got " + typeName(arg),
+            "bytes() argument must be int, got " + TypeChecker.typeName(arg),
             call.span());
         return Type.Error.INSTANCE;
     };
@@ -129,7 +129,7 @@ final class IntrinsicResolvers {
 
         if (!(objActualType instanceof Type.Class cls)) {
             ctx.error(DiagnosticCode.E4005,
-                "'has' argument must be a class field access, got " + typeName(objActualType),
+                "'has' argument must be a class field access, got " + TypeChecker.typeName(objActualType),
                 arg.span());
             return Type.Error.INSTANCE;
         }
@@ -171,24 +171,6 @@ final class IntrinsicResolvers {
 
     private static boolean isNullableNumber(Type t) {
         return t instanceof Type.Nullable n && n.inner() == Type.Number.INSTANCE;
-    }
-
-    private static String typeName(Type t) {
-        if (t == null) return "null";
-        return switch (t) {
-            case Type.Null ignored -> "null";
-            case Type.Boolean ignored -> "boolean";
-            case Type.Int ignored -> "int";
-            case Type.Number ignored -> "number";
-            case Type.String ignored -> "string";
-            case Type.Table ignored -> "table";
-            case Type.Bytes ignored -> "bytes";
-            case Type.Error ignored -> "<error>";
-            case Type.Array a -> typeName(a.element()) + "[]";
-            case Type.Nullable n -> typeName(n.inner()) + " | null";
-            case Type.Class c -> c.name();
-            case Type.Func f -> "function";
-        };
     }
 
     static ClassField findField(List<ClassField> fields, String name) {

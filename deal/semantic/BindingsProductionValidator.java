@@ -1931,57 +1931,18 @@ public final class BindingsProductionValidator {
                 || viaChain && moduleCompletion(model, write);
         }
         if (model.functionRoots.contains(root)) {
-            if (allocation.block != null
-                    && (model.regionBlocks.getOrDefault(root, List.of())
-                        .contains(allocation.block) || root.equals(allocation.block))) {
-                // Arm 2: the incarnation's own region contains the site.
-                return model.writeDominates(write, site);
-            }
-            // Arm 3: a captured detached load.
-            if (ownNameTerminates(model, root, binding, generation)) {
-                return true;
-            }
-            if (groupPublicationTerminates(model, allocation, root)) {
-                return true;
-            }
-            if (moduleCompletion(model, write)) {
-                return true;
-            }
-            String key = root + "|" + allocation.op.opId().id() + "|"
-                + binding.id() + "|" + generation;
-            if (!visited.add(key)) {
-                return false; // a detaching chain cycle
-            }
-            SemanticOp detaching = model.detachingOfFunction.get(root);
-            if (detaching == null) {
-                return false;
-            }
-            return loadValid(model, allocation, write, binding, generation, detaching,
-                true, visited);
+            // Arm 3 at a function root: a captured detached load, with
+            // the size-1 SCC own-name arm as an extra terminator.
+            return detachedLoadValid(model, allocation, write, binding,
+                generation, site, root, model.detachingOfFunction, true,
+                visited);
         }
         if (model.thunkRoots.contains(root)) {
-            if (allocation.block != null
-                    && (model.regionBlocks.getOrDefault(root, List.of())
-                        .contains(allocation.block) || root.equals(allocation.block))) {
-                return model.writeDominates(write, site);
-            }
-            if (groupPublicationTerminates(model, allocation, root)) {
-                return true;
-            }
-            if (moduleCompletion(model, write)) {
-                return true;
-            }
-            String key = root + "|" + allocation.op.opId().id() + "|"
-                + binding.id() + "|" + generation;
-            if (!visited.add(key)) {
-                return false;
-            }
-            SemanticOp detaching = model.detachingOfThunk.get(root);
-            if (detaching == null) {
-                return false;
-            }
-            return loadValid(model, allocation, write, binding, generation, detaching,
-                true, visited);
+            // Arm 3 at a thunk root: a captured detached load (no
+            // own-name terminator — a thunk body has no own name).
+            return detachedLoadValid(model, allocation, write, binding,
+                generation, site, root, model.detachingOfThunk, false,
+                visited);
         }
         if (model.defaultRoots.contains(root)) {
             if (allocation.block != null
@@ -2002,6 +1963,48 @@ public final class BindingsProductionValidator {
         // Any other region root (e.g., a CALL body block): plain dominance
         // within that region.
         return model.writeDominates(write, site);
+    }
+
+    /**
+     * Arm 3 (a captured detached load) at one detached region root: the
+     * incarnation's own-region dominance (arm 2), then the terminating
+     * arms — the size-1 SCC own-name arm when the root is a function,
+     * the group-publication arm, and the module-init-completion arm —
+     * then one step along the root's detaching chain, cycle-guarded by
+     * the visited key. The detaching map picks the region class's chain
+     * ({@code functionRoots} vs {@code thunkRoots}).
+     */
+    private static boolean detachedLoadValid(Model model, Allocation allocation,
+                                             Write write, BindingId binding, long generation,
+                                             SemanticOp site, BlockId root,
+                                             Map<BlockId, SemanticOp> detachingOf,
+                                             boolean ownName, Set<String> visited) {
+        if (allocation.block != null
+                && (model.regionBlocks.getOrDefault(root, List.of())
+                    .contains(allocation.block) || root.equals(allocation.block))) {
+            // Arm 2: the incarnation's own region contains the site.
+            return model.writeDominates(write, site);
+        }
+        if (ownName && ownNameTerminates(model, root, binding, generation)) {
+            return true;
+        }
+        if (groupPublicationTerminates(model, allocation, root)) {
+            return true;
+        }
+        if (moduleCompletion(model, write)) {
+            return true;
+        }
+        String key = root + "|" + allocation.op.opId().id() + "|"
+            + binding.id() + "|" + generation;
+        if (!visited.add(key)) {
+            return false; // a detaching chain cycle
+        }
+        SemanticOp detaching = detachingOf.get(root);
+        if (detaching == null) {
+            return false;
+        }
+        return loadValid(model, allocation, write, binding, generation, detaching,
+            true, visited);
     }
 
     /**

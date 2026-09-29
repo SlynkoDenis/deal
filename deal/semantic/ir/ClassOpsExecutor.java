@@ -765,84 +765,29 @@ public final class ClassOpsExecutor {
         // K-D4 step 1: provided values resolve in literal order.
         LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
         LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            Value value = resolve(priorValues, field.valueOpId());
-            if (value instanceof Value.Missing) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provided field '" + field.name()
-                    + "' (" + field.valueOpId() + ") resolves to the internal Missing view: "
-                    + "a provided field always carries a present value (language null is "
-                    + "the explicit Null variant) — a wrong-kind value is a producer "
-                    + "defect, never executed");
-            }
-            // Duplicate provided names keep the last value (the checker's
-            // class-literal map rule); every entry still resolves in
-            // literal order so its effects complete.
-            providedValues.put(field.name(), value);
-            providedValueIds.put(field.name(), field.valueOpId());
-        }
+        resolveProvidedFields(op, payload, priorValues, null, providedValues,
+            providedValueIds);
 
         // K-D4 step 2: default application in declaration order for omitted
         // required-present fields — skipping any child whose field is
         // provided (a provided field's default never runs).
         LinkedHashMap<String, Value> defaultValues = new LinkedHashMap<>();
-        LinkedHashMap<String, SemanticOp> defaultOpsByField = new LinkedHashMap<>();
-        for (OpId defaultOpId : payload.classDefaultOpIds()) {
-            SemanticOp defaultOp = requireDefaultChild(defaultOps, defaultOpId,
-                payload.classId(), op);
-            KindPayload.ClassDefaultPayload defaultPayload =
-                (KindPayload.ClassDefaultPayload) defaultOp.payload();
-            if (providedValues.containsKey(defaultPayload.field())) {
-                // The skip-provided rule: a provided field's default
-                // block is never executed by this construction attempt.
-                continue;
-            }
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, defaultPayload.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " names CLASS_DEFAULT child "
-                    + defaultOpId + " for field '" + defaultPayload.field() + "' which is "
-                    + "not a declared field of " + payload.classId() + ": a default child "
-                    + "of an undeclared field is a producer defect, never executed");
-            }
-            if (!fieldLayout.required()) {
-                throw new Defect("CLASS_NEW " + op.opId() + " names CLASS_DEFAULT child "
-                    + defaultOpId + " for optional field '" + defaultPayload.field()
-                    + "': default application runs for omitted required-present fields "
-                    + "only — an optional field's default never runs at construction "
-                    + "(the field stays missing), so a listed optional default is a "
-                    + "producer defect, never executed");
-            }
-            if (defaultValues.containsKey(defaultPayload.field())) {
-                throw new Defect("CLASS_NEW " + op.opId() + " names two CLASS_DEFAULT "
-                    + "children for field '" + defaultPayload.field() + "': the pinned "
-                    + "shape carries exactly one default child per defaulted field — a "
-                    + "duplicate is a producer defect, never executed");
-            }
-            Outcome<Value> produced = executeClassDefault(defaultOp, bodyRunner);
-            if (!(produced instanceof Outcome.Success<Value> success)) {
-                // executeClassDefault cannot fail by itself: a default-block
-                // failure propagates as the callback's own throw.
-                throw new Defect("CLASS_NEW " + op.opId() + " CLASS_DEFAULT child "
-                    + defaultOpId + " returned a failure terminal from the default "
-                    + "execution: the default op's policy is NO_DEAL_FAILURE and only "
-                    + "already-started child/operand failures may propagate — a "
-                    + "producer defect, never executed");
-            }
-            defaultValues.put(defaultPayload.field(), success.value());
-            defaultOpsByField.put(defaultPayload.field(), defaultOp);
-        }
+        LinkedHashMap<String, SemanticOp> defaultOpsByField = applyClassDefaults(
+            op, payload.classId(), payload.classDefaultOpIds(), defaultOps, layout,
+            providedValues.keySet(),
+            "default application runs for omitted required-present fields only — an"
+                + " optional field's default never runs at construction (the field stays"
+                + " missing), so a listed optional default is a producer defect, never"
+                + " executed",
+            bodyRunner, defaultValues);
 
         // K-D4 step 3: extra-key rejection first in provided-source order —
         // after default application, before any provided-field application
         // or field validation.
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            if (fieldOf(layout, field.name()) == null) {
-                BoundaryFailure failure = BoundaryFailure.fromRow(
-                    FailureContractRegistry.row(FailurePolicyId.CLASS_CONSTRUCTION), 0,
-                    null, null,
-                    metadataOf("field", field.name(), "classId", payload.classId().text()),
-                    null);
-                return new Outcome.Failure<Value>(new OpFailure(failure, op.origin()));
-            }
+        Outcome.Failure<Value> extraKeyFailure =
+            undeclaredProvidedFieldFailure(op, payload, layout);
+        if (extraKeyFailure != null) {
+            return extraKeyFailure;
         }
 
         // The pinned field-boundary coverage (K-D4 step 5 shape): exactly
@@ -850,41 +795,9 @@ public final class ClassOpsExecutor {
         // defaulted field (CLASS_DEFAULT_FIELD) in declaration order;
         // omitted optional fields get no boundary and stay missing. A
         // count, order, or kind deviation is a producer defect.
-        List<java.lang.String> expectedBoundaryFields = new ArrayList<>();
-        for (ClassLayout.FieldLayout fieldLayout : layout.fields()) {
-            if (providedValues.containsKey(fieldLayout.name())
-                    || defaultValues.containsKey(fieldLayout.name())) {
-                expectedBoundaryFields.add(fieldLayout.name());
-            }
-        }
         List<KindPayload.FieldBoundary> boundaries = payload.fieldBoundaries();
-        if (boundaries.size() != expectedBoundaryFields.size()) {
-            throw new Defect("CLASS_NEW " + op.opId() + " carries " + boundaries.size()
-                + " field-boundary entries for " + expectedBoundaryFields.size()
-                + " present fields: the pinned shape carries exactly one boundary per "
-                + "provided field and per omitted required-present defaulted field in "
-                + "declaration order — a child-count mismatch is a producer defect, "
-                + "never executed");
-        }
-        for (int i = 0; i < boundaries.size(); i++) {
-            KindPayload.FieldBoundary entry = boundaries.get(i);
-            java.lang.String expectedField = expectedBoundaryFields.get(i);
-            if (!entry.field().equals(expectedField)) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry " + i
-                    + " names field '" + entry.field() + "': the pinned declaration order "
-                    + "names '" + expectedField + "' — a field-boundary order mismatch "
-                    + "is a producer defect, never executed");
-            }
-            BoundaryKind expectedKind = providedValues.containsKey(entry.field())
-                ? BoundaryKind.CLASS_LITERAL_FIELD : BoundaryKind.CLASS_DEFAULT_FIELD;
-            if (entry.kind() != expectedKind) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry for '"
-                    + entry.field() + "' carries kind " + entry.kind() + ": the pinned "
-                    + "kind is " + expectedKind + " (CLASS_LITERAL_FIELD for provided "
-                    + "values, CLASS_DEFAULT_FIELD for defaulted values) — a kind "
-                    + "mismatch is a producer defect, never executed");
-            }
-        }
+        requireBoundaryShape(op, payload, layout, providedValues, boundaries,
+            defaultValues::containsKey);
 
         // K-D4 step 4: provided-field application in declaration order (the
         // overlay onto the default-filled instance; duplicate names keep the
@@ -903,46 +816,10 @@ public final class ClassOpsExecutor {
         // K-D4 step 5: field validation in declaration order through the
         // BoundaryCheckRunner seam; the first failing child fails the op
         // and no instance is published.
-        for (KindPayload.FieldBoundary entry : boundaries) {
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry names "
-                    + "field '" + entry.field() + "' which is not a declared field of "
-                    + payload.classId() + ": a boundary of an undeclared field is a "
-                    + "producer defect, never executed");
-            }
-            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
-                entry.kind());
-            KindPayload.BoundaryPayload boundaryPayload =
-                (KindPayload.BoundaryPayload) child.payload();
-            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries descriptor "
-                    + boundaryPayload.descriptor().canonicalSpecText()
-                    + ": the pinned child descriptor is the field's declared descriptor "
-                    + fieldLayout.descriptor().canonicalSpecText() + " — a mismatch is a "
-                    + "producer defect, never executed");
-            }
-            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
-            Value input;
-            if (entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD) {
-                Value provided = providedValues.get(entry.field());
-                ValueId providedId = providedValueIds.get(entry.field());
-                if (provided == null || providedId == null) {
-                    throw new Defect("CLASS_NEW " + op.opId() + " carries a "
-                        + "CLASS_LITERAL_FIELD boundary for field '" + entry.field()
-                        + "' without a provided value: the pinned kind names provided "
-                        + "values only — a producer defect, never executed");
-                }
-                if (!boundaryPayload.input().equals(providedId)) {
-                    throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                        + child.opId() + " carries input " + boundaryPayload.input()
-                        + ": the pinned CLASS_LITERAL_FIELD input is the field's "
-                        + "provided value op " + providedId + " (K-D4 input wiring) — a "
-                        + "mismatch is a producer defect, never executed");
-                }
-                input = provided;
-            } else {
+        LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
+        OpFailure fieldFailure = applyFieldBoundaries(op, payload, layout, boundaries,
+            providedValues, providedValueIds, boundaryOps, checkRunner, checkedValues,
+            (child, entry, boundaryPayload) -> {
                 SemanticOp defaultOp = defaultOpsByField.get(entry.field());
                 if (defaultOp == null) {
                     throw new Defect("CLASS_NEW " + op.opId() + " carries a "
@@ -965,18 +842,12 @@ public final class ClassOpsExecutor {
                         + "CLASS_DEFAULT op result " + resultId + " (K-D4 input wiring) — "
                         + "a mismatch is a producer defect, never executed");
                 }
-                input = defaultValues.get(entry.field());
-            }
-            BoundaryResult result = checkRunner.run(boundaryPayload, input);
-            if (result instanceof BoundaryResult.Pass pass) {
-                instanceFields.put(entry.field(), pass.value());
-                continue;
-            }
-            // The first failing child fails the op: no instance, no tag,
-            // and the later children never run.
-            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
-            return new Outcome.Failure<Value>(new OpFailure(fail.failure(), op.origin()));
+                return defaultValues.get(entry.field());
+            });
+        if (fieldFailure != null) {
+            return new Outcome.Failure<Value>(fieldFailure);
         }
+        instanceFields.putAll(checkedValues);
 
         // K-D4 step 6: tag the fresh instance with classId and SUCCESS
         // publishes it (declaration-order field states; omitted optionals
@@ -1132,87 +1003,19 @@ public final class ClassOpsExecutor {
         // and stays fail closed.
         LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
         LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            Value value = resolve(priorValues, field.valueOpId());
-            if (value instanceof Value.Missing) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provided field '"
-                    + field.name() + "' (" + field.valueOpId() + ") resolves to the"
-                    + " internal Missing view: a provided field always carries a"
-                    + " present value (language null is the explicit Null variant) — a"
-                    + " wrong-kind value is a producer defect, never executed");
-            }
-            if (fieldOf(layout, field.name()) == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provides field '"
-                    + field.name() + "' which is not a declared field of "
-                    + payload.classId() + ": the checker's E4002 rejects an extra"
-                    + " literal field before lowering — a producer defect, never"
-                    + " executed");
-            }
-            providedValues.put(field.name(), value);
-            providedValueIds.put(field.name(), field.valueOpId());
-        }
+        resolveProvidedFields(op, payload, priorValues, layout, providedValues,
+            providedValueIds);
 
         // The pinned field-boundary coverage (K-D4 step 5 shape): exactly
         // one entry per provided field (CLASS_LITERAL_FIELD) in declaration
         // order — an omitted field gets no boundary (it takes the compiler
         // constant empty string).
-        List<KindPayload.FieldBoundary> boundaries = payload.fieldBoundaries();
-        if (boundaries.size() != providedValues.size()) {
-            throw new Defect("CLASS_NEW " + op.opId() + " carries "
-                + boundaries.size() + " field-boundary entries for "
-                + providedValues.size() + " provided fields: the pinned builtin"
-                + " Error shape carries exactly one CLASS_LITERAL_FIELD boundary per"
-                + " provided field — a child-count mismatch is a producer defect,"
-                + " never executed");
-        }
         LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
-        for (KindPayload.FieldBoundary entry : boundaries) {
-            Value provided = providedValues.get(entry.field());
-            ValueId providedId = providedValueIds.get(entry.field());
-            if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD || provided == null
-                    || providedId == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " carries boundary entry"
-                    + " for field '" + entry.field() + "' of kind " + entry.kind()
-                    + ": the pinned builtin Error shape carries exactly one"
-                    + " CLASS_LITERAL_FIELD boundary per provided field — a"
-                    + " shape deviation is a producer defect, never executed");
-            }
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry"
-                    + " names field '" + entry.field() + "' which is not a declared"
-                    + " field of " + payload.classId() + " — a producer defect, never"
-                    + " executed");
-            }
-            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
-                entry.kind());
-            KindPayload.BoundaryPayload boundaryPayload =
-                (KindPayload.BoundaryPayload) child.payload();
-            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries descriptor "
-                    + boundaryPayload.descriptor().canonicalSpecText()
-                    + ": the pinned child descriptor is the field's declared"
-                    + " descriptor " + fieldLayout.descriptor().canonicalSpecText()
-                    + " — a mismatch is a producer defect, never executed");
-            }
-            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
-            if (!boundaryPayload.input().equals(providedId)) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries input " + boundaryPayload.input()
-                    + ": the pinned CLASS_LITERAL_FIELD input is the field's provided"
-                    + " value op " + providedId + " (K-D4 input wiring) — a mismatch"
-                    + " is a producer defect, never executed");
-            }
-            BoundaryResult result = checkRunner.run(boundaryPayload, provided);
-            if (result instanceof BoundaryResult.Pass pass) {
-                checkedValues.put(entry.field(), pass.value());
-                continue;
-            }
-            // The first failing child fails the op: no instance, no tag, and
-            // the later children never run.
-            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
-            return new Outcome.Failure<Value>(new OpFailure(fail.failure(), op.origin()));
+        OpFailure fieldFailure = applyLiteralFieldBoundaries(op, payload, layout,
+            providedValues, providedValueIds, payload.fieldBoundaries(), boundaryOps,
+            checkRunner, checkedValues, "builtin Error shape");
+        if (fieldFailure != null) {
+            return new Outcome.Failure<Value>(fieldFailure);
         }
 
         // The instance: the declaration-order field states (both fields
@@ -1394,25 +1197,8 @@ public final class ClassOpsExecutor {
         // fail closed.
         LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
         LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            Value value = resolve(priorValues, field.valueOpId());
-            if (value instanceof Value.Missing) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provided field '"
-                    + field.name() + "' (" + field.valueOpId() + ") resolves to the"
-                    + " internal Missing view: a provided field always carries a"
-                    + " present value (language null is the explicit Null variant) —"
-                    + " a wrong-kind value is a producer defect, never executed");
-            }
-            if (fieldOf(layout, field.name()) == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provides field '"
-                    + field.name() + "' which is not a declared field of "
-                    + payload.classId() + ": the checker's E4002 rejects an extra"
-                    + " literal field before lowering — a producer defect, never"
-                    + " executed");
-            }
-            providedValues.put(field.name(), value);
-            providedValueIds.put(field.name(), field.valueOpId());
-        }
+        resolveProvidedFields(op, payload, priorValues, layout, providedValues,
+            providedValueIds);
 
         // Phase 3: extra-key rejection first in provided-source order — the
         // loaded defaults projection is the accepted-key authority (the
@@ -1431,61 +1217,12 @@ public final class ClassOpsExecutor {
 
         // Phase 4: exactly one CLASS_LITERAL_FIELD boundary per provided
         // field in declaration order; each runs through the delegate.
-        List<KindPayload.FieldBoundary> boundaries = payload.fieldBoundaries();
-        if (boundaries.size() != providedValues.size()) {
-            throw new Defect("CLASS_NEW " + op.opId() + " carries "
-                + boundaries.size() + " field-boundary entries for "
-                + providedValues.size() + " provided fields: the pinned host"
-                + " construction carries exactly one CLASS_LITERAL_FIELD boundary"
-                + " per provided field — a child-count mismatch is a producer"
-                + " defect, never executed");
-        }
         LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
-        for (KindPayload.FieldBoundary entry : boundaries) {
-            Value provided = providedValues.get(entry.field());
-            ValueId providedId = providedValueIds.get(entry.field());
-            if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD || provided == null
-                    || providedId == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " carries boundary entry"
-                    + " for field '" + entry.field() + "' of kind " + entry.kind()
-                    + ": the pinned host construction carries exactly one"
-                    + " CLASS_LITERAL_FIELD boundary per provided field — a shape"
-                    + " deviation is a producer defect, never executed");
-            }
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry"
-                    + " names field '" + entry.field() + "' which is not a declared"
-                    + " field of " + payload.classId() + " — a producer defect, never"
-                    + " executed");
-            }
-            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
-                entry.kind());
-            KindPayload.BoundaryPayload boundaryPayload =
-                (KindPayload.BoundaryPayload) child.payload();
-            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries descriptor "
-                    + boundaryPayload.descriptor().canonicalSpecText()
-                    + ": the pinned child descriptor is the field's declared"
-                    + " descriptor " + fieldLayout.descriptor().canonicalSpecText()
-                    + " — a mismatch is a producer defect, never executed");
-            }
-            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
-            if (!boundaryPayload.input().equals(providedId)) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries input " + boundaryPayload.input()
-                    + ": the pinned CLASS_LITERAL_FIELD input is the field's provided"
-                    + " value op " + providedId + " (K-D4 input wiring) — a mismatch"
-                    + " is a producer defect, never executed");
-            }
-            BoundaryResult result = checkRunner.run(boundaryPayload, provided);
-            if (result instanceof BoundaryResult.Pass pass) {
-                checkedValues.put(entry.field(), pass.value());
-                continue;
-            }
-            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
-            return new Outcome.Failure<Value>(new OpFailure(fail.failure(), op.origin()));
+        OpFailure fieldFailure = applyLiteralFieldBoundaries(op, payload, layout,
+            providedValues, providedValueIds, payload.fieldBoundaries(), boundaryOps,
+            checkRunner, checkedValues, "host construction");
+        if (fieldFailure != null) {
+            return new Outcome.Failure<Value>(fieldFailure);
         }
 
         // Phase 5: the declaration-order field states — the provided fields
@@ -1740,18 +1477,8 @@ public final class ClassOpsExecutor {
         // checked value is the construction's provided copy.
         LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
         LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            Value value = resolve(priorValues, field.valueOpId());
-            if (value instanceof Value.Missing) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provided field '"
-                    + field.name() + "' (" + field.valueOpId() + ") resolves to the"
-                    + " internal Missing view: a provided field always carries a"
-                    + " present value (language null is the explicit Null variant) —"
-                    + " a wrong-kind value is a producer defect, never executed");
-            }
-            providedValues.put(field.name(), value);
-            providedValueIds.put(field.name(), field.valueOpId());
-        }
+        resolveProvidedFields(op, payload, priorValues, null, providedValues,
+            providedValueIds);
         LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
         for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
             Value provided = providedValues.get(entry.field());
@@ -1806,16 +1533,10 @@ public final class ClassOpsExecutor {
         // literal origin before any default runs (the artifact's
         // deterministic authority; the runtime entry's phase-1 pairs()
         // iteration is order-free).
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            if (fieldOf(layout, field.name()) == null) {
-                BoundaryFailure failure = BoundaryFailure.fromRow(
-                    FailureContractRegistry.row(FailurePolicyId.CLASS_CONSTRUCTION), 0,
-                    null, null,
-                    metadataOf("field", field.name(), "classId",
-                        payload.classId().text()),
-                    null);
-                return new Outcome.Failure<Value>(new OpFailure(failure, op.origin()));
-            }
+        Outcome.Failure<Value> extraKeyFailure =
+            undeclaredProvidedFieldFailure(op, payload, layout);
+        if (extraKeyFailure != null) {
+            return extraKeyFailure;
         }
         // After the guard admits every provided name: every provided field
         // carries exactly one boundary child (a declared provided field
@@ -2025,53 +1746,13 @@ public final class ClassOpsExecutor {
         // default never runs); defaults evaluate per construction in the
         // declaring module's scope through the owner-side body runner.
         LinkedHashMap<String, Value> filled = new LinkedHashMap<>();
-        for (OpId defaultOpId : payload.classDefaultOpIds()) {
-            SemanticOp defaultOp = requireDefaultChild(defaultOps, defaultOpId,
-                payload.classId(), op);
-            KindPayload.ClassDefaultPayload defaultPayload =
-                (KindPayload.ClassDefaultPayload) defaultOp.payload();
-            if (providedFields.contains(defaultPayload.field())) {
-                // The skip-provided rule (K-D5): the caller's provided
-                // fields overlay after the transfer, so their defaults
-                // are never executed by this construction attempt.
-                continue;
-            }
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, defaultPayload.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_FACTORY " + op.opId() + " names CLASS_DEFAULT "
-                    + "child " + defaultOpId + " for field '" + defaultPayload.field()
-                    + "' which is not a declared field of " + payload.classId()
-                    + ": a default child of an undeclared field is a producer defect, "
-                    + "never executed");
-            }
-            if (!fieldLayout.required()) {
-                throw new Defect("CLASS_FACTORY " + op.opId() + " names CLASS_DEFAULT "
-                    + "child " + defaultOpId + " for optional field '"
-                    + defaultPayload.field() + "': the factory payload lists "
-                    + "required-present defaulted fields only (an optional-with-default "
-                    + "field's default never runs and its op id never enters the "
-                    + "payload) — a listed optional default is a producer defect, never "
-                    + "executed");
-            }
-            if (filled.containsKey(defaultPayload.field())) {
-                throw new Defect("CLASS_FACTORY " + op.opId() + " names two CLASS_DEFAULT "
-                    + "children for field '" + defaultPayload.field() + "': the pinned "
-                    + "shape carries exactly one default child per defaulted field — a "
-                    + "duplicate is a producer defect, never executed");
-            }
-            Outcome<Value> produced = executeClassDefault(defaultOp, bodyRunner);
-            if (!(produced instanceof Outcome.Success<Value> success)) {
-                // executeClassDefault cannot fail by itself: a default-block
-                // failure propagates as the callback's own throw (a failing
-                // child fails the triggering caller's op — no instance).
-                throw new Defect("CLASS_FACTORY " + op.opId() + " CLASS_DEFAULT child "
-                    + defaultOpId + " returned a failure terminal from the default "
-                    + "execution: the default op's policy is NO_DEAL_FAILURE and only "
-                    + "already-started child/operand failures may propagate — a "
-                    + "producer defect, never executed");
-            }
-            filled.put(defaultPayload.field(), success.value());
-        }
+        applyClassDefaults(op, payload.classId(), payload.classDefaultOpIds(), defaultOps,
+            layout, providedFields,
+            "the factory payload lists required-present defaulted fields only (an"
+                + " optional-with-default field's default never runs and its op id never"
+                + " enters the payload) — a listed optional default is a producer defect,"
+                + " never executed",
+            bodyRunner, filled);
 
         // The internal default-filled transfer instance (K-D5, untagged):
         // declaration-order states — the defaulted fields present, every
@@ -2268,21 +1949,8 @@ public final class ClassOpsExecutor {
         // caller before the transfer (the eval-order pin).
         LinkedHashMap<String, Value> providedValues = new LinkedHashMap<>();
         LinkedHashMap<String, ValueId> providedValueIds = new LinkedHashMap<>();
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            Value value = resolve(priorValues, field.valueOpId());
-            if (value instanceof Value.Missing) {
-                throw new Defect("CLASS_NEW " + op.opId() + " provided field '" + field.name()
-                    + "' (" + field.valueOpId() + ") resolves to the internal Missing view: "
-                    + "a provided field always carries a present value (language null is "
-                    + "the explicit Null variant) — a wrong-kind value is a producer "
-                    + "defect, never executed");
-            }
-            // Duplicate provided names keep the last value (the checker's
-            // class-literal map rule); every entry still resolves in
-            // literal order so its effects complete.
-            providedValues.put(field.name(), value);
-            providedValueIds.put(field.name(), field.valueOpId());
-        }
+        resolveProvidedFields(op, payload, priorValues, null, providedValues,
+            providedValueIds);
 
         // The factory resolution by ClassFactoryId (K-D5): the payload's
         // classFactoryRef names the owner's CLASS_FACTORY op through the
@@ -2360,56 +2028,19 @@ public final class ClassOpsExecutor {
         // K-D4 step 3: extra-key rejection first in provided-source order —
         // after the transfer, before any provided-field application or
         // field validation (the completed default effects are observable).
-        for (KindPayload.ProvidedField field : payload.providedFields()) {
-            if (fieldOf(layout, field.name()) == null) {
-                BoundaryFailure failure = BoundaryFailure.fromRow(
-                    FailureContractRegistry.row(FailurePolicyId.CLASS_CONSTRUCTION), 0,
-                    null, null,
-                    metadataOf("field", field.name(), "classId", payload.classId().text()),
-                    null);
-                return new Outcome.Failure<Value>(new OpFailure(failure, op.origin()));
-            }
+        Outcome.Failure<Value> extraKeyFailure =
+            undeclaredProvidedFieldFailure(op, payload, layout);
+        if (extraKeyFailure != null) {
+            return extraKeyFailure;
         }
 
         // The pinned field-boundary coverage (K-D4 step 5 shape): exactly
         // one entry per provided field (CLASS_LITERAL_FIELD) and per
         // defaulted field (CLASS_DEFAULT_FIELD) in declaration order;
         // omitted optional fields get no boundary and stay missing.
-        List<String> expectedBoundaryFields = new ArrayList<>();
-        for (ClassLayout.FieldLayout fieldLayout : layout.fields()) {
-            if (providedValues.containsKey(fieldLayout.name())
-                    || defaultValueOf(transferredInstance, layout, fieldLayout.name()) != null) {
-                expectedBoundaryFields.add(fieldLayout.name());
-            }
-        }
         List<KindPayload.FieldBoundary> boundaries = payload.fieldBoundaries();
-        if (boundaries.size() != expectedBoundaryFields.size()) {
-            throw new Defect("CLASS_NEW " + op.opId() + " carries " + boundaries.size()
-                + " field-boundary entries for " + expectedBoundaryFields.size()
-                + " present fields: the pinned shape carries exactly one boundary per "
-                + "provided field and per omitted required-present defaulted field in "
-                + "declaration order — a child-count mismatch is a producer defect, "
-                + "never executed");
-        }
-        for (int i = 0; i < boundaries.size(); i++) {
-            KindPayload.FieldBoundary entry = boundaries.get(i);
-            String expectedField = expectedBoundaryFields.get(i);
-            if (!entry.field().equals(expectedField)) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry " + i
-                    + " names field '" + entry.field() + "': the pinned declaration order "
-                    + "names '" + expectedField + "' — a field-boundary order mismatch "
-                    + "is a producer defect, never executed");
-            }
-            BoundaryKind expectedKind = providedValues.containsKey(entry.field())
-                ? BoundaryKind.CLASS_LITERAL_FIELD : BoundaryKind.CLASS_DEFAULT_FIELD;
-            if (entry.kind() != expectedKind) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry for '"
-                    + entry.field() + "' carries kind " + entry.kind() + ": the pinned "
-                    + "kind is " + expectedKind + " (CLASS_LITERAL_FIELD for provided "
-                    + "values, CLASS_DEFAULT_FIELD for defaulted values) — a kind "
-                    + "mismatch is a producer defect, never executed");
-            }
-        }
+        requireBoundaryShape(op, payload, layout, providedValues, boundaries,
+            name -> defaultValueOf(transferredInstance, layout, name) != null);
 
         // K-D4 step 4: provided-field application in declaration order (the
         // overlay onto the transferred instance; duplicate names keep the
@@ -2428,46 +2059,10 @@ public final class ClassOpsExecutor {
         // K-D4 step 5: field validation in declaration order through the
         // BoundaryCheckRunner seam; the first failing child fails the op
         // and no instance is published.
-        for (KindPayload.FieldBoundary entry : boundaries) {
-            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
-            if (fieldLayout == null) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry names "
-                    + "field '" + entry.field() + "' which is not a declared field of "
-                    + payload.classId() + ": a boundary of an undeclared field is a "
-                    + "producer defect, never executed");
-            }
-            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
-                entry.kind());
-            KindPayload.BoundaryPayload boundaryPayload =
-                (KindPayload.BoundaryPayload) child.payload();
-            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
-                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                    + child.opId() + " carries descriptor "
-                    + boundaryPayload.descriptor().canonicalSpecText()
-                    + ": the pinned child descriptor is the field's declared descriptor "
-                    + fieldLayout.descriptor().canonicalSpecText() + " — a mismatch is a "
-                    + "producer defect, never executed");
-            }
-            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
-            Value input;
-            if (entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD) {
-                Value provided = providedValues.get(entry.field());
-                ValueId providedId = providedValueIds.get(entry.field());
-                if (provided == null || providedId == null) {
-                    throw new Defect("CLASS_NEW " + op.opId() + " carries a "
-                        + "CLASS_LITERAL_FIELD boundary for field '" + entry.field()
-                        + "' without a provided value: the pinned kind names provided "
-                        + "values only — a producer defect, never executed");
-                }
-                if (!boundaryPayload.input().equals(providedId)) {
-                    throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
-                        + child.opId() + " carries input " + boundaryPayload.input()
-                        + ": the pinned CLASS_LITERAL_FIELD input is the field's "
-                        + "provided value op " + providedId + " (K-D4 input wiring) — a "
-                        + "mismatch is a producer defect, never executed");
-                }
-                input = provided;
-            } else {
+        LinkedHashMap<String, Value> checkedValues = new LinkedHashMap<>();
+        OpFailure fieldFailure = applyFieldBoundaries(op, payload, layout, boundaries,
+            providedValues, providedValueIds, boundaryOps, checkRunner, checkedValues,
+            (child, entry, boundaryPayload) -> {
                 // The K-D4 extraction rule: the boundary's input naming
                 // the owner CLASS_FACTORY op's result ValueId is the
                 // wiring (the cross-unit D4-global reference); the checked
@@ -2492,18 +2087,12 @@ public final class ClassOpsExecutor {
                         + "transferred instance's named field) — a missing field is a "
                         + "producer defect, never executed");
                 }
-                input = extracted;
-            }
-            BoundaryResult result = checkRunner.run(boundaryPayload, input);
-            if (result instanceof BoundaryResult.Pass pass) {
-                instanceFields.put(entry.field(), pass.value());
-                continue;
-            }
-            // The first failing child fails the op: no instance, no tag,
-            // and the later children never run.
-            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
-            return new Outcome.Failure<Value>(new OpFailure(fail.failure(), op.origin()));
+                return extracted;
+            });
+        if (fieldFailure != null) {
+            return new Outcome.Failure<Value>(fieldFailure);
         }
+        instanceFields.putAll(checkedValues);
 
         // K-D4 step 6: tag the fresh caller-side instance with classId and
         // SUCCESS publishes it — a fresh instance record distinct from the
@@ -4543,17 +4132,321 @@ public final class ClassOpsExecutor {
      * non-pinned policy would silently change the contract, so both fail
      * closed as producer defects (never executed, never projected).
      */
-    private static void requireOp(SemanticOp op, SemanticOpKind kind, FailurePolicyId policy) {
-        Objects.requireNonNull(op, "op must not be null");
-        if (op.kind() != kind) {
-            throw new Defect("expected a " + kind + " op, got " + op.kind() + " "
-                + op.opId() + ": the executor interprets validated op shapes only — a "
-                + "wrong kind is a producer defect, never executed");
+    /**
+     * K-D4 step 1: the payload's provided-field prior steps resolve in
+     * literal order. With {@code declaredLayout} non-null every provided
+     * name must be a declared field (the builtin/host fail-closed rule);
+     * with {@code declaredLayout} null the undeclared-name policy stays
+     * with the caller's extra-key gate.
+     */
+    private static void resolveProvidedFields(
+            SemanticOp op, KindPayload.ClassNewPayload payload,
+            Map<ValueId, Value> priorValues, ClassLayout declaredLayout,
+            LinkedHashMap<String, Value> providedValues,
+            LinkedHashMap<String, ValueId> providedValueIds) {
+        for (KindPayload.ProvidedField field : payload.providedFields()) {
+            Value value = resolve(priorValues, field.valueOpId());
+            if (value instanceof Value.Missing) {
+                throw new Defect("CLASS_NEW " + op.opId() + " provided field '"
+                    + field.name() + "' (" + field.valueOpId() + ") resolves to the"
+                    + " internal Missing view: a provided field always carries a"
+                    + " present value (language null is the explicit Null variant) — a"
+                    + " wrong-kind value is a producer defect, never executed");
+            }
+            if (declaredLayout != null && fieldOf(declaredLayout, field.name()) == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " provides field '"
+                    + field.name() + "' which is not a declared field of "
+                    + payload.classId() + ": the checker's E4002 rejects an extra"
+                    + " literal field before lowering — a producer defect, never"
+                    + " executed");
+            }
+            providedValues.put(field.name(), value);
+            providedValueIds.put(field.name(), field.valueOpId());
         }
-        if (op.failurePolicy() != policy) {
-            throw new Defect(kind + " " + op.opId() + " carries failure policy "
-                + op.failurePolicy() + ": the pinned policy is " + policy
-                + " — a non-pinned policy is a producer defect, never executed");
+    }
+
+    /**
+     * K-D4 step 2: the payload's {@code CLASS_DEFAULT} children run in
+     * declaration order, skipping every child whose field the triggering
+     * context records as provided (a provided field's default never
+     * runs). The default values fill {@code values} and the applied child
+     * ops are returned by field; {@code optionalDefaultReason} carries
+     * the caller's pinned optional-field rule text.
+     */
+    private static LinkedHashMap<String, SemanticOp> applyClassDefaults(
+            SemanticOp op, ClassId classId, List<OpId> defaultOpIds,
+            Map<OpId, SemanticOp> defaultOps, ClassLayout layout,
+            Set<String> skipFields, String optionalDefaultReason,
+            BodyRunner bodyRunner, LinkedHashMap<String, Value> values) {
+        LinkedHashMap<String, SemanticOp> opsByField = new LinkedHashMap<>();
+        for (OpId defaultOpId : defaultOpIds) {
+            SemanticOp defaultOp = requireDefaultChild(defaultOps, defaultOpId,
+                classId, op);
+            KindPayload.ClassDefaultPayload defaultPayload =
+                (KindPayload.ClassDefaultPayload) defaultOp.payload();
+            if (skipFields.contains(defaultPayload.field())) {
+                // The skip-provided rule: a provided field's default
+                // block is never executed by this construction attempt.
+                continue;
+            }
+            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, defaultPayload.field());
+            if (fieldLayout == null) {
+                throw new Defect(op.kind() + " " + op.opId() + " names CLASS_DEFAULT child "
+                    + defaultOpId + " for field '" + defaultPayload.field() + "' which is "
+                    + "not a declared field of " + classId + ": a default child "
+                    + "of an undeclared field is a producer defect, never executed");
+            }
+            if (!fieldLayout.required()) {
+                throw new Defect(op.kind() + " " + op.opId() + " names CLASS_DEFAULT child "
+                    + defaultOpId + " for optional field '" + defaultPayload.field()
+                    + "': " + optionalDefaultReason);
+            }
+            if (values.containsKey(defaultPayload.field())) {
+                throw new Defect(op.kind() + " " + op.opId() + " names two CLASS_DEFAULT "
+                    + "children for field '" + defaultPayload.field() + "': the pinned "
+                    + "shape carries exactly one default child per defaulted field — a "
+                    + "duplicate is a producer defect, never executed");
+            }
+            Outcome<Value> produced = executeClassDefault(defaultOp, bodyRunner);
+            if (!(produced instanceof Outcome.Success<Value> success)) {
+                // executeClassDefault cannot fail by itself: a default-block
+                // failure propagates as the callback's own throw.
+                throw new Defect(op.kind() + " " + op.opId() + " CLASS_DEFAULT child "
+                    + defaultOpId + " returned a failure terminal from the default "
+                    + "execution: the default op's policy is NO_DEAL_FAILURE and only "
+                    + "already-started child/operand failures may propagate — a "
+                    + "producer defect, never executed");
+            }
+            values.put(defaultPayload.field(), success.value());
+            opsByField.put(defaultPayload.field(), defaultOp);
+        }
+        return opsByField;
+    }
+
+    /**
+     * K-D4 step 3: the extra-key E8007 projection in provided-source order
+     * — the first provided name the layout does not declare — or
+     * {@code null} when every provided name is declared.
+     */
+    private static Outcome.Failure<Value> undeclaredProvidedFieldFailure(
+            SemanticOp op, KindPayload.ClassNewPayload payload, ClassLayout layout) {
+        for (KindPayload.ProvidedField field : payload.providedFields()) {
+            if (fieldOf(layout, field.name()) == null) {
+                BoundaryFailure failure = BoundaryFailure.fromRow(
+                    FailureContractRegistry.row(FailurePolicyId.CLASS_CONSTRUCTION), 0,
+                    null, null,
+                    metadataOf("field", field.name(), "classId", payload.classId().text()),
+                    null);
+                return new Outcome.Failure<Value>(new OpFailure(failure, op.origin()));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The pinned field-boundary coverage (K-D4 step 5 shape): exactly one
+     * entry per present field — provided ({@code CLASS_LITERAL_FIELD}) or
+     * omitted required-present defaulted ({@code CLASS_DEFAULT_FIELD}) —
+     * in declaration order. A count, order, or kind deviation is a
+     * producer defect.
+     */
+    private static void requireBoundaryShape(
+            SemanticOp op, KindPayload.ClassNewPayload payload, ClassLayout layout,
+            Map<String, Value> providedValues,
+            List<KindPayload.FieldBoundary> boundaries,
+            java.util.function.Predicate<String> hasDefault) {
+        List<java.lang.String> expectedBoundaryFields = new ArrayList<>();
+        for (ClassLayout.FieldLayout fieldLayout : layout.fields()) {
+            if (providedValues.containsKey(fieldLayout.name())
+                    || hasDefault.test(fieldLayout.name())) {
+                expectedBoundaryFields.add(fieldLayout.name());
+            }
+        }
+        if (boundaries.size() != expectedBoundaryFields.size()) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries " + boundaries.size()
+                + " field-boundary entries for " + expectedBoundaryFields.size()
+                + " present fields: the pinned shape carries exactly one boundary per "
+                + "provided field and per omitted required-present defaulted field in "
+                + "declaration order — a child-count mismatch is a producer defect, "
+                + "never executed");
+        }
+        for (int i = 0; i < boundaries.size(); i++) {
+            KindPayload.FieldBoundary entry = boundaries.get(i);
+            java.lang.String expectedField = expectedBoundaryFields.get(i);
+            if (!entry.field().equals(expectedField)) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry " + i
+                    + " names field '" + entry.field() + "': the pinned declaration order "
+                    + "names '" + expectedField + "' — a field-boundary order mismatch "
+                    + "is a producer defect, never executed");
+            }
+            BoundaryKind expectedKind = providedValues.containsKey(entry.field())
+                ? BoundaryKind.CLASS_LITERAL_FIELD : BoundaryKind.CLASS_DEFAULT_FIELD;
+            if (entry.kind() != expectedKind) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry for '"
+                    + entry.field() + "' carries kind " + entry.kind() + ": the pinned "
+                    + "kind is " + expectedKind + " (CLASS_LITERAL_FIELD for provided "
+                    + "values, CLASS_DEFAULT_FIELD for defaulted values) — a kind "
+                    + "mismatch is a producer defect, never executed");
+            }
+        }
+    }
+
+    /** The input-value wiring of one {@code CLASS_DEFAULT_FIELD} entry. */
+    @FunctionalInterface
+    private interface DefaultFieldInputResolver {
+
+        Value resolve(SemanticOp child, KindPayload.FieldBoundary entry,
+                      KindPayload.BoundaryPayload boundaryPayload);
+    }
+
+    /**
+     * K-D4 step 5: the field boundaries run in declaration order through
+     * the {@link BoundaryCheckRunner} seam — the shared child-shape
+     * checks and the literal-provided wiring live here, the
+     * default-field wiring is the {@code defaultInput} seam. On the first
+     * failing child the helper returns the op failure; on success
+     * {@code checkedValues} carries the boundary-published values by
+     * field.
+     */
+    private static OpFailure applyFieldBoundaries(
+            SemanticOp op, KindPayload.ClassNewPayload payload, ClassLayout layout,
+            List<KindPayload.FieldBoundary> boundaries,
+            Map<String, Value> providedValues, Map<String, ValueId> providedValueIds,
+            Map<OpId, SemanticOp> boundaryOps, BoundaryCheckRunner checkRunner,
+            LinkedHashMap<String, Value> checkedValues,
+            DefaultFieldInputResolver defaultInput) {
+        for (KindPayload.FieldBoundary entry : boundaries) {
+            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
+            if (fieldLayout == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry names "
+                    + "field '" + entry.field() + "' which is not a declared field of "
+                    + payload.classId() + ": a boundary of an undeclared field is a "
+                    + "producer defect, never executed");
+            }
+            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
+                entry.kind());
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) child.payload();
+            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                    + child.opId() + " carries descriptor "
+                    + boundaryPayload.descriptor().canonicalSpecText()
+                    + ": the pinned child descriptor is the field's declared descriptor "
+                    + fieldLayout.descriptor().canonicalSpecText() + " — a mismatch is a "
+                    + "producer defect, never executed");
+            }
+            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
+            Value input;
+            if (entry.kind() == BoundaryKind.CLASS_LITERAL_FIELD) {
+                Value provided = providedValues.get(entry.field());
+                ValueId providedId = providedValueIds.get(entry.field());
+                if (provided == null || providedId == null) {
+                    throw new Defect("CLASS_NEW " + op.opId() + " carries a "
+                        + "CLASS_LITERAL_FIELD boundary for field '" + entry.field()
+                        + "' without a provided value: the pinned kind names provided "
+                        + "values only — a producer defect, never executed");
+                }
+                if (!boundaryPayload.input().equals(providedId)) {
+                    throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                        + child.opId() + " carries input " + boundaryPayload.input()
+                        + ": the pinned CLASS_LITERAL_FIELD input is the field's "
+                        + "provided value op " + providedId + " (K-D4 input wiring) — a "
+                        + "mismatch is a producer defect, never executed");
+                }
+                input = provided;
+            } else {
+                input = defaultInput.resolve(child, entry, boundaryPayload);
+            }
+            BoundaryResult result = checkRunner.run(boundaryPayload, input);
+            if (result instanceof BoundaryResult.Pass pass) {
+                checkedValues.put(entry.field(), pass.value());
+                continue;
+            }
+            // The first failing child fails the op: no instance, no tag,
+            // and the later children never run.
+            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
+            return new OpFailure(fail.failure(), op.origin());
+        }
+        return null;
+    }
+
+    /**
+     * The pinned literal-field boundary coverage of the builtin/host
+     * construction surfaces: exactly one {@code CLASS_LITERAL_FIELD}
+     * entry per provided field in provided order, each running through
+     * the delegate. The {@code shapeLabel} names the pinned shape in the
+     * fail-closed messages. Returns the first failing boundary's op
+     * failure, or {@code null} on success with {@code checkedValues}
+     * filled.
+     */
+    private static OpFailure applyLiteralFieldBoundaries(
+            SemanticOp op, KindPayload.ClassNewPayload payload, ClassLayout layout,
+            Map<String, Value> providedValues, Map<String, ValueId> providedValueIds,
+            List<KindPayload.FieldBoundary> boundaries,
+            Map<OpId, SemanticOp> boundaryOps, BoundaryCheckRunner checkRunner,
+            LinkedHashMap<String, Value> checkedValues, String shapeLabel) {
+        if (boundaries.size() != providedValues.size()) {
+            throw new Defect("CLASS_NEW " + op.opId() + " carries "
+                + boundaries.size() + " field-boundary entries for "
+                + providedValues.size() + " provided fields: the pinned " + shapeLabel
+                + " carries exactly one CLASS_LITERAL_FIELD boundary per provided field"
+                + " — a child-count mismatch is a producer defect, never executed");
+        }
+        for (KindPayload.FieldBoundary entry : boundaries) {
+            Value provided = providedValues.get(entry.field());
+            ValueId providedId = providedValueIds.get(entry.field());
+            if (entry.kind() != BoundaryKind.CLASS_LITERAL_FIELD || provided == null
+                    || providedId == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " carries boundary entry"
+                    + " for field '" + entry.field() + "' of kind " + entry.kind()
+                    + ": the pinned " + shapeLabel
+                    + " carries exactly one CLASS_LITERAL_FIELD boundary per provided"
+                    + " field — a shape deviation is a producer defect, never executed");
+            }
+            ClassLayout.FieldLayout fieldLayout = fieldOf(layout, entry.field());
+            if (fieldLayout == null) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field-boundary entry"
+                    + " names field '" + entry.field() + "' which is not a declared"
+                    + " field of " + payload.classId() + " — a producer defect, never"
+                    + " executed");
+            }
+            SemanticOp child = requireBoundaryChild(boundaryOps, entry.boundaryOpId(), op,
+                entry.kind());
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) child.payload();
+            if (!boundaryPayload.descriptor().equals(fieldLayout.descriptor())) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                    + child.opId() + " carries descriptor "
+                    + boundaryPayload.descriptor().canonicalSpecText()
+                    + ": the pinned child descriptor is the field's declared descriptor "
+                    + fieldLayout.descriptor().canonicalSpecText() + " — a mismatch is a "
+                    + "producer defect, never executed");
+            }
+            requireDescriptorKindPolicy(child, boundaryPayload.descriptor());
+            if (!boundaryPayload.input().equals(providedId)) {
+                throw new Defect("CLASS_NEW " + op.opId() + " field boundary "
+                    + child.opId() + " carries input " + boundaryPayload.input()
+                    + ": the pinned CLASS_LITERAL_FIELD input is the field's provided"
+                    + " value op " + providedId + " (K-D4 input wiring) — a mismatch"
+                    + " is a producer defect, never executed");
+            }
+            BoundaryResult result = checkRunner.run(boundaryPayload, provided);
+            if (result instanceof BoundaryResult.Pass pass) {
+                checkedValues.put(entry.field(), pass.value());
+                continue;
+            }
+            // The first failing child fails the op: no instance, no tag, and
+            // the later children never run.
+            BoundaryResult.Fail fail = (BoundaryResult.Fail) result;
+            return new OpFailure(fail.failure(), op.origin());
+        }
+        return null;
+    }
+
+    private static void requireOp(SemanticOp op, SemanticOpKind kind, FailurePolicyId policy) {
+        String defect = ExecutorGuards.opShapeDefect(op, kind, policy);
+        if (defect != null) {
+            throw new Defect(defect);
         }
     }
 
@@ -4626,9 +4519,7 @@ public final class ClassOpsExecutor {
                                                    BoundaryKind pinnedKind) {
         SemanticOp child = boundaryOps.get(childId);
         if (child == null) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + childId + " which the boundary lookup does not resolve — a producer "
-                + "defect, never executed");
+            throw new Defect(ExecutorGuards.missingBoundaryChildDefect(owner, childId));
         }
         requireChildOf(child, owner, pinnedKind);
         return child;
@@ -4637,24 +4528,9 @@ public final class ClassOpsExecutor {
     /** The shared child-shape checks of {@link #requireBoundaryChild}. */
     private static void requireChildOf(SemanticOp child, SemanticOp owner,
                                        BoundaryKind pinnedKind) {
-        if (child.kind() != SemanticOpKind.BOUNDARY) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names child "
-                + child.opId() + " of kind " + child.kind()
-                + ": the pinned child kind is BOUNDARY — a producer defect, never executed");
-        }
-        if (!owner.opId().equals(child.origin().parentOpId())) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + child.opId() + " whose origin parentOpId is "
-                + child.origin().parentOpId()
-                + ": the validator pins the child's parentOpId to the owning op — a "
-                + "mismatch is a producer defect, never executed");
-        }
-        KindPayload.BoundaryPayload payload = (KindPayload.BoundaryPayload) child.payload();
-        if (payload.kind() != pinnedKind) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + child.opId() + " of boundary kind " + payload.kind()
-                + ": the pinned child boundary kind is " + pinnedKind
-                + " — a producer defect, never executed");
+        String defect = ExecutorGuards.childShapeDefect(child, owner, pinnedKind);
+        if (defect != null) {
+            throw new Defect(defect);
         }
     }
 

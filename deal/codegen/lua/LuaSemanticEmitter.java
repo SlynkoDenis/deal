@@ -1,5 +1,6 @@
 package deal.codegen.lua;
 
+import deal.codegen.EmitterSessionBase;
 import deal.ffi.FfiGeneratedModule;
 import deal.ffi.FfiFunctionDescriptor;
 import deal.ffi.FfiImportedClassPlanReference;
@@ -45,11 +46,13 @@ import deal.semantic.ir.ValueId;
 import deal.types.Type;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+
+import static deal.codegen.SemanticEmitterShared.descriptorText;
+import static deal.codegen.SemanticEmitterShared.staticKind;
 
 /**
  * The shared LuaJIT emitter of the decomposition-tail integration
@@ -371,111 +374,7 @@ public final class LuaSemanticEmitter {
     // Session
     // =========================================================================
 
-    private static final class Session {
-        final LoweredModuleUnit unit;
-        final StructuredBodyTable table;
-        /**
-         * The project-mode closure: every module's unit, table, and
-         * class-factory registry (the single-unit session carries one
-         * entry plus no registries). Ids are globally unique across the
-         * project, so the combined artifact shares one slot/cell
-         * namespace.
-         */
-        final Map<ModuleId, LoweredModuleUnit> units = new LinkedHashMap<>();
-        final Map<ModuleId, StructuredBodyTable> tables = new LinkedHashMap<>();
-        final Map<ModuleId, ClassFactoryRegistry> registries = new LinkedHashMap<>();
-        /** The union class-layout resolution context (K-D11). */
-        final Map<ClassId, ClassLayout> classLayouts = new LinkedHashMap<>();
-        /** Each block id → its owning unit's membership table. */
-        final Map<BlockId, StructuredBodyTable> blockTableOf = new LinkedHashMap<>();
-        /** Each op id → its single membership block (the transfer-closure source). */
-        final Map<OpId, BlockId> opBlock = new LinkedHashMap<>();
-        final Map<OpId, SemanticOp> opsById = new HashMap<>();
-        /**
-         * The derived cell kind of every binding incarnation, keyed by
-         * {@code {binding, generation}} (B2: the final kind is a property
-         * of the <em>incarnation</em> — a for-let counter's generation-0
-         * cell stays {@code DIRECT} while its captured per-iteration
-         * generation-1 cell is {@code SHARED_CELL}; keying by binding
-         * alone let the first ALLOC's kind shadow every later
-         * incarnation). A missing entry is {@code DIRECT}.
-         */
-        final Map<BindingId, Map<Long, BindingCellKind>> cellKinds = new HashMap<>();
-        /**
-         * The function factory currently being emitted (null in the module
-         * region and in the detached class-default/thunk emitters): its
-         * {@code captures} name the factory parameters, so a reference to a
-         * captured binding inside its body reads the capture itself (never
-         * a module-global cell slot) and a nested creation passes the
-         * captured cell along.
-         */
-        LoweredFunction currentFunction;
-
-        /** The derived cell kind of one binding incarnation ({@code DIRECT} when unknown). */
-        BindingCellKind cellKindOf(BindingId binding, long generation) {
-            Map<Long, BindingCellKind> generations = cellKinds.get(binding);
-            if (generations == null) {
-                return BindingCellKind.DIRECT;
-            }
-            return generations.getOrDefault(generation, BindingCellKind.DIRECT);
-        }
-
-        /** Registers one incarnation's derived cell kind (first emission wins). */
-        void registerCellKind(BindingId binding, long generation, BindingCellKind kind) {
-            cellKinds.computeIfAbsent(binding, k -> new HashMap<>())
-                .putIfAbsent(generation, kind);
-        }
-
-        /** The capture parameter name of one captured binding. */
-        String captureCell(BindingId binding) {
-            return "c" + binding.id();
-        }
-
-        /**
-         * True iff the function factory being emitted captures the binding
-         * (its factory parameter is the body's binding source).
-         */
-        boolean isCurrentCapture(BindingId binding) {
-            return currentFunction != null && currentFunction.captureOf(binding) != null;
-        }
-
-        /**
-         * The cell expression of one {@code {binding, generation}} reference
-         * at the current emission context: the enclosing factory's capture
-         * parameter when the binding is one of its captures, otherwise the
-         * module-scoped cell slot naming the creation-site incarnation.
-         */
-        String cellSource(BindingId binding, long generation) {
-            return isCurrentCapture(binding) ? captureCell(binding)
-                : cell(binding, generation);
-        }
-
-        /**
-         * One {@code CLOSURE_NEW}/group-member/general-invocation capture
-         * argument: the enclosing factory's capture parameter when the
-         * creating body captured the binding (the cell travels the chain),
-         * otherwise the module-scoped cell slot of the creation-site
-         * incarnation (never a hard-coded generation 0 — a for-let capture
-         * names the per-iteration incarnation).
-         */
-        String captureArg(BindingGeneration capture) {
-            return cellSource(capture.binding(), capture.generation());
-        }
-        /**
-         * Each op's owning module (the export-surface key): the module
-         * whose unit carries the op, statically known at emission — the
-         * surface key is the emitting module's identity, never a path
-         * guess.
-         */
-        final Map<OpId, ModuleId> opModule = new HashMap<>();
-        /** One lowered body's private-state keys (the invocation save/restore). */
-        final Map<FunctionId, List<String>> bodyStateKeyCache = new HashMap<>();
-        final java.util.Set<OpId> ownedChildren = new java.util.HashSet<>();
-        /**
-         * The payload-owned children only (closure computation excludes
-         * them): the union of every registered unit's structural owners.
-         */
-        final java.util.Set<OpId> structuralOwned = new java.util.HashSet<>();
+    private static final class Session extends EmitterSessionBase {
         /** Production mode: no trace protocol, DEAL_ERROR_CODE terminal. */
         final boolean trace;
         /**
@@ -490,13 +389,6 @@ public final class LuaSemanticEmitter {
          * owner.
          */
         final boolean projectSession;
-        /**
-         * Each resolved import's closed kind, collected from the
-         * session's own {@code MODULE_IMPORT} payloads (M6): the read's
-         * module kind comes from the session's import facts, never a
-         * path guess.
-         */
-        final Map<ModuleId, ModuleImportKind> importKinds = new LinkedHashMap<>();
         /**
          * The compile's host declaration surface (the declared-map source
          * of the {@code MODULE_IMPORT(HOST)} load): non-null in the
@@ -547,13 +439,6 @@ public final class LuaSemanticEmitter {
         int ffiImportCounter;
         /** The selected entry module runs the ENTRY_INVOKE delegation. */
         final boolean entryModule;
-        /** Ops the block walk skips (the entry delegation of a non-entry module). */
-        final java.util.Set<OpId> skippedOps = new java.util.HashSet<>();
-        final StringBuilder out = new StringBuilder();
-        /** The enclosing TRY_CATCH depth: transfers inside a pcall body
-         *  must signal instead of goto/return (Lua closures cannot jump
-         *  to the enclosing function's labels). */
-        int tryDepth = 0;
         /** The function id of the factory currently being emitted (the
          *  per-function return-trampoline label suffix): every RETURN of
          *  the body jumps to the function's trampoline label — the last
@@ -567,8 +452,7 @@ public final class LuaSemanticEmitter {
 
         Session(LoweredModuleUnit unit, StructuredBodyTable table, boolean trace,
                 boolean entryModule) {
-            this.unit = unit;
-            this.table = table;
+            super(unit, table);
             this.trace = trace;
             this.projectSession = false;
             this.hostSurface = null;
@@ -579,17 +463,7 @@ public final class LuaSemanticEmitter {
                 // A non-entry module never runs its ENTRY_INVOKE delegation
                 // (the retained emitter invokes main() only from the entry
                 // module): skip the entry op and its delegated CALL.
-                for (SemanticOp op : unit.ops()) {
-                    if (op.kind() != SemanticOpKind.ENTRY_INVOKE) {
-                        continue;
-                    }
-                    skippedOps.add(op.opId());
-                    for (SemanticOp candidate : unit.ops()) {
-                        if (op.opId().equals(candidate.origin().parentOpId())) {
-                            skippedOps.add(candidate.opId());
-                        }
-                    }
-                }
+                markSkippedEntryOps(unit);
             }
         }
 
@@ -632,6 +506,8 @@ public final class LuaSemanticEmitter {
         Session(ExecutableLoweredProject project, Map<ModuleId, StructuredBodyTable> tables,
                 Map<ModuleId, ClassFactoryRegistry> registries, boolean trace,
                 HostDeclarationSurface hostSurface, FfiEmissionInput ffiInput) {
+            super(project.modules().get(project.entryModule()),
+                tables.get(project.entryModule()));
             if (ffiInput != null && hostSurface == null) {
                 throw new IllegalArgumentException(
                     "an FFI emission input requires the compile's host"
@@ -639,15 +515,13 @@ public final class LuaSemanticEmitter {
                         + " kind and the provider coverage both resolve through"
                         + " it — a producer defect)");
             }
-            this.hostSurface = hostSurface;
-            this.ffiInput = ffiInput;
-            this.projectSession = true;
-            this.unit = project.modules().get(project.entryModule());
-            this.table = tables.get(project.entryModule());
-            if (this.unit == null || this.table == null) {
+            if (unit == null || table == null) {
                 throw new IllegalArgumentException(
                     "the entry module is not in the executable closure");
             }
+            this.hostSurface = hostSurface;
+            this.ffiInput = ffiInput;
+            this.projectSession = true;
             this.trace = trace;
             this.entryModule = true;
             registerDeclarationClasses();
@@ -660,17 +534,7 @@ public final class LuaSemanticEmitter {
                     // A non-entry module never runs its ENTRY_INVOKE
                     // delegation: skip the entry op and its delegated
                     // CALL in the combined walk.
-                    for (SemanticOp op : entry.getValue().ops()) {
-                        if (op.kind() != SemanticOpKind.ENTRY_INVOKE) {
-                            continue;
-                        }
-                        skippedOps.add(op.opId());
-                        for (SemanticOp candidate : entry.getValue().ops()) {
-                            if (op.opId().equals(candidate.origin().parentOpId())) {
-                                skippedOps.add(candidate.opId());
-                            }
-                        }
-                    }
+                    markSkippedEntryOps(entry.getValue());
                 }
             }
         }
@@ -763,89 +627,14 @@ public final class LuaSemanticEmitter {
                 + ", " + luaString(classId.name()) + ")";
         }
 
-        /** Registers one module's unit/table/registry into the session closure. */
-        private void registerUnit(LoweredModuleUnit moduleUnit,
-                                  StructuredBodyTable moduleTable,
-                                  ClassFactoryRegistry registry) {
-            units.put(moduleUnit.moduleId(), moduleUnit);
-            tables.put(moduleUnit.moduleId(), moduleTable);
-            registries.put(moduleUnit.moduleId(), registry);
-            classLayouts.putAll(moduleUnit.classLayouts());
-            for (Map.Entry<BlockId, List<OpId>> entry : moduleTable.blockOps().entrySet()) {
-                blockTableOf.put(entry.getKey(), moduleTable);
-                for (OpId memberId : entry.getValue()) {
-                    opBlock.putIfAbsent(memberId, entry.getKey());
-                }
-            }
-            for (SemanticOp op : moduleUnit.ops()) {
-                opsById.put(op.opId(), op);
-                opModule.put(op.opId(), moduleUnit.moduleId());
-                if (op.kind() == SemanticOpKind.MODULE_IMPORT) {
-                    KindPayload.ModuleImportPayload payload =
-                        (KindPayload.ModuleImportPayload) op.payload();
-                    importKinds.putIfAbsent(payload.resolvedModule(), payload.kind());
-                }
-                if (op.kind() == SemanticOpKind.BINDING_ALLOC) {
-                    KindPayload.BindingAllocPayload payload =
-                        (KindPayload.BindingAllocPayload) op.payload();
-                    registerCellKind(payload.binding(), payload.generation(),
-                        payload.cellKind());
-                }
-                if (op.kind() == SemanticOpKind.FOR_EACH) {
-                    // B2: a FOR_EACH iteration binding is always
-                    // SHARED_CELL (the closed payload records no cell-kind
-                    // field): the iteration allocates a fresh iteration
-                    // cell, so a closure created in the body captures that
-                    // iteration's incarnation.
-                    KindPayload.ForEachPayload payload =
-                        (KindPayload.ForEachPayload) op.payload();
-                    registerCellKind(payload.binding(), payload.generation(),
-                        BindingCellKind.SHARED_CELL);
-                }
-                if (op.kind() == SemanticOpKind.RECURSIVE_GROUP_INIT) {
-                    // B2: every group member cell is SHARED_CELL by
-                    // construction (the closed payload records no
-                    // cell-kind field and members carry no separate
-                    // ALLOC) — the publication and the member-body
-                    // loads both resolve through this fact.
-                    KindPayload.RecursiveGroupInitPayload payload =
-                        (KindPayload.RecursiveGroupInitPayload) op.payload();
-                    for (BindingId binding : payload.bindings()) {
-                        registerCellKind(binding, 0, BindingCellKind.SHARED_CELL);
-                    }
-                }
-            }
-            // Payload-owned children are emitted exactly once by their
-            // owner arms; the block walk skips them (a double emission
-            // would duplicate effects and events).
-            java.util.Set<OpId> structural =
-                ChainOperandCompletion.structuralOwners(moduleUnit);
-            structuralOwned.addAll(structural);
-            ownedChildren.addAll(structural);
-            ChainOperandCompletion.registerChainOperandOwners(moduleUnit, structural,
-                ownedChildren);
-            // The nested source ASYNC_START of an adapter-over-async task
-            // executes under its outer op's arm, never at its flat
-            // block-list position (the oracle's UnitState rule).
-            for (SemanticOp op : moduleUnit.ops()) {
-                if (op.kind() == SemanticOpKind.ASYNC_START) {
-                    for (SemanticOp candidate : moduleUnit.ops()) {
-                        if (candidate.kind() == SemanticOpKind.ASYNC_START
-                                && op.opId().equals(candidate.origin().parentOpId())) {
-                            ownedChildren.add(candidate.opId());
-                        }
-                    }
-                }
-            }
-        }
 
         // -- naming ---------------------------------------------------------------
 
-        String slot(ValueId id) {
+        protected String slot(ValueId id) {
             return "S.v" + id.id();
         }
 
-        String cell(BindingId id, long generation) {
+        protected String cell(BindingId id, long generation) {
             return "S.b" + id.id() + "g" + generation;
         }
 
@@ -871,99 +660,6 @@ public final class LuaSemanticEmitter {
 
         // -- static kinds -----------------------------------------------------------
 
-        /**
-         * The static runtime kind of a descriptor for atomization/checks:
-         * {@code null}, {@code bool}, {@code int}, {@code number},
-         * {@code string}, {@code table}, {@code array}, {@code function},
-         * {@code class}, {@code err}, or {@code nullable:&lt;inner&gt;}.
-         */
-        static String staticKind(RuntimeDescriptor descriptor) {
-            if (descriptor == null) {
-                return "ref";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Null) {
-                return "null";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Boolean) {
-                return "bool";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Int) {
-                return "int";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Number) {
-                return "number";
-            }
-            if (descriptor instanceof RuntimeDescriptor.String) {
-                return "string";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Table) {
-                return "table";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Array) {
-                return "array";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Bytes) {
-                return "bytes";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Func) {
-                return "function";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Class cls) {
-                // The builtin Error class keeps the closed err atom
-                // ({code, message}); user classes carry the class
-                // identity tag (E5).
-                return ClassId.ERROR.equals(cls.classId()) ? "err" : "class";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
-                return "nullable:" + staticKind(nullable.inner());
-            }
-            return "ref";
-        }
-
-        /** The prelude-side descriptor text for a boundary check. */
-        static String descriptorText(RuntimeDescriptor descriptor) {
-            if (descriptor instanceof RuntimeDescriptor.Null) {
-                return "null";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Boolean) {
-                return "boolean";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Int) {
-                return "int";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Number) {
-                return "number";
-            }
-            if (descriptor instanceof RuntimeDescriptor.String) {
-                return "string";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Table) {
-                return "table";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Class cls) {
-                return cls.classId().text();
-            }
-            if (descriptor instanceof RuntimeDescriptor.Array array) {
-                return "array(" + descriptorText(array.element()) + ")";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Bytes) {
-                return "bytes";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Nullable nullable) {
-                return "nullable(" + descriptorText(nullable.inner()) + ")";
-            }
-            if (descriptor instanceof RuntimeDescriptor.Func func) {
-                StringBuilder params = new StringBuilder();
-                for (RuntimeDescriptor param : func.paramTypes()) {
-                    if (params.length() > 0) {
-                        params.append(',');
-                    }
-                    params.append(descriptorText(param));
-                }
-                return "function(" + params + ";" + descriptorText(func.returnType()) + ")";
-            }
-            return "unknown";
-        }
 
         /**
          * The emitted prelude boundary check of one descriptor over one
@@ -1944,64 +1640,7 @@ public final class LuaSemanticEmitter {
                 .append(", {}, nil, nil)\n");
         }
 
-        /** The structure op whose payload references the given block, or null. */
-        private SemanticOp structureReferencing(BlockId block) {
-            for (SemanticOp op : opsById.values()) {
-                switch (op.payload()) {
-                    case KindPayload.BranchPayload payload -> {
-                        if (block.equals(payload.selectedBlock())
-                                || block.equals(payload.alternateBlock())) {
-                            return op;
-                        }
-                    }
-                    case KindPayload.LoopPayload payload -> {
-                        if (block.equals(payload.initBlock())
-                                || block.equals(payload.bodyBlock())
-                                || block.equals(payload.updateBlock())) {
-                            return op;
-                        }
-                    }
-                    case KindPayload.ForEachPayload payload -> {
-                        if (block.equals(payload.body())) {
-                            return op;
-                        }
-                    }
-                    case KindPayload.TryCatchPayload payload -> {
-                        if (block.equals(payload.tryBlock())
-                                || block.equals(payload.catchBlock())) {
-                            return op;
-                        }
-                    }
-                    default -> {
-                    }
-                }
-            }
-            return null;
-        }
 
-        /**
-         * The structure ancestors of a block, innermost first (static). The
-         * enclosing block of one structure op comes from *its own* unit's
-         * membership table ({@code blockTableOf}): a callee unit's nested
-         * blocks belong to the callee's table, never the entry module's, so
-         * a transfer inside a cross-module callee body closes exactly the
-         * structures it nests in.
-         */
-        private List<SemanticOp> structureAncestors(BlockId block) {
-            List<SemanticOp> result = new ArrayList<>();
-            BlockId current = block;
-            while (current != null) {
-                SemanticOp enclosing = structureReferencing(current);
-                if (enclosing == null) {
-                    break;
-                }
-                result.add(enclosing);
-                StructuredBodyTable ownerTable = blockTableOf.get(current);
-                current = ownerTable == null ? null
-                    : ownerTable.opBlocks().get(enclosing.opId());
-            }
-            return result;
-        }
 
         /**
          * A result SUCCESS event atomized by the value's own kind (the
@@ -2265,6 +1904,73 @@ public final class LuaSemanticEmitter {
             return false;
         }
 
+        /**
+         * The custom boundary START of a read admission: the input atom
+         * renders the actual value kind (the oracle's atomOf — a
+         * wrong-kind present value atomizes as its own kind).
+         */
+        private void emitBoundaryCheckStartAtom(SemanticOp boundary, String target) {
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) boundary.payload();
+            out.append("__ev(").append(luaString(opKey(boundary.opId())))
+                .append(", \"START\", \"BOUNDARY\", ")
+                .append(luaString(boundary.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(boundary.origin().parentOpId())))
+                .append(", {__rawArgAtom(")
+                .append(luaString(staticKind(boundaryPayload.descriptor())))
+                .append(", ").append(target).append(")}, nil, nil)\n");
+        }
+
+        /**
+         * The admission of one read boundary: the pcall check into the
+         * shared {@code __okB}/{@code __chkB} pair (a deferred composite
+         * descriptor passes through unchecked), the boundary and owner
+         * FAILURE events at the boundary origin, and the checked value
+         * written back into the target.
+         */
+        private void emitBoundaryCheckBlock(SemanticOp op, SemanticOp boundary,
+                                            String target) {
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) boundary.payload();
+            out.append("__okB, __chkB = ")
+                .append(defersContextualCheck(boundaryPayload.descriptor())
+                    ? "true, " + target
+                    : "pcall(__bcheck, "
+                        + luaString(descriptorText(boundaryPayload.descriptor()))
+                        + ", "
+                        + luaString(staticKind(boundaryPayload.descriptor()))
+                        + ", " + target + ")")
+                .append("\n");
+            out.append("if not __okB then\n");
+            out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
+                .append("\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "__errtext(__chkB)");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "__errtext(__chkB)");
+            out.append("  error(__chkB, 0)\n");
+            out.append("end\n");
+            out.append(target).append(" = __chkB\n");
+        }
+
+        /** The boundary SUCCESS and the op SUCCESS terminal of a read admission. */
+        private void emitBoundarySuccessTail(SemanticOp op, SemanticOp boundary,
+                                             String target) {
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) boundary.payload();
+            if (defersContextualCheck(boundaryPayload.descriptor())) {
+                emitBoundarySuccessAtom(boundary, "__rawArgAtom("
+                    + luaString(staticKind(boundaryPayload.descriptor()))
+                    + ", " + target + ")");
+                emitResultSuccessAtom(op, target);
+            } else {
+                emitBoundarySuccess(boundary, target,
+                    boundaryPayload.descriptor());
+                emitResultSuccess(op, target,
+                    (RuntimeDescriptor) op.resultType());
+            }
+        }
+
         private void emitMemberRead(SemanticOp op) {
             KindPayload.MemberReadPayload payload = (KindPayload.MemberReadPayload) op.payload();
             emitStart(op);
@@ -2296,61 +2002,21 @@ public final class LuaSemanticEmitter {
                     && isNumberKind(staticKind(readDescriptor)) ? "true" : "false")
                 .append(")\n");
             if (boundary != null) {
-                KindPayload.BoundaryPayload boundaryPayload =
-                    (KindPayload.BoundaryPayload) boundary.payload();
-                // Custom boundary START: the input atom renders the actual
-                // value kind (the oracle's atomOf — a wrong-kind present
-                // value atomizes as its own kind).
-                out.append("__ev(").append(luaString(opKey(boundary.opId())))
-                    .append(", \"START\", \"BOUNDARY\", ")
-                    .append(luaString(boundary.contract().canonicalDigest()))
-                    .append(", ")
-                    .append(luaString(parentKey(boundary.origin().parentOpId())))
-                    .append(", {__rawArgAtom(")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(target).append(")}, nil, nil)\n");
                 // A contextual composite value (ISSUE-0651): the function and
                 // array carriers pass through — the consuming declared cell
                 // carries the pinned E8010 projection at its own origin (the
                 // corpus pins the call-origin failure for a wrong-kind
                 // argument whose contextual read sits on the argument
                 // expression); every other descriptor keeps the strict row.
-                out.append("__okB, __chkB = ")
-                    .append(defersContextualCheck(boundaryPayload.descriptor())
-                        ? "true, " + target
-                        : "pcall(__bcheck, "
-                            + luaString(descriptorText(boundaryPayload.descriptor()))
-                            + ", "
-                            + luaString(staticKind(boundaryPayload.descriptor()))
-                            + ", " + target + ")")
-                    .append("\n");
-                out.append("if not __okB then\n");
-                out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
-                    .append("\n");
-                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
-                    "__errtext(__chkB)");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(__chkB)");
-                out.append("  error(__chkB, 0)\n");
-                out.append("end\n");
-                out.append(target).append(" = __chkB\n");
-                if (defersContextualCheck(boundaryPayload.descriptor())) {
-                    // The deferred composite read's SUCCESS atom renders
-                    // the value's own kind (the pass-through left a
-                    // possibly wrong-kind value in place; the oracle's
-                    // atomOf uses the value's own kind too), and the op's
-                    // own result SUCCESS renders the same value-aware atom
-                    // (the read's internal result kind is not the value).
-                    emitBoundarySuccessAtom(boundary, "__rawArgAtom("
-                        + luaString(staticKind(boundaryPayload.descriptor()))
-                        + ", " + target + ")");
-                    emitResultSuccessAtom(op, target);
-                } else {
-                    emitBoundarySuccess(boundary, target,
-                        boundaryPayload.descriptor());
-                    emitResultSuccess(op, target,
-                        (RuntimeDescriptor) op.resultType());
-                }
+                emitBoundaryCheckStartAtom(boundary, target);
+                emitBoundaryCheckBlock(op, boundary, target);
+                // The deferred composite read's SUCCESS atom renders
+                // the value's own kind (the pass-through left a
+                // possibly wrong-kind value in place; the oracle's
+                // atomOf uses the value's own kind too), and the op's
+                // own result SUCCESS renders the same value-aware atom
+                // (the read's internal result kind is not the value).
+                emitBoundarySuccessTail(op, boundary, target);
                 return;
             }
             // The OPTIONAL_READ envelope shape: the raw read publishes the
@@ -2371,20 +2037,6 @@ public final class LuaSemanticEmitter {
                 .append(", ").append(target).append("), nil)\n");
         }
 
-        /**
-         * The OPTIONAL_READ op consuming this result value, or null — the
-         * envelope shape of a missing-capable table member read.
-         */
-        private SemanticOp optionalReadOf(ValueId value) {
-            for (SemanticOp candidate : opsById.values()) {
-                if (candidate.kind() == SemanticOpKind.OPTIONAL_READ
-                        && value.equals(((KindPayload.OptionalReadPayload) candidate.payload())
-                            .value())) {
-                    return candidate;
-                }
-            }
-            return null;
-        }
 
         /**
          * OPTIONAL_READ: the internal missing pre-maps to language null
@@ -2448,39 +2100,10 @@ public final class LuaSemanticEmitter {
                 // contextual read sits on the argument expression),
                 // exactly the oracle's identical deferral. Every other
                 // descriptor keeps the strict row.
-                if (defersContextualCheck(boundaryPayload.descriptor())) {
-                    out.append("__okB, __chkB = true, ").append(target)
-                        .append("\n");
-                } else {
-                    out.append("__okB, __chkB = pcall(__bcheck, ")
-                        .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                        .append(", ")
-                        .append(luaString(staticKind(boundaryPayload.descriptor())))
-                        .append(", ").append(target).append(")\n");
-                }
-                out.append("if not __okB then\n");
-                out.append("  __chkB.o = ").append(luaString(originOf(boundary)))
-                    .append("\n");
-                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
-                    "__errtext(__chkB)");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(__chkB)");
-                out.append("  error(__chkB, 0)\n");
-                out.append("end\n");
-                out.append(target).append(" = __chkB\n");
-                if (defersContextualCheck(boundaryPayload.descriptor())) {
-                    emitBoundarySuccessAtom(boundary, "__rawArgAtom("
-                        + luaString(staticKind(boundaryPayload.descriptor()))
-                        + ", " + target + ")");
-                    // The op's own result SUCCESS renders the value-aware
-                    // atom too (the oracle's publish atomizes the value).
-                    emitResultSuccessAtom(op, target);
-                } else {
-                    emitBoundarySuccess(boundary, target,
-                        boundaryPayload.descriptor());
-                    emitResultSuccess(op, target,
-                        (RuntimeDescriptor) op.resultType());
-                }
+                emitBoundaryCheckBlock(op, boundary, target);
+                // The op's own result SUCCESS renders the value-aware
+                // atom too (the oracle's publish atomizes the value).
+                emitBoundarySuccessTail(op, boundary, target);
             } else {
                 emitResultSuccess(op, target, (RuntimeDescriptor) op.resultType());
             }
@@ -2748,25 +2371,6 @@ public final class LuaSemanticEmitter {
             };
         }
 
-        /**
-         * The pinned boundary child of one field op (K-D12): the child
-         * parented to the field op with the closed boundary kind. A
-         * missing child is a producer defect, fail closed before any
-         * emission.
-         */
-        private SemanticOp boundaryChildOfKind(SemanticOp op, BoundaryKind kind) {
-            for (SemanticOp candidate : opsById.values()) {
-                if (candidate.kind() == SemanticOpKind.BOUNDARY
-                        && op.opId().equals(candidate.origin().parentOpId())
-                        && ((KindPayload.BoundaryPayload) candidate.payload()).kind()
-                            == kind) {
-                    return candidate;
-                }
-            }
-            throw new IllegalStateException(op.kind() + " " + op.opId() + " has no "
-                + kind + " boundary child: the pinned field-op shape carries it "
-                + "parented to the op (producer defect)");
-        }
 
         /**
          * One field-op boundary child: the START carries the input's
@@ -3031,24 +2635,6 @@ public final class LuaSemanticEmitter {
             emitPlainSuccess(op);
         }
 
-        /**
-         * True iff the binding is a {@code TRY_CATCH} op's catch binding in
-         * the closure: its cell is created and initialized by the
-         * {@code TRY_CATCH} arm's catch-entry write, so the catch binding's
-         * {@code BINDING_ALLOC} (the catch block's first op) must not reset
-         * it.
-         */
-        private boolean isCatchBinding(BindingId binding) {
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                for (SemanticOp candidate : moduleUnit.ops()) {
-                    if (candidate.payload() instanceof KindPayload.TryCatchPayload tryCatch
-                            && tryCatch.catchBinding().equals(binding)) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
 
         private void emitBindingInit(SemanticOp op) {
             KindPayload.BindingInitPayload payload =
@@ -3074,17 +2660,6 @@ public final class LuaSemanticEmitter {
             emitPlainSuccess(op);
         }
 
-        /** True iff the value slot is an op result in this unit. */
-        private boolean hasProducer(ValueId valueId) {
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                for (SemanticOp op : moduleUnit.ops()) {
-                    if (valueId.equals(op.result())) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
 
         /**
          * The memoized intrinsic carrier expression of one value identity
@@ -3130,69 +2705,7 @@ public final class LuaSemanticEmitter {
             return null;
         }
 
-        /**
-         * The intrinsic kind of one value identity under the strict
-         * identity-preserving-load predicate (the seed and adapter carrier
-         * sites): the registration must be an {@code IntrinsicFunction} and
-         * every op result publishing the identity must be a
-         * {@code BINDING_LOAD} whose named cell's {@code BINDING_INIT}
-         * carries the identity — the seed init's own cell, or an alias
-         * cell whose init is the alias declaration's re-publication of the
-         * same identity.
-         */
-        private IntrinsicKind intrinsicKindOf(ValueId valueId) {
-            FunctionExecutionBinding registration = null;
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                FunctionExecutionBinding found = moduleUnit.functionBindings().get(
-                    new FunctionAllocationIdentity(valueId.id()));
-                if (found != null) {
-                    registration = found;
-                    break;
-                }
-            }
-            if (!(registration instanceof FunctionExecutionBinding.IntrinsicFunction
-                    intrinsic)) {
-                return null;
-            }
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                for (SemanticOp op : moduleUnit.ops()) {
-                    if (!valueId.equals(op.result())) {
-                        continue;
-                    }
-                    if (op.kind() != SemanticOpKind.BINDING_LOAD
-                            || !(op.payload() instanceof KindPayload.BindingLoadPayload
-                                load)
-                            || !isSeedInitOperand(valueId, load.binding(),
-                                load.generation())) {
-                        return null;
-                    }
-                }
-            }
-            return intrinsic.kind();
-        }
 
-        /**
-         * True iff one {@code BINDING_INIT} of the cell carries the given
-         * identity: the load republishes an identity the cell already
-         * holds — the seed init's own write, or an alias declaration's
-         * re-publication of it (the identity-preserving-load test).
-         */
-        private boolean isSeedInitOperand(ValueId identity, BindingId binding,
-                                          long generation) {
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                for (SemanticOp op : moduleUnit.ops()) {
-                    if (op.kind() == SemanticOpKind.BINDING_INIT
-                            && op.payload() instanceof KindPayload.BindingInitPayload
-                                init
-                            && identity.equals(init.value())
-                            && init.binding().equals(binding)
-                            && init.generation() == generation) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
 
         /**
          * The deterministic placeholder expression of a site whose identity
@@ -3456,20 +2969,6 @@ public final class LuaSemanticEmitter {
             return "number".equals(kind) || "nullable:number".equals(kind);
         }
 
-        /** The committed value's static kind: its producing op's result type. */
-        private RuntimeDescriptor producerResultType(deal.semantic.ir.SemanticValue value) {
-            if (value instanceof ValueId valueId) {
-                for (SemanticOp producer : opsById.values()) {
-                    if (valueId.equals(producer.result())
-                            && producer.kind() != SemanticOpKind.ASSIGN
-                            && producer.kind() != SemanticOpKind.DELETE
-                            && producer.resultType() instanceof RuntimeDescriptor descriptor) {
-                        return descriptor;
-                    }
-                }
-            }
-            return RuntimeDescriptor.Int.INSTANCE;
-        }
 
         private void emitDelete(SemanticOp op) {
             KindPayload.DeletePayload payload = (KindPayload.DeletePayload) op.payload();
@@ -3590,17 +3089,6 @@ public final class LuaSemanticEmitter {
             }
         }
 
-        /** True iff the boundary input value is the chain's normalize slot. */
-        private boolean slotEqualsChainSlot(ValueId input, SemanticOp chain) {
-            for (OpId childId : chainChildOps(chain)) {
-                SemanticOp child = opsById.get(childId);
-                if (child.kind() == SemanticOpKind.INDEX_NORMALIZE
-                        && input.equals(child.result())) {
-                    return true;
-                }
-            }
-            return false;
-        }
 
         /** The chain's normalize-slot local (found among its children). */
         private String chainSlotExpr(SemanticOp chain) {
@@ -3625,13 +3113,6 @@ public final class LuaSemanticEmitter {
             return "nil";
         }
 
-        private List<OpId> chainChildOps(SemanticOp chain) {
-            return switch (chain.payload()) {
-                case KindPayload.AssignPayload assign -> assign.childOps();
-                case KindPayload.DeletePayload delete -> delete.childOps();
-                default -> List.of();
-            };
-        }
 
         /** The single BOUNDARY child parented to the given op, or null. */
         private SemanticOp boundaryChildOf(SemanticOp op) {
@@ -3924,127 +3405,7 @@ public final class LuaSemanticEmitter {
             emitModulePop();
         }
 
-        /**
-         * The private state of one lowered body's invocation (ISSUE-0654):
-         * the value slots its ops produce or consume and its
-         * {@code DIRECT} cells (parameters, locals, and per-iteration
-         * cells) — the state an invocation owns. {@code SHARED_CELL}
-         * state (a captured binding, a group function binding, a module
-         * cell) is shared by identity and never saved or restored: a
-         * closure holds the cell table itself.
-         *
-         * <p>The session carries one {@code S} table for every slot and
-         * cell (the control-flow emission cannot bind them to Lua locals
-         * — a {@code goto} never enters a local's scope), so a nested
-         * invocation of the same body would otherwise overwrite the
-         * enclosing invocation's own state: a recursive body (the
-         * {@code modules/imported-recursive-export} shape) would re-read
-         * its parameter cell and its half-computed slots after the nested
-         * call returned. The invoking arm therefore saves the callee
-         * body's private state before the invocation and restores it on
-         * every path — the per-invocation semantics the semantic oracle
-         * models with its cell overlays.</p>
-         */
-        private List<String> bodyStateKeys(FunctionId functionId) {
-            List<String> cached = bodyStateKeyCache.get(functionId);
-            if (cached != null) {
-                return cached;
-            }
-            LoweredFunction function = null;
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                LoweredFunction candidate = moduleUnit.functions().get(functionId);
-                if (candidate != null) {
-                    function = candidate;
-                    break;
-                }
-            }
-            java.util.LinkedHashSet<String> keys = new java.util.LinkedHashSet<>();
-            if (function != null) {
-                collectBodyStateKeys(function.body(), keys, new java.util.HashSet<>());
-            }
-            List<String> result = List.copyOf(keys);
-            bodyStateKeyCache.put(functionId, result);
-            return result;
-        }
 
-        private void collectBodyStateKeys(BlockId block, java.util.Set<String> keys,
-                                          java.util.Set<BlockId> seen) {
-            if (block == null || !seen.add(block)) {
-                return;
-            }
-            StructuredBodyTable ownerTable = blockTableOf.get(block);
-            List<OpId> opIds = ownerTable == null ? null : ownerTable.blockOps().get(block);
-            if (opIds == null) {
-                return;
-            }
-            for (OpId opId : opIds) {
-                SemanticOp op = opsById.get(opId);
-                if (op == null) {
-                    continue;
-                }
-                if (op.result() instanceof ValueId valueId) {
-                    keys.add(slot(valueId));
-                }
-                for (ValueId operand : op.operands()) {
-                    keys.add(slot(operand));
-                }
-                switch (op.payload()) {
-                    case KindPayload.BindingAllocPayload payload ->
-                        addCellStateKey(keys, payload.binding(), payload.generation());
-                    case KindPayload.BindingInitPayload payload ->
-                        addCellStateKey(keys, payload.binding(), payload.generation());
-                    case KindPayload.BindingLoadPayload payload ->
-                        addCellStateKey(keys, payload.binding(), payload.generation());
-                    case KindPayload.BindingStorePayload payload ->
-                        addCellStateKey(keys, payload.binding(), payload.generation());
-                    case KindPayload.RecursiveGroupInitPayload payload -> {
-                        for (BindingId binding : payload.bindings()) {
-                            addCellStateKey(keys, binding, 0);
-                        }
-                    }
-                    case KindPayload.ClosureNewPayload payload -> {
-                        for (BindingGeneration capture : payload.captures()) {
-                            addCellStateKey(keys, capture.binding(),
-                                capture.generation());
-                        }
-                    }
-                    case KindPayload.ModuleImportPayload payload -> {
-                        for (BindingId binding : payload.aliasCells()) {
-                            addCellStateKey(keys, binding, 0);
-                        }
-                    }
-                    case KindPayload.ForEachPayload payload -> {
-                        addCellStateKey(keys, payload.binding(), payload.generation());
-                        collectBodyStateKeys(payload.body(), keys, seen);
-                    }
-                    case KindPayload.TryCatchPayload payload -> {
-                        addCellStateKey(keys, payload.catchBinding(), 0);
-                        collectBodyStateKeys(payload.tryBlock(), keys, seen);
-                        collectBodyStateKeys(payload.catchBlock(), keys, seen);
-                    }
-                    case KindPayload.BranchPayload payload -> {
-                        collectBodyStateKeys(payload.selectedBlock(), keys, seen);
-                        collectBodyStateKeys(payload.alternateBlock(), keys, seen);
-                    }
-                    case KindPayload.LoopPayload payload -> {
-                        collectBodyStateKeys(payload.initBlock(), keys, seen);
-                        collectBodyStateKeys(payload.bodyBlock(), keys, seen);
-                        collectBodyStateKeys(payload.updateBlock(), keys, seen);
-                    }
-                    default -> {
-                    }
-                }
-            }
-        }
-
-        /** A body-private cell key: {@code DIRECT} cells only (shared state stays shared). */
-        private void addCellStateKey(java.util.Set<String> keys, BindingId binding,
-                                     long generation) {
-            if (cellKindOf(binding, generation) == BindingCellKind.SHARED_CELL) {
-                return;
-            }
-            keys.add(cell(binding, generation));
-        }
 
         /**
          * The re-entrant invocation's private-state save, or {@code null}
@@ -4115,52 +3476,6 @@ public final class LuaSemanticEmitter {
             out.append("__svStack[#__svStack] = nil\n");
         }
 
-        /**
-         * The recorded callee-unit {@code EXTERNAL_ENTRY} of one
-         * {@code SHARED_BODY} external call: resolved by the payload's
-         * statically recorded {@code externalEntryRef} inside the callee
-         * module's unit (ISSUE-0634's accumulation). A missing unit, a
-         * ref outside the callee unit, a non-entry op, an async entry for
-         * a sync call, or a divergent export name is a fail-closed
-         * producer defect — never a silently missing invocation.
-         */
-        private SemanticOp resolveExternalEntry(SemanticOp op,
-                KindPayload.CallPayload payload,
-                FunctionExecutionBinding.ExternalFunction external,
-                LoweredModuleUnit calleeUnit) {
-            OpId entryRef = payload.externalEntryRef();
-            if (entryRef == null) {
-                throw new IllegalStateException("CALL " + op.opId()
-                    + " carries a SHARED_BODY external binding without a recorded"
-                    + " externalEntryRef (producer defect)");
-            }
-            SemanticOp entry = null;
-            if (entryRef.module().equals(calleeUnit.moduleId())) {
-                for (SemanticOp candidate : calleeUnit.ops()) {
-                    if (candidate.opId().equals(entryRef)) {
-                        entry = candidate;
-                        break;
-                    }
-                }
-            }
-            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY) {
-                throw new IllegalStateException("CALL " + op.opId()
-                    + "'s externalEntryRef " + entryRef + " does not resolve to a"
-                    + " recorded EXTERNAL_ENTRY of the callee module "
-                    + calleeUnit.moduleId() + " (producer defect)");
-            }
-            KindPayload.ExternalEntryPayload entryPayload =
-                (KindPayload.ExternalEntryPayload) entry.payload();
-            if (entryPayload.async() || !entryPayload.exportName()
-                    .equals(external.exportName())) {
-                throw new IllegalStateException("CALL " + op.opId()
-                    + "'s externalEntryRef " + entryRef + " names the "
-                    + (entryPayload.async() ? "async" : "sync") + " entry of export '"
-                    + entryPayload.exportName() + "' but the binding names the sync"
-                    + " export '" + external.exportName() + "' (producer defect)");
-            }
-            return entry;
-        }
 
         /**
          * The registered execution binding of one allocation identity. The
@@ -4952,30 +4267,6 @@ public final class LuaSemanticEmitter {
             out.append("  end\n");
         }
 
-        /**
-         * Whether one recorded DEAL-body cell is the call-owned form
-         * (ISSUE-0677; design source
-         * {@code function-typed-value-materialization-and-dispatch} M6): its
-         * parent {@code RETURN} names no lowered body of the emitted closure
-         * (the landing record shape). The callee-owned form's parent
-         * {@code RETURN} names the callee body in the closure's function set,
-         * and that body's own {@code RETURN} runs the cell.
-         */
-        private boolean callOwnedCell(SemanticOp cell) {
-            OpId parentId = cell.origin() == null ? null : cell.origin().parentOpId();
-            SemanticOp parent = parentId == null ? null : opsById.get(parentId);
-            if (parent == null || parent.kind() != SemanticOpKind.RETURN
-                    || !(parent.payload()
-                        instanceof KindPayload.ReturnPayload returned)) {
-                return false;
-            }
-            for (LoweredModuleUnit moduleUnit : units.values()) {
-                if (moduleUnit.functions().containsKey(returned.function())) {
-                    return false;
-                }
-            }
-            return true;
-        }
 
         /**
          * The invocation site's execution of one call-owned recorded
@@ -5367,44 +4658,28 @@ public final class LuaSemanticEmitter {
             }
             SemanticOp returnBoundary = stdlibReturnBoundary(op);
             String target = slot((ValueId) op.result());
-            if (payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_LOG
-                    || payload.function() == deal.semantic.ir.StdlibFunctionId.CONSOLE_ERROR) {
-                // The direct arm runs the same row invoker the cataloged
-                // callable does (M4): the console rows' single-effect
-                // write is one realization, never a second statement-level
-                // copy — the result is the row invoker's null and the
-                // effect is exactly one write on the row's channel with
-                // the direct arm's text projection.
-                out.append(target).append(" = __stdlibInvoke(")
-                    .append(luaString(op.kind().name())).append(", ")
-                    .append(luaString(payload.function().name())).append(", ")
-                    .append(luaString(opKey(op.opId()))).append(", ")
-                    .append(luaString(op.contract().canonicalDigest())).append(", ")
-                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
-                    .append(luaString(originOf(op)));
-                for (ValueId arg : payload.args()) {
-                    out.append(", ").append(slot(arg));
-                }
-                out.append(")\n");
-            } else {
-                // The in-target stdlib algorithm over the
-                // boundary-admitted carriers, through the same row invoker
-                // the cataloged callable runs (M4): an algorithm failure
-                // publishes the op FAILURE event and raises the exact
-                // closed projection at the call origin (the __stdlib
-                // helper converts it through the fail-closed pattern).
-                out.append(target).append(" = __stdlibInvoke(")
-                    .append(luaString(op.kind().name())).append(", ")
-                    .append(luaString(payload.function().name())).append(", ")
-                    .append(luaString(opKey(op.opId()))).append(", ")
-                    .append(luaString(op.contract().canonicalDigest())).append(", ")
-                    .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
-                    .append(luaString(originOf(op)));
-                for (ValueId arg : payload.args()) {
-                    out.append(", ").append(slot(arg));
-                }
-                out.append(")\n");
+            // Every row runs the one row invoker the cataloged callable does
+            // (M4): the console rows' single-effect write is one
+            // realization, never a second statement-level copy — the
+            // result is the row invoker's null and the effect is exactly
+            // one write on the row's channel with the direct arm's text
+            // projection. The in-target stdlib algorithm runs over the
+            // boundary-admitted carriers through the same invoker: an
+            // algorithm failure publishes the op FAILURE event and raises
+            // the exact closed projection at the call origin (the
+            // __stdlib helper converts it through the fail-closed
+            // pattern).
+            out.append(target).append(" = __stdlibInvoke(")
+                .append(luaString(op.kind().name())).append(", ")
+                .append(luaString(payload.function().name())).append(", ")
+                .append(luaString(opKey(op.opId()))).append(", ")
+                .append(luaString(op.contract().canonicalDigest())).append(", ")
+                .append(luaString(parentKey(op.origin().parentOpId()))).append(", ")
+                .append(luaString(originOf(op)));
+            for (ValueId arg : payload.args()) {
+                out.append(", ").append(slot(arg));
             }
+            out.append(")\n");
             if (returnBoundary != null) {
                 KindPayload.BoundaryPayload boundaryPayload =
                     (KindPayload.BoundaryPayload) returnBoundary.payload();
@@ -5630,6 +4905,46 @@ public final class LuaSemanticEmitter {
             }
         }
 
+        /** The resolved CLASS_LITERAL_FIELD boundary child of one field entry. */
+        private SemanticOp requireClassNewFieldBoundary(SemanticOp op,
+                                                        KindPayload.FieldBoundary entry) {
+            SemanticOp boundary = opsById.get(entry.boundaryOpId());
+            if (boundary == null) {
+                throw new IllegalStateException("CLASS_NEW " + op.opId()
+                    + " field boundary " + entry.boundaryOpId() + " does not "
+                    + "resolve (producer defect)");
+            }
+            return boundary;
+        }
+
+        /**
+         * One CLASS_LITERAL_FIELD boundary child of a class construction:
+         * the boundary START, the pcall admission into the named local,
+         * the boundary and owner FAILURE events, and the boundary SUCCESS.
+         */
+        private void emitClassNewFieldCheck(SemanticOp op, SemanticOp boundary,
+                                            String checked) {
+            KindPayload.BoundaryPayload boundaryPayload =
+                (KindPayload.BoundaryPayload) boundary.payload();
+            String inputExpr = slot(boundaryPayload.input());
+            emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+            out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
+                .append(luaString(descriptorText(boundaryPayload.descriptor())))
+                .append(", ")
+                .append(luaString(staticKind(boundaryPayload.descriptor())))
+                .append(", ").append(inputExpr).append(")\n");
+            out.append("if not __okB then\n");
+            out.append("  ").append(checked).append(".o = ")
+                .append(luaString(originOf(boundary))).append("\n");
+            emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
+                "__errtext(" + checked + ")");
+            emitFailureEvent(op.opId(), op.kind().name(), op,
+                "__errtext(" + checked + ")");
+            out.append("  error(").append(checked).append(", 0)\n");
+            out.append("end\n");
+            emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+        }
+
         /**
          * The builtin {@code Error} construction (ISSUE-0619;
          * {@code semantic-ir-construct-coverage-cutover} K13 items 3/4):
@@ -5657,32 +4972,9 @@ public final class LuaSemanticEmitter {
             }
             java.util.Map<String, String> values = new java.util.LinkedHashMap<>();
             for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
-                SemanticOp boundary = opsById.get(entry.boundaryOpId());
-                if (boundary == null) {
-                    throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " field boundary " + entry.boundaryOpId() + " does not "
-                        + "resolve (producer defect)");
-                }
-                KindPayload.BoundaryPayload boundaryPayload =
-                    (KindPayload.BoundaryPayload) boundary.payload();
-                String inputExpr = slot(boundaryPayload.input());
-                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                SemanticOp boundary = requireClassNewFieldBoundary(op, entry);
                 String checked = "__ecT" + boundary.opId().id();
-                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(")\n");
-                out.append("if not __okB then\n");
-                out.append("  ").append(checked).append(".o = ")
-                    .append(luaString(originOf(boundary))).append("\n");
-                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
-                    "__errtext(" + checked + ")");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(" + checked + ")");
-                out.append("  error(").append(checked).append(", 0)\n");
-                out.append("end\n");
-                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                emitClassNewFieldCheck(op, boundary, checked);
                 values.put(entry.field(), checked);
             }
             String target = slot((ValueId) op.result());
@@ -5767,32 +5059,9 @@ public final class LuaSemanticEmitter {
             // present null stays present for the host side and the
             // presence-aware reads).
             for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
-                SemanticOp boundary = opsById.get(entry.boundaryOpId());
-                if (boundary == null) {
-                    throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " field boundary " + entry.boundaryOpId() + " does not "
-                        + "resolve (producer defect)");
-                }
-                KindPayload.BoundaryPayload boundaryPayload =
-                    (KindPayload.BoundaryPayload) boundary.payload();
-                String inputExpr = slot(boundaryPayload.input());
-                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                SemanticOp boundary = requireClassNewFieldBoundary(op, entry);
                 String checked = "__hccT" + boundary.opId().id();
-                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(")\n");
-                out.append("if not __okB then\n");
-                out.append("  ").append(checked).append(".o = ")
-                    .append(luaString(originOf(boundary))).append("\n");
-                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
-                    "__errtext(" + checked + ")");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(" + checked + ")");
-                out.append("  error(").append(checked).append(", 0)\n");
-                out.append("end\n");
-                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                emitClassNewFieldCheck(op, boundary, checked);
                 out.append("__instT[").append(luaString(entry.field()))
                     .append("] = (").append(checked)
                     .append(" == nil) and __rt.__NULL or ").append(checked)
@@ -5866,35 +5135,14 @@ public final class LuaSemanticEmitter {
             // representation the loaded matcher validates).
             out.append("__provT = {}\n");
             for (KindPayload.FieldBoundary entry : payload.fieldBoundaries()) {
-                SemanticOp boundary = opsById.get(entry.boundaryOpId());
-                if (boundary == null) {
-                    throw new IllegalStateException("CLASS_NEW " + op.opId()
-                        + " field boundary " + entry.boundaryOpId() + " does not "
-                        + "resolve (producer defect)");
-                }
-                KindPayload.BoundaryPayload boundaryPayload =
-                    (KindPayload.BoundaryPayload) boundary.payload();
-                String inputExpr = slot(boundaryPayload.input());
-                emitBoundaryStart(boundary, inputExpr, boundaryPayload.descriptor());
+                SemanticOp boundary = requireClassNewFieldBoundary(op, entry);
                 String checked = "__fpcT" + boundary.opId().id();
-                out.append("__okB, ").append(checked).append(" = pcall(__bcheck, ")
-                    .append(luaString(descriptorText(boundaryPayload.descriptor())))
-                    .append(", ")
-                    .append(luaString(staticKind(boundaryPayload.descriptor())))
-                    .append(", ").append(inputExpr).append(")\n");
-                out.append("if not __okB then\n");
-                out.append("  ").append(checked).append(".o = ")
-                    .append(luaString(originOf(boundary))).append("\n");
-                emitFailureEvent(boundary.opId(), "BOUNDARY", boundary,
-                    "__errtext(" + checked + ")");
-                emitFailureEvent(op.opId(), op.kind().name(), op,
-                    "__errtext(" + checked + ")");
-                out.append("  error(").append(checked).append(", 0)\n");
-                out.append("end\n");
-                emitBoundarySuccess(boundary, checked, boundaryPayload.descriptor());
+                emitClassNewFieldCheck(op, boundary, checked);
                 out.append("__provT[").append(luaString(entry.field()))
                     .append("] = ")
-                    .append(ffiClassFieldProjection(boundaryPayload.descriptor(),
+                    .append(ffiClassFieldProjection(
+                        ((KindPayload.BoundaryPayload) boundary.payload())
+                            .descriptor(),
                         checked))
                     .append("\n");
             }
@@ -5986,25 +5234,6 @@ public final class LuaSemanticEmitter {
                 .append(", __resT), nil)\n");
         }
 
-        /**
-         * The registered owner factory op of a SHARED_FACTORY CLASS_NEW,
-         * resolved through the delivered per-module class-factory
-         * registries (the one fact channel shared with the oracle and the
-         * JVM session): the owner module is the module whose registry
-         * binds the construction entry, never the class descriptor
-         * namespace.
-         */
-        private OpId factoryOpIdOf(SemanticOp op, KindPayload.ClassNewPayload payload) {
-            OpId factoryOpId = ClassFactoryRegistry.ownerFactoryOp(registries,
-                payload.classFactoryRef());
-            if (factoryOpId == null) {
-                throw new IllegalStateException("CLASS_NEW " + op.opId()
-                    + " classFactoryRef " + payload.classFactoryRef()
-                    + " resolves in no module's ClassFactoryRegistry in the closure"
-                    + " (producer defect)");
-            }
-            return factoryOpId;
-        }
 
         /**
          * The nesting-safe module save of a factory transfer: one stack
@@ -6151,33 +5380,7 @@ public final class LuaSemanticEmitter {
             return null;
         }
 
-        /** The STDLIB_PARAMETER children in one-based declared order. */
-        private List<SemanticOp> stdlibParamBoundaries(SemanticOp op) {
-            List<SemanticOp> result = new ArrayList<>();
-            for (SemanticOp candidate : opsById.values()) {
-                if (candidate.kind() == SemanticOpKind.BOUNDARY
-                        && op.opId().equals(candidate.origin().parentOpId())
-                        && ((KindPayload.BoundaryPayload) candidate.payload()).kind()
-                            == BoundaryKind.STDLIB_PARAMETER) {
-                    result.add(candidate);
-                }
-            }
-            result.sort(java.util.Comparator.comparingLong(candidate ->
-                candidate.opId().id()));
-            return result;
-        }
 
-        private SemanticOp stdlibReturnBoundary(SemanticOp op) {
-            for (SemanticOp candidate : opsById.values()) {
-                if (candidate.kind() == SemanticOpKind.BOUNDARY
-                        && op.opId().equals(candidate.origin().parentOpId())
-                        && ((KindPayload.BoundaryPayload) candidate.payload()).kind()
-                            == BoundaryKind.STDLIB_RETURN) {
-                    return candidate;
-                }
-            }
-            return null;
-        }
 
         private void emitBranch(SemanticOp op) {
             KindPayload.BranchPayload payload = (KindPayload.BranchPayload) op.payload();
@@ -6333,19 +5536,6 @@ public final class LuaSemanticEmitter {
             emitPlainSuccess(op);
         }
 
-        private RuntimeDescriptor elementDescriptorOf(SemanticOp op) {
-            KindPayload.ForEachPayload payload = (KindPayload.ForEachPayload) op.payload();
-            for (SemanticOp producer : opsById.values()) {
-                if (payload.iterable().equals(producer.result())) {
-                    if (producer.resultType() instanceof RuntimeDescriptor.Array array) {
-                        return array.element();
-                    }
-                    return producer.resultType() instanceof RuntimeDescriptor descriptor
-                        ? descriptor : RuntimeDescriptor.String.INSTANCE;
-                }
-            }
-            return RuntimeDescriptor.String.INSTANCE;
-        }
 
         private void emitTryCatch(SemanticOp op) {
             KindPayload.TryCatchPayload payload = (KindPayload.TryCatchPayload) op.payload();
@@ -6473,60 +5663,6 @@ public final class LuaSemanticEmitter {
             out.append(pad).append("end\n");
         }
 
-        /** Collects the transfer ops of a block recursively through structure payloads. */
-        private void collectTransfers(BlockId block, List<SemanticOp> transfers) {
-            // The block's owning membership table (a non-entry module's
-            // factory body resolves against its own module table, exactly
-            // like the block walk's own resolution).
-            StructuredBodyTable ownerTable = blockTableOf.get(block);
-            if (ownerTable == null) {
-                ownerTable = table;
-            }
-            List<OpId> memberOps = ownerTable.blockOps().get(block);
-            if (memberOps == null) {
-                throw new IllegalStateException("block " + block + " has no membership row "
-                    + "in its owning unit's table (a malformed table — the production "
-                    + "validator rejects this)");
-            }
-            for (OpId opId : memberOps) {
-                SemanticOp op = opsById.get(opId);
-                switch (op.kind()) {
-                    case BREAK, CONTINUE, RETURN -> transfers.add(op);
-                    case BRANCH -> {
-                        KindPayload.BranchPayload payload =
-                            (KindPayload.BranchPayload) op.payload();
-                        collectTransfers(payload.selectedBlock(), transfers);
-                        if (payload.alternateBlock() != null) {
-                            collectTransfers(payload.alternateBlock(), transfers);
-                        }
-                    }
-                    case LOOP -> {
-                        KindPayload.LoopPayload payload =
-                            (KindPayload.LoopPayload) op.payload();
-                        if (payload.initBlock() != null) {
-                            collectTransfers(payload.initBlock(), transfers);
-                        }
-                        collectTransfers(payload.bodyBlock(), transfers);
-                        if (payload.updateBlock() != null) {
-                            collectTransfers(payload.updateBlock(), transfers);
-                        }
-                    }
-                    case FOR_EACH -> {
-                        KindPayload.ForEachPayload payload =
-                            (KindPayload.ForEachPayload) op.payload();
-                        collectTransfers(payload.body(), transfers);
-                    }
-                    case TRY_CATCH -> {
-                        KindPayload.TryCatchPayload payload =
-                            (KindPayload.TryCatchPayload) op.payload();
-                        collectTransfers(payload.tryBlock(), transfers);
-                        collectTransfers(payload.catchBlock(), transfers);
-                    }
-                    default -> {
-                    }
-                }
-            }
-        }
 
         private void emitThrow(SemanticOp op) {
             KindPayload.ThrowPayload payload = (KindPayload.ThrowPayload) op.payload();
@@ -7314,40 +6450,6 @@ public final class LuaSemanticEmitter {
                 .append(op.opId().id()).append("))\n");
         }
 
-        /**
-         * The callee unit's recorded async {@code EXTERNAL_ENTRY} of one
-         * {@code ASYNC_START(EXTERNAL)}: resolved by the link's canonical
-         * token (the entry op's own id by construction) inside the callee
-         * module's unit. A missing module outside the session's closure, a
-         * token naming no op, a non-entry op, a sync entry, or a divergent
-         * export name is a fail-closed producer defect — the entry's
-         * dispatch key would otherwise resolve to no emitted entry at
-         * execution.
-         */
-        private SemanticOp resolveExternalAsyncEntry(SemanticOp op,
-                ExternalAsyncLink link) {
-            LoweredModuleUnit calleeUnit = units.get(link.calleeModuleId());
-            if (calleeUnit == null) {
-                throw new IllegalStateException("ASYNC_START " + op.opId()
-                    + " resolves the external callee module " + link.calleeModuleId()
-                    + " outside the session's closure (producer defect)");
-            }
-            OpId entryRef = new OpId(link.calleeModuleId(),
-                link.calleeTokenId().tokenId());
-            SemanticOp entry = opsById.get(entryRef);
-            if (entry == null || entry.kind() != SemanticOpKind.EXTERNAL_ENTRY
-                    || !(entry.payload()
-                        instanceof KindPayload.ExternalEntryPayload entryPayload)
-                    || !entryPayload.async()
-                    || !entryPayload.exportName().equals(link.exportName())) {
-                throw new IllegalStateException("ASYNC_START " + op.opId()
-                    + " names the async external '" + link.calleeModuleId() + "'."
-                    + link.exportName() + " whose ExternalAsyncLink token "
-                    + entryRef + " resolves to no emitted async EXTERNAL_ENTRY"
-                    + " in the callee module (producer defect)");
-            }
-            return entry;
-        }
 
         /**
          * AWAIT — the completion position (D13 step 6): the deterministic
@@ -8138,20 +7240,6 @@ public final class LuaSemanticEmitter {
             out.append("}}\n");
         }
 
-        /** The class's CLASS_DEFAULT op of one field, or null (no declared default). */
-        private SemanticOp classDefaultOpOf(ClassId classId, String field) {
-            for (SemanticOp candidate : opsById.values()) {
-                if (candidate.kind() != SemanticOpKind.CLASS_DEFAULT) {
-                    continue;
-                }
-                KindPayload.ClassDefaultPayload payload =
-                    (KindPayload.ClassDefaultPayload) candidate.payload();
-                if (payload.classId().equals(classId) && payload.field().equals(field)) {
-                    return candidate;
-                }
-            }
-            return null;
-        }
 
         /**
          * The JSON plan descriptor text: the boundary descriptor text with

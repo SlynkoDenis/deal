@@ -669,21 +669,7 @@ public final class NameResolver {
         // F1: Record the scope so Pass 2 can reuse it
         scopeMap.put(fe.body(), currentScope);
 
-        Set<String> paramNames = new HashSet<>();
-        for (Parameter p : fe.params()) {
-            String name = p.name();
-
-            // Check for $ in parameter name (E2008)
-            checkNoDollar(name, p.span());
-
-            if (paramNames.contains(name)) {
-                error(DiagnosticCode.E2002, "Duplicate parameter '" + name + "'", p.span());
-                continue;
-            }
-            paramNames.add(name);
-            Type paramType = resolveTypeNode(p.type());
-            currentScope.define(name, new Symbol.VariableSymbol(name, paramType, true));
-        }
+        bindParameters(fe.params());
 
         // DEAL v1.2: function expressions have no rest parameters.
 
@@ -710,8 +696,22 @@ public final class NameResolver {
         currentScope = currentScope.enterScope();
         scopeMap.put(fd, currentScope);
 
+        bindParameters(fd.params());
+
+        // DEAL v1.2: function declarations have no rest parameters.
+
+        walkStatement(fd.body());
+        currentScope = saved;
+    }
+
+    /**
+     * Defines one function's parameters in the current scope: the E2008
+     * dollar check and the E2002 duplicate-name rejection in declaration
+     * order, then the parameter symbol.
+     */
+    private void bindParameters(List<Parameter> params) {
         Set<String> paramNames = new HashSet<>();
-        for (Parameter p : fd.params()) {
+        for (Parameter p : params) {
             String name = p.name();
 
             // Check for $ in parameter name (E2008)
@@ -725,11 +725,6 @@ public final class NameResolver {
             Type paramType = resolveTypeNode(p.type());
             currentScope.define(name, new Symbol.VariableSymbol(name, paramType, true));
         }
-
-        // DEAL v1.2: function declarations have no rest parameters.
-
-        walkStatement(fd.body());
-        currentScope = saved;
     }
 
     private void walkBlock(Block block) {

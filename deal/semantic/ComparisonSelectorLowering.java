@@ -1,6 +1,7 @@
 package deal.semantic;
 
 import deal.ast.BinaryOp;
+import deal.checker.TypeChecker;
 import deal.diagnostics.CompilerDiagnostic;
 import deal.semantic.ir.BinarySelector;
 import deal.semantic.ir.ContractSnapshotCanonicalizer;
@@ -551,19 +552,6 @@ public final class ComparisonSelectorLowering {
 
     /** A short canonical spelling of a checked type for defect messages. */
     private static String typeText(Type type) {
-        return switch (type) {
-            case Type.Null ignored -> "null";
-            case Type.Boolean ignored -> "boolean";
-            case Type.Int ignored -> "int";
-            case Type.Number ignored -> "number";
-            case Type.String ignored -> "string";
-            case Type.Bytes ignored -> "bytes";
-            case Type.Table ignored -> "table";
-            case Type.Error ignored -> "<error>";
-            case Type.Array array -> typeText(array.element()) + "[]";
-            case Type.Nullable nullable -> typeText(nullable.inner()) + " | null";
-            case Type.Class cls -> cls.name();
-            case Type.Func func -> "function";
-        };
+        return TypeChecker.typeName(type);
     }
 }

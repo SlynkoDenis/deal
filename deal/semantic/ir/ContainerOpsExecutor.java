@@ -891,16 +891,9 @@ public final class ContainerOpsExecutor {
      * closed as producer defects (never executed, never projected).
      */
     private static void requireOp(SemanticOp op, SemanticOpKind kind, FailurePolicyId policy) {
-        Objects.requireNonNull(op, "op must not be null");
-        if (op.kind() != kind) {
-            throw new Defect("expected a " + kind + " op, got " + op.kind() + " "
-                + op.opId() + ": the executor interprets validated op shapes only — a "
-                + "wrong kind is a producer defect, never executed");
-        }
-        if (op.failurePolicy() != policy) {
-            throw new Defect(kind + " " + op.opId() + " carries failure policy "
-                + op.failurePolicy() + ": the pinned policy is " + policy
-                + " — a non-pinned policy is a producer defect, never executed");
+        String defect = ExecutorGuards.opShapeDefect(op, kind, policy);
+        if (defect != null) {
+            throw new Defect(defect);
         }
     }
 
@@ -933,9 +926,7 @@ public final class ContainerOpsExecutor {
                                                    BoundaryKind pinnedKind) {
         SemanticOp child = boundaryOps.get(childId);
         if (child == null) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + childId + " which the boundary lookup does not resolve — a producer "
-                + "defect, never executed");
+            throw new Defect(ExecutorGuards.missingBoundaryChildDefect(owner, childId));
         }
         requireChildOf(child, owner, pinnedKind);
         return child;
@@ -944,24 +935,9 @@ public final class ContainerOpsExecutor {
     /** The shared child-shape checks of {@link #requireBoundaryChild}. */
     private static void requireChildOf(SemanticOp child, SemanticOp owner,
                                        BoundaryKind pinnedKind) {
-        if (child.kind() != SemanticOpKind.BOUNDARY) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names child "
-                + child.opId() + " of kind " + child.kind()
-                + ": the pinned child kind is BOUNDARY — a producer defect, never executed");
-        }
-        if (!owner.opId().equals(child.origin().parentOpId())) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + child.opId() + " whose origin parentOpId is "
-                + child.origin().parentOpId()
-                + ": the validator pins the child's parentOpId to the owning op — a "
-                + "mismatch is a producer defect, never executed");
-        }
-        KindPayload.BoundaryPayload payload = (KindPayload.BoundaryPayload) child.payload();
-        if (payload.kind() != pinnedKind) {
-            throw new Defect(owner.kind() + " " + owner.opId() + " names boundary child "
-                + child.opId() + " of boundary kind " + payload.kind()
-                + ": the pinned child boundary kind is " + pinnedKind
-                + " — a producer defect, never executed");
+        String defect = ExecutorGuards.childShapeDefect(child, owner, pinnedKind);
+        if (defect != null) {
+            throw new Defect(defect);
         }
     }
 }

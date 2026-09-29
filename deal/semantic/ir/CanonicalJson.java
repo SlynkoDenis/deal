@@ -395,38 +395,16 @@ public final class CanonicalJson {
         return value;
     }
 
-    private static final class Parser {
-
-        private final String text;
-        private int pos;
+    private static final class Parser extends JsonScan.CharCursor {
 
         Parser(String text) {
-            this.text = text;
-            this.pos = 0;
+            super(text);
         }
 
-        boolean atEnd() {
-            return pos >= text.length();
-        }
-
-        char peek() {
-            return text.charAt(pos);
-        }
-
-        SemanticIrTextDecodeException err(String reason) {
+        @Override
+        public SemanticIrTextDecodeException err(String reason) {
             return new SemanticIrTextDecodeException(
                 reason + " at offset " + pos + " in canonical JSON text");
-        }
-
-        void skipWhitespace() {
-            while (!atEnd()) {
-                char c = peek();
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                    pos++;
-                } else {
-                    return;
-                }
-            }
         }
 
         Value parseValue() {
@@ -449,24 +427,6 @@ public final class CanonicalJson {
                     throw err("unexpected character '" + printable(c) + "' (expected a value)");
                 }
             };
-        }
-
-        Value parseLiteral(String word, Value value) {
-            if (!text.startsWith(word, pos)) {
-                throw err("malformed literal (expected \"" + word + "\")");
-            }
-            pos += word.length();
-            if (!atEnd()) {
-                char next = peek();
-                if (!isDelimiter(next)) {
-                    throw err("malformed literal \"" + word + "\"");
-                }
-            }
-            return value;
-        }
-
-        boolean isDelimiter(char c) {
-            return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',' || c == ']' || c == '}';
         }
 
         Value parseNumber() {

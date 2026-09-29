@@ -1787,12 +1787,7 @@ public final class SemanticOracle {
          * through its own unit's table, never the entry module's).
          */
         void runBlock(UnitState state, BlockId block) {
-            List<OpId> ops = state.table.blockOps().get(block);
-            if (ops == null) {
-                throw new IllegalStateException("block " + block
-                    + " has no membership row (a malformed table — the production "
-                    + "validator rejects this)");
-            }
+            List<OpId> ops = requireBlockOps(state, block);
             for (OpId opId : ops) {
                 if (ownedChildren.contains(opId)) {
                     continue; // payload-owned: the owner arm executes it once
@@ -1804,6 +1799,21 @@ public final class SemanticOracle {
                 }
                 execute(op);
             }
+        }
+
+        /**
+         * The block's ordered op membership row, or the malformed-table
+         * failure (the production validator rejects a table without the
+         * row).
+         */
+        private static List<OpId> requireBlockOps(UnitState state, BlockId block) {
+            List<OpId> ops = state.table.blockOps().get(block);
+            if (ops == null) {
+                throw new IllegalStateException("block " + block
+                    + " has no membership row (a malformed table — the production "
+                    + "validator rejects this)");
+            }
+            return ops;
         }
 
         // =========================================================================
@@ -2562,20 +2572,7 @@ public final class SemanticOracle {
                         ownerDefaultOps.put(candidate.opId(), candidate);
                     }
                 }
-                ClassOpsExecutor.BodyRunner runner = defaultOp -> {
-                    emitStart(defaultOp, List.of());
-                    Value oracleProduced;
-                    try {
-                        oracleProduced = executeDefaultBlockValue(defaultOp);
-                    } catch (DealFailure failure) {
-                        emitFailure(defaultOp, failure);
-                        throw failure;
-                    }
-                    ClassOpsExecutor.Value produced = executorValueOf(oracleProduced);
-                    publish(defaultOp, oracleProduced);
-                    emitSuccess(defaultOp, atomOf(oracleProduced));
-                    return produced;
-                };
+                ClassOpsExecutor.BodyRunner runner = this::runDefaultBlockBody;
                 emitStartParented(factoryOp, triggering.opId(), List.of());
                 ClassOpsExecutor.Outcome<ClassOpsExecutor.Value> outcome;
                 try {
@@ -2694,17 +2691,8 @@ public final class SemanticOracle {
                     // parent to this caller op (cross-unit).
                     Map<OpId, ClassOpsExecutor.Value> captured = new LinkedHashMap<>();
                     ClassOpsExecutor.BodyRunner recordingRunner = defaultOp -> {
-                        emitStart(defaultOp, List.of());
-                        Value oracleProduced;
-                        try {
-                            oracleProduced = executeDefaultBlockValue(defaultOp);
-                        } catch (DealFailure failure) {
-                            emitFailure(defaultOp, failure);
-                            throw failure;
-                        }
-                        ClassOpsExecutor.Value produced = executorValueOf(oracleProduced);
-                        publish(defaultOp, oracleProduced);
-                        emitSuccess(defaultOp, atomOf(oracleProduced));
+                        ClassOpsExecutor.Value produced =
+                            runDefaultBlockBody(defaultOp);
                         captured.put(defaultOp.opId(), produced);
                         return produced;
                     };
@@ -2894,20 +2882,23 @@ public final class SemanticOracle {
          * value's allocation id is the one the produced op published.
          */
         private ClassOpsExecutor.BodyRunner bodyRunner(SemanticOp op) {
-            return defaultOp -> {
-                emitStart(defaultOp, List.of());
-                Value oracleProduced;
-                try {
-                    oracleProduced = executeDefaultBlockValue(defaultOp);
-                } catch (DealFailure failure) {
-                    emitFailure(defaultOp, failure);
-                    throw failure;
-                }
-                ClassOpsExecutor.Value produced = executorValueOf(oracleProduced);
-                publish(defaultOp, oracleProduced);
-                emitSuccess(defaultOp, atomOf(oracleProduced));
-                return produced;
-            };
+            return this::runDefaultBlockBody;
+        }
+
+        /** The shared body of {@link #bodyRunner} and its variants. */
+        private ClassOpsExecutor.Value runDefaultBlockBody(SemanticOp defaultOp) {
+            emitStart(defaultOp, List.of());
+            Value oracleProduced;
+            try {
+                oracleProduced = executeDefaultBlockValue(defaultOp);
+            } catch (DealFailure failure) {
+                emitFailure(defaultOp, failure);
+                throw failure;
+            }
+            ClassOpsExecutor.Value produced = executorValueOf(oracleProduced);
+            publish(defaultOp, oracleProduced);
+            emitSuccess(defaultOp, atomOf(oracleProduced));
+            return produced;
         }
 
         /**
@@ -5102,12 +5093,7 @@ public final class SemanticOracle {
         }
 
         private Value runBodyBlock(BlockId block, int skipLeading, UnitState state) {
-            List<OpId> ops = state.table.blockOps().get(block);
-            if (ops == null) {
-                throw new IllegalStateException("block " + block
-                    + " has no membership row (a malformed table — the production "
-                    + "validator rejects this)");
-            }
+            List<OpId> ops = requireBlockOps(state, block);
             int i = 0;
             for (OpId opId : ops) {
                 if (i++ < skipLeading) {
@@ -5213,33 +5199,16 @@ public final class SemanticOracle {
                     requireAsyncHostBinding(host.hostModuleId(), host.exportName(),
                         host.descriptor());
                     requireHostResponder();
-                    String label = payload.hostOperationLabel();
-                    effects.add(new SemanticRuntimeModel.EffectEvent(
-                        SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP, label));
-                    String bound = responder.startAsync(host.hostModuleId(),
-                        host.exportName(), host.descriptor(), List.copyOf(checkedArgs),
-                        label);
-                    if (bound == null) {
-                        throw registryFailure(op, FailurePolicyId.ASYNC_OPERATION_HANDLE,
-                            "async-operation", "nothing");
-                    }
-                    hostOperations.put(token.tokenId(), bound);
-                    tasks.put(token.tokenId(), new Task(token, null));
+                    startHostAsync(op, token, payload.hostOperationLabel(),
+                        host.hostModuleId(), host.exportName(), host.descriptor(),
+                        checkedArgs);
                 }
                 case FunctionExecutionBinding.HostFunctionValue hostValue -> {
                     requireHostResponder();
-                    String label = payload.hostOperationLabel();
-                    effects.add(new SemanticRuntimeModel.EffectEvent(
-                        SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP, label));
-                    String bound = responder.startAsync(hostValue.hostModuleId(),
+                    startHostAsync(op, token, payload.hostOperationLabel(),
+                        hostValue.hostModuleId(),
                         "@value#" + hostValue.materializingBoundaryOpId().id(),
-                        hostValue.descriptor(), List.copyOf(checkedArgs), label);
-                    if (bound == null) {
-                        throw registryFailure(op, FailurePolicyId.ASYNC_OPERATION_HANDLE,
-                            "async-operation", "nothing");
-                    }
-                    hostOperations.put(token.tokenId(), bound);
-                    tasks.put(token.tokenId(), new Task(token, null));
+                        hostValue.descriptor(), checkedArgs);
                 }
                 case FunctionExecutionBinding.ExternalFunction external -> {
                     if (payload.externalAsyncLink() == null) {
@@ -5329,16 +5298,8 @@ public final class SemanticOracle {
                         descriptor = hostValue.descriptor();
                         label = module.path() + ".@value";
                     }
-                    effects.add(new SemanticRuntimeModel.EffectEvent(
-                        SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP, label));
-                    String bound = responder.startAsync(module, export, descriptor,
-                        List.copyOf(checkedArgs), label);
-                    if (bound == null) {
-                        throw registryFailure(op, FailurePolicyId.ASYNC_OPERATION_HANDLE,
-                            "async-operation", "nothing");
-                    }
-                    hostOperations.put(token.tokenId(), bound);
-                    tasks.put(token.tokenId(), new Task(token, null));
+                    startHostAsync(op, token, label, module, export, descriptor,
+                        checkedArgs);
                 }
                 case EXTERNAL, SHARED_BODY -> {
                     FunctionExecutionBinding.ExternalFunction external =
@@ -5428,16 +5389,8 @@ public final class SemanticOracle {
                         descriptor = hostValue.descriptor();
                         label = module.path() + ".@value";
                     }
-                    effects.add(new SemanticRuntimeModel.EffectEvent(
-                        SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP, label));
-                    String bound = responder.startAsync(module, export, descriptor,
-                        List.copyOf(leading), label);
-                    if (bound == null) {
-                        throw registryFailure(op, FailurePolicyId.ASYNC_OPERATION_HANDLE,
-                            "async-operation", "nothing");
-                    }
-                    hostOperations.put(token.tokenId(), bound);
-                    tasks.put(token.tokenId(), new Task(token, null));
+                    startHostAsync(op, token, label, module, export, descriptor,
+                        leading);
                 }
                 case EXTERNAL, SHARED_BODY -> {
                     FunctionExecutionBinding.ExternalFunction external =
@@ -5456,6 +5409,27 @@ public final class SemanticOracle {
                 throw new IllegalStateException("an async host call requires a "
                     + "deterministic host responder (the E7 host seam)");
             }
+        }
+
+        /**
+         * Starts one async host operation: the ASYNC_START_OP effect, the
+         * responder request (the handle's absence is the pinned
+         * ASYNC_OPERATION_HANDLE failure), and the host-operation/task
+         * bookkeeping for the token.
+         */
+        private void startHostAsync(SemanticOp op, AsyncTokenId token,
+                String label, ModuleId hostModuleId, String exportName,
+                RuntimeDescriptor.Func descriptor, List<Value> args) {
+            effects.add(new SemanticRuntimeModel.EffectEvent(
+                SemanticRuntimeModel.EffectEvent.Kind.ASYNC_START_OP, label));
+            String bound = responder.startAsync(hostModuleId, exportName, descriptor,
+                List.copyOf(args), label);
+            if (bound == null) {
+                throw registryFailure(op, FailurePolicyId.ASYNC_OPERATION_HANDLE,
+                    "async-operation", "nothing");
+            }
+            hostOperations.put(token.tokenId(), bound);
+            tasks.put(token.tokenId(), new Task(token, null));
         }
 
         /**

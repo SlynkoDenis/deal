@@ -1,19 +1,14 @@
 package deal.codegen.lua;
 
+import deal.codegen.AsyncExportEnvelope;
+import deal.semantic.ir.JsonScan;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.stream.Stream;
 
 /**
  * The production LuaJIT host half of {@code BackendAsyncExportInvoker}
@@ -86,13 +81,6 @@ public class LuaJitAsyncExportInvoker {
     /** Temp-directory prefix for the per-invocation materialization. */
     static final String TEMP_DIR_PREFIX = "deal-async-export-invoker-";
 
-    private static final String STATUS_VALUE = "value";
-    private static final String STATUS_DEAL_ERROR = "deal-error";
-    private static final String STATUS_HOST_FAILURE = "host-failure";
-    private static final String STATUS_REPRESENTATION_FAILURE =
-        "representation-failure";
-    private static final String STATUS_INFRASTRUCTURE_FAILURE =
-        "infrastructure-failure";
 
     // =========================================================================
     // Public API
@@ -252,8 +240,8 @@ public class LuaJitAsyncExportInvoker {
             }
 
             try {
-                stdout = readCapture(stdoutFile);
-                stderr = readCapture(stderrFile);
+                stdout = AsyncExportEnvelope.readCapture(stdoutFile);
+                stderr = AsyncExportEnvelope.readCapture(stderrFile);
             } catch (IOException e) {
                 throw new LuaJitAsyncExportInvocationException(
                     "cannot read the luajit capture files: " + e.getMessage(),
@@ -266,7 +254,7 @@ public class LuaJitAsyncExportInvoker {
                 "async-export invoker I/O failure: " + e.getMessage(),
                 stdout, stderr, e);
         } finally {
-            deleteRecursively(tempDir);
+            AsyncExportEnvelope.deleteRecursively(tempDir);
         }
     }
 
@@ -328,33 +316,6 @@ public class LuaJitAsyncExportInvoker {
     // Envelope mapping (D6)
     // =========================================================================
 
-    /** The validated closed-schema envelope of one status. */
-    private static final class Envelope {
-        final String status;
-        final String descriptor;
-        final String value;
-        final String code;
-        final String message;
-        final String file;
-        final Integer line;
-        final Integer column;
-        final String reason;
-
-        Envelope(String status, String descriptor, String value, String code,
-                 String message, String file, Integer line, Integer column,
-                 String reason) {
-            this.status = status;
-            this.descriptor = descriptor;
-            this.value = value;
-            this.code = code;
-            this.message = message;
-            this.file = file;
-            this.line = line;
-            this.column = column;
-            this.reason = reason;
-        }
-    }
-
     /**
      * Maps process exit + captured streams to an invocation result or a
      * hard failure (D6). The driver's envelope line is always the last
@@ -362,16 +323,17 @@ public class LuaJitAsyncExportInvoker {
      * interleaving on both streams never corrupts the frame.
      */
     private Result mapOutcome(int exit, String stdout, String stderr) {
-        String line = lastMarkerLine(stdout);
+        String line = AsyncExportEnvelope.lastMarkerLine(stdout, RESULT_PREFIX);
         if (line == null) {
             throw new LuaJitAsyncExportInvocationException(
                 "no " + RESULT_PREFIX + " envelope line on stdout (luajit"
                     + " exited " + exit + ")", stdout, stderr);
         }
 
-        final Envelope envelope;
+        final AsyncExportEnvelope.Envelope envelope;
         try {
-            envelope = decodeEnvelope(line.substring(RESULT_PREFIX.length()));
+            envelope = AsyncExportEnvelope.decodeEnvelope(
+                line.substring(RESULT_PREFIX.length()));
         } catch (EnvelopeJson.ParseException e) {
             throw new LuaJitAsyncExportInvocationException(
                 "malformed async-export envelope on stdout (luajit exited "
@@ -385,18 +347,18 @@ public class LuaJitAsyncExportInvoker {
         // envelopes map (the driver pins exit 0 for them), and every
         // other shape was already rejected fail-closed by the codec.
         return switch (envelope.status) {
-            case STATUS_VALUE -> new Result.Value(
+            case AsyncExportEnvelope.STATUS_VALUE -> new Result.Value(
                 envelope.descriptor, envelope.value);
-            case STATUS_DEAL_ERROR -> new Result.DealError(envelope.code,
-                envelope.message, envelope.file, envelope.line,
+            case AsyncExportEnvelope.STATUS_DEAL_ERROR -> new Result.DealError(
+                envelope.code, envelope.message, envelope.file, envelope.line,
                 envelope.column);
-            case STATUS_HOST_FAILURE -> new Result.HostFailure(
+            case AsyncExportEnvelope.STATUS_HOST_FAILURE -> new Result.HostFailure(
                 envelope.reason);
-            case STATUS_REPRESENTATION_FAILURE ->
+            case AsyncExportEnvelope.STATUS_REPRESENTATION_FAILURE ->
                 throw new LuaJitAsyncExportInvocationException(
                     "value-representation failure: " + envelope.reason,
                     stdout, stderr);
-            case STATUS_INFRASTRUCTURE_FAILURE ->
+            case AsyncExportEnvelope.STATUS_INFRASTRUCTURE_FAILURE ->
                 throw new LuaJitAsyncExportInvocationException(
                     "infrastructure failure: " + envelope.reason,
                     stdout, stderr);
@@ -405,210 +367,6 @@ public class LuaJitAsyncExportInvoker {
                     "unknown envelope status: " + envelope.status,
                     stdout, stderr);
         };
-    }
-
-    /**
-     * The last stdout line carrying the exact marker prefix, or
-     * {@code null} when no line carries it.
-     */
-    static String lastMarkerLine(String stdout) {
-        if (stdout == null) {
-            return null;
-        }
-        String[] lines = stdout.split("\n", -1);
-        for (int i = lines.length - 1; i >= 0; i--) {
-            if (lines[i].startsWith(RESULT_PREFIX)) {
-                return lines[i];
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Decodes the envelope JSON text against the closed per-status schema
-     * (D6): unknown fields, unknown statuses, wrong field types, and
-     * malformed text all fail closed with {@link EnvelopeJson.ParseException}.
-     */
-    static Envelope decodeEnvelope(String jsonText) {
-        EnvelopeJson.ObjectValue obj = EnvelopeJson.parseObject(jsonText);
-        String status = requireString(obj, "status", "async-export envelope");
-        return switch (status) {
-            case STATUS_VALUE -> {
-                requireClosed(obj, Set.of("status", "descriptor", "value"),
-                    "value");
-                String descriptor = requireString(obj, "descriptor",
-                    "value envelope");
-                String value = requireString(obj, "value",
-                    "value envelope");
-                yield new Envelope(status, descriptor, value, null, null,
-                    null, null, null, null);
-            }
-            case STATUS_DEAL_ERROR -> {
-                requireSubset(obj, Set.of("status", "code", "message",
-                    "file", "line", "column"),
-                    Set.of("status", "code", "message"), "deal-error");
-                String code = requireString(obj, "code",
-                    "deal-error envelope");
-                String message = requireString(obj, "message",
-                    "deal-error envelope");
-                String file = optionalString(obj, "file");
-                Integer line = optionalInteger(obj, "line");
-                Integer column = optionalInteger(obj, "column");
-                yield new Envelope(status, null, null, code, message, file,
-                    line, column, null);
-            }
-            case STATUS_HOST_FAILURE -> {
-                requireClosed(obj, Set.of("status", "reason"),
-                    "host-failure");
-                String reason = requireString(obj, "reason",
-                    "host-failure envelope");
-                yield new Envelope(status, null, null, null, null, null,
-                    null, null, reason);
-            }
-            case STATUS_REPRESENTATION_FAILURE, STATUS_INFRASTRUCTURE_FAILURE -> {
-                requireClosed(obj, Set.of("status", "reason"), status);
-                String reason = requireString(obj, "reason",
-                    status + " envelope");
-                yield new Envelope(status, null, null, null, null, null,
-                    null, null, reason);
-            }
-            default -> throw new EnvelopeJson.ParseException(
-                "unknown envelope status: " + status);
-        };
-    }
-
-    private static void requireSubset(EnvelopeJson.ObjectValue obj,
-                                     Set<String> allowed,
-                                     Set<String> required, String kind) {
-        Set<String> keys = obj.fields().keySet();
-        if (!allowed.containsAll(keys) || !keys.containsAll(required)) {
-            throw new EnvelopeJson.ParseException(
-                "malformed " + kind + " envelope: expected the fields "
-                    + sortedText(allowed) + " with the required fields "
-                    + sortedText(required) + ", got " + sortedText(keys));
-        }
-    }
-
-    private static void requireClosed(EnvelopeJson.ObjectValue obj,
-                                      Set<String> allowed, String kind) {
-        Set<String> keys = obj.fields().keySet();
-        if (!keys.equals(allowed)) {
-            throw new EnvelopeJson.ParseException(
-                "malformed " + kind + " envelope: expected exactly the"
-                    + " fields " + sortedText(allowed) + ", got "
-                    + sortedText(keys));
-        }
-    }
-
-    private static String requireString(EnvelopeJson.ObjectValue obj,
-                                        String key, String kind) {
-        EnvelopeJson.Value v = obj.fields().get(key);
-        if (!(v instanceof EnvelopeJson.StringValue s)) {
-            throw new EnvelopeJson.ParseException(
-                "malformed " + kind + ": field '" + key
-                    + "' must be a JSON string, got " + kindOf(v));
-        }
-        return s.text();
-    }
-
-    private static String optionalString(EnvelopeJson.ObjectValue obj,
-                                         String key) {
-        EnvelopeJson.Value v = obj.fields().get(key);
-        if (v == null) {
-            return null;
-        }
-        if (!(v instanceof EnvelopeJson.StringValue s)) {
-            throw new EnvelopeJson.ParseException(
-                "malformed envelope: optional field '" + key
-                    + "' must be a JSON string when present, got "
-                    + kindOf(v));
-        }
-        return s.text();
-    }
-
-    private static Integer optionalInteger(EnvelopeJson.ObjectValue obj,
-                                           String key) {
-        EnvelopeJson.Value v = obj.fields().get(key);
-        if (v == null) {
-            return null;
-        }
-        if (!(v instanceof EnvelopeJson.NumberValue num)
-                || !num.isIntegralText()) {
-            throw new EnvelopeJson.ParseException(
-                "malformed envelope: optional field '" + key
-                    + "' must be a JSON integer when present, got "
-                    + kindOf(v));
-        }
-        try {
-            long longValue = num.longValue();
-            if (longValue < Integer.MIN_VALUE || longValue > Integer.MAX_VALUE) {
-                throw new NumberFormatException("out of int range");
-            }
-            return (int) longValue;
-        } catch (NumberFormatException e) {
-            throw new EnvelopeJson.ParseException(
-                "malformed envelope: field '" + key
-                    + "' is outside the signed32 range: " + num.token());
-        }
-    }
-
-    private static String kindOf(EnvelopeJson.Value v) {
-        if (v == null) {
-            return "absent";
-        }
-        if (v instanceof EnvelopeJson.StringValue) {
-            return "string";
-        }
-        if (v instanceof EnvelopeJson.NumberValue) {
-            return "number";
-        }
-        if (v instanceof EnvelopeJson.BooleanValue) {
-            return "boolean";
-        }
-        if (v instanceof EnvelopeJson.NullValue) {
-            return "null";
-        }
-        return "object";
-    }
-
-    private static String sortedText(Set<String> keys) {
-        return keys.stream().sorted().toList().toString();
-    }
-
-    // =========================================================================
-    // Capture-file and temp-directory helpers
-    // =========================================================================
-
-    private static String readCapture(Path file) throws IOException {
-        try {
-            // Fail-closed UTF-8: malformed bytes in a capture file are an
-            // invoker hard failure, never silently mis-decoded text.
-            return StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(Files.readAllBytes(file)))
-                .toString();
-        } catch (CharacterCodingException e) {
-            throw new IOException("capture file is not valid UTF-8: "
-                + e.getMessage(), e);
-        }
-    }
-
-    private static void deleteRecursively(Path dir) {
-        if (dir == null || !Files.exists(dir)) {
-            return;
-        }
-        try (Stream<Path> walk = Files.walk(dir)) {
-            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException ignored) {
-                    // Best-effort cleanup: the temp dir is system-scoped.
-                }
-            });
-        } catch (IOException ignored) {
-            // Best-effort cleanup.
-        }
     }
 
     // =========================================================================
@@ -734,36 +492,15 @@ public class LuaJitAsyncExportInvoker {
         }
 
         /** Recursive-descent conventional-JSON parser. */
-        private static final class Parser {
-
-            private final String text;
-            private int pos;
+        private static final class Parser extends JsonScan.CharCursor {
 
             Parser(String text) {
-                this.text = text;
+                super(text);
             }
 
-            boolean atEnd() {
-                return pos >= text.length();
-            }
-
-            char peek() {
-                return text.charAt(pos);
-            }
-
-            ParseException err(String reason) {
+            @Override
+            public ParseException err(String reason) {
                 return new ParseException(reason + " at offset " + pos);
-            }
-
-            void skipWhitespace() {
-                while (!atEnd()) {
-                    char c = peek();
-                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                        pos++;
-                    } else {
-                        return;
-                    }
-                }
             }
 
             Value parseValue() {
@@ -786,22 +523,6 @@ public class LuaJitAsyncExportInvoker {
                             + "' (expected a value)");
                     }
                 };
-            }
-
-            Value parseLiteral(String word, Value value) {
-                if (!text.startsWith(word, pos)) {
-                    throw err("malformed literal (expected \"" + word + "\")");
-                }
-                pos += word.length();
-                if (!atEnd() && !isDelimiter(peek())) {
-                    throw err("malformed literal \"" + word + "\"");
-                }
-                return value;
-            }
-
-            boolean isDelimiter(char c) {
-                return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-                    || c == ',' || c == ']' || c == '}';
             }
 
             ObjectValue parseObject() {

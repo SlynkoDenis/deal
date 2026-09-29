@@ -553,12 +553,32 @@ public final class Parser {
         Token nameToken = expect(TokenType.IDENTIFIER, DiagnosticCode.E1007, "Expected function name after 'function'");
         if (nameToken == null) { synchronize(); return null; }
 
-        expect(TokenType.LPAREN, DiagnosticCode.E1009, "Expected '(' after function name");
-        var paramResult = parseParameterList();
+        FunctionSuffix suffix = parseFunctionSuffix("Expected '(' after function name",
+            "Expected ':' return type annotation", true);
+        if (suffix == null) { return null; }
+
+        Span sp = spanBetween(startToken, previousOrCurrent());
+        return new FunctionDeclaration(sp, nameToken.lexeme(),
+                suffix.params(), suffix.returnType(), suffix.body(), isAsync,
+                suffix.isExternal());
+    }
+
+    /**
+     * The function suffix shared by declarations and expressions:
+     * {@code '(' parameters ')' ':' returnType} and the body block.
+     * {@code allowExternal} admits the {@code ';'} external form (the
+     * declaration's shape) and {@code returnTypeMessage} carries the
+     * caller's pinned E1011 text.
+     */
+    private FunctionSuffix parseFunctionSuffix(String lparenMessage,
+                                               String returnTypeMessage,
+                                               boolean allowExternal) {
+        expect(TokenType.LPAREN, DiagnosticCode.E1009, lparenMessage);
+        ParamListResult paramResult = parseParameterList();
         expect(TokenType.RPAREN, DiagnosticCode.E1010, "Expected ')' after function parameters");
 
         if (!match(TokenType.COLON)) {
-            error(DiagnosticCode.E1011, "Expected ':' return type annotation", peek());
+            error(DiagnosticCode.E1011, returnTypeMessage, peek());
             synchronize(); return null;
         }
         TypeNode returnType = parseType();
@@ -568,7 +588,7 @@ public final class Parser {
         boolean isExternal = false;
         if (peek().type() == TokenType.LBRACE) {
             body = parseBlock();
-        } else if (match(TokenType.SEMICOLON)) {
+        } else if (allowExternal && match(TokenType.SEMICOLON)) {
             // External function declaration (declaration files only).
             body = new Block(spanOf(previous()), List.of());
             isExternal = true;
@@ -577,10 +597,12 @@ public final class Parser {
             body = emptyBlock();
             synchronize();
         }
+        return new FunctionSuffix(paramResult.params(), returnType, body, isExternal);
+    }
 
-        Span sp = spanBetween(startToken, previousOrCurrent());
-        return new FunctionDeclaration(sp, nameToken.lexeme(),
-                paramResult.params, returnType, body, isAsync, isExternal);
+    /** The parsed function suffix shared by declarations and expressions. */
+    private record FunctionSuffix(List<Parameter> params, TypeNode returnType,
+                                  Block body, boolean isExternal) {
     }
 
     // -- VariableDeclaration --
@@ -1624,11 +1646,10 @@ public final class Parser {
      */
     private DecodedTemplateExpr unescapeTemplateExpression(String raw, int exprStart, int exprEnd) {
         String expr = raw.substring(exprStart, exprEnd);
-        StringBuilder sb = new StringBuilder(expr.length());
-        List<Integer> rawStarts = new ArrayList<>();
-        List<Integer> rawEnds = new ArrayList<>();
+        DecodedRuns runs = new DecodedRuns(new StringBuilder(expr.length()),
+            new ArrayList<>(), new ArrayList<>());
         // Raw scalar index (into the full raw content) of the current position.
-        int rawIndex = ScalarSourceCursor.scalarCount(raw, 0, exprStart);
+        runs.rawIndex = ScalarSourceCursor.scalarCount(raw, 0, exprStart);
         int pos = 0;
         while (pos < expr.length()) {
             char c = expr.charAt(pos);
@@ -1638,130 +1659,121 @@ public final class Parser {
             if (c == '\\' && pos + 1 < expr.length()) {
                 char next = expr.charAt(pos + 1);
                 switch (next) {
-                    case 'n'  -> appendDecoded(sb, rawStarts, rawEnds, '\n', rawIndex, rawIndex + 2);
-                    case 't'  -> appendDecoded(sb, rawStarts, rawEnds, '\t', rawIndex, rawIndex + 2);
-                    case '\\' -> appendDecoded(sb, rawStarts, rawEnds, '\\', rawIndex, rawIndex + 2);
-                    case '"'  -> appendDecoded(sb, rawStarts, rawEnds, '"', rawIndex, rawIndex + 2);
-                    case '\'' -> appendDecoded(sb, rawStarts, rawEnds, '\'', rawIndex, rawIndex + 2);
-                    case '`'  -> appendDecoded(sb, rawStarts, rawEnds, '`', rawIndex, rawIndex + 2);
-                    case '$'  -> appendDecoded(sb, rawStarts, rawEnds, '$', rawIndex, rawIndex + 2);
+                    case 'n'  -> runs.append('\n', runs.rawIndex, runs.rawIndex + 2);
+                    case 't'  -> runs.append('\t', runs.rawIndex, runs.rawIndex + 2);
+                    case '\\' -> runs.append('\\', runs.rawIndex, runs.rawIndex + 2);
+                    case '"'  -> runs.append('"', runs.rawIndex, runs.rawIndex + 2);
+                    case '\'' -> runs.append('\'', runs.rawIndex, runs.rawIndex + 2);
+                    case '`'  -> runs.append('`', runs.rawIndex, runs.rawIndex + 2);
+                    case '$'  -> runs.append('$', runs.rawIndex, runs.rawIndex + 2);
                     default -> {
                         // Unknown escape: backslash and character are kept
                         // verbatim, one decoded scalar each. A surrogate pair
                         // after the backslash stays one decoded scalar mapped
                         // to its one raw scalar.
-                        appendDecoded(sb, rawStarts, rawEnds, c, rawIndex, rawIndex + 1);
-                        if (Character.isHighSurrogate(next) && pos + 2 < expr.length()
-                                && Character.isLowSurrogate(expr.charAt(pos + 2))) {
-                            appendDecoded(sb, rawStarts, rawEnds,
-                                Character.toCodePoint(next, expr.charAt(pos + 2)),
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 3;
-                        } else {
-                            appendDecoded(sb, rawStarts, rawEnds, next,
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 2;
-                        }
-                        rawIndex += 2;
+                        pos = appendEscapeRun(expr, pos, runs);
                         continue;
                     }
                 }
-                rawIndex += 2;
+                runs.rawIndex += 2;
                 pos += 2;
                 continue;
             }
 
             // String literal: copy verbatim to preserve internal escapes
             if (c == '"' || c == '\'') {
-                char quote = c;
-                appendDecoded(sb, rawStarts, rawEnds, c, rawIndex, rawIndex + 1);
-                rawIndex++;
-                pos++;
-                while (pos < expr.length()) {
-                    char sc = expr.charAt(pos);
-                    if (sc == '\\' && pos + 1 < expr.length()) {
-                        appendDecoded(sb, rawStarts, rawEnds, sc, rawIndex, rawIndex + 1);
-                        char esc = expr.charAt(pos + 1);
-                        if (Character.isHighSurrogate(esc) && pos + 2 < expr.length()
-                                && Character.isLowSurrogate(expr.charAt(pos + 2))) {
-                            appendDecoded(sb, rawStarts, rawEnds,
-                                Character.toCodePoint(esc, expr.charAt(pos + 2)),
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 3;
-                        } else {
-                            appendDecoded(sb, rawStarts, rawEnds, esc,
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 2;
-                        }
-                        rawIndex += 2;
-                    } else if (sc == quote) {
-                        appendDecoded(sb, rawStarts, rawEnds, sc, rawIndex, rawIndex + 1);
-                        rawIndex++;
-                        pos++;
-                        break;
-                    } else {
-                        int cp = expr.codePointAt(pos);
-                        appendDecoded(sb, rawStarts, rawEnds, cp, rawIndex, rawIndex + 1);
-                        rawIndex++;
-                        pos += Character.charCount(cp);
-                    }
-                }
+                runs.append(c, runs.rawIndex, runs.rawIndex + 1);
+                runs.rawIndex++;
+                pos = copyVerbatimLiteral(expr, pos + 1, c, runs);
                 continue;
             }
 
             // Nested template literal: copy verbatim (sub-lexer will handle it)
             if (c == '`') {
-                appendDecoded(sb, rawStarts, rawEnds, c, rawIndex, rawIndex + 1);
-                rawIndex++;
-                pos++;
-                while (pos < expr.length()) {
-                    char tc = expr.charAt(pos);
-                    if (tc == '\\' && pos + 1 < expr.length()) {
-                        appendDecoded(sb, rawStarts, rawEnds, tc, rawIndex, rawIndex + 1);
-                        char esc = expr.charAt(pos + 1);
-                        if (Character.isHighSurrogate(esc) && pos + 2 < expr.length()
-                                && Character.isLowSurrogate(expr.charAt(pos + 2))) {
-                            appendDecoded(sb, rawStarts, rawEnds,
-                                Character.toCodePoint(esc, expr.charAt(pos + 2)),
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 3;
-                        } else {
-                            appendDecoded(sb, rawStarts, rawEnds, esc,
-                                rawIndex + 1, rawIndex + 2);
-                            pos += 2;
-                        }
-                        rawIndex += 2;
-                    } else if (tc == '`') {
-                        appendDecoded(sb, rawStarts, rawEnds, tc, rawIndex, rawIndex + 1);
-                        rawIndex++;
-                        pos++;
-                        break;
-                    } else {
-                        int cp = expr.codePointAt(pos);
-                        appendDecoded(sb, rawStarts, rawEnds, cp, rawIndex, rawIndex + 1);
-                        rawIndex++;
-                        pos += Character.charCount(cp);
-                    }
-                }
+                runs.append(c, runs.rawIndex, runs.rawIndex + 1);
+                runs.rawIndex++;
+                pos = copyVerbatimLiteral(expr, pos + 1, '`', runs);
                 continue;
             }
 
             // Regular character: one decoded scalar, one-to-one raw mapping.
             int cp = expr.codePointAt(pos);
-            appendDecoded(sb, rawStarts, rawEnds, cp, rawIndex, rawIndex + 1);
-            rawIndex++;
+            runs.append(cp, runs.rawIndex, runs.rawIndex + 1);
+            runs.rawIndex++;
             pos += Character.charCount(cp);
         }
-        return new DecodedTemplateExpr(sb.toString(), rawStarts, rawEnds);
+        return new DecodedTemplateExpr(runs.sb.toString(), runs.rawStarts, runs.rawEnds);
     }
 
-    /** Appends one decoded scalar and records its raw scalar run. */
-    private static void appendDecoded(StringBuilder sb, List<Integer> rawStarts,
-                                      List<Integer> rawEnds, int codePoint,
-                                      int rawStart, int rawEnd) {
-        sb.appendCodePoint(codePoint);
-        rawStarts.add(rawStart);
-        rawEnds.add(rawEnd);
+    /**
+     * Copies one embedded literal run verbatim from {@code expr} at
+     * {@code pos} (past the opening delimiter) through its matching
+     * {@code quote}, recording the raw mapping. Returns the position past
+     * the closing delimiter (or the input end when unterminated — the
+     * sub-lexer reports the unterminated literal).
+     */
+    private static int copyVerbatimLiteral(String expr, int pos, char quote,
+                                           DecodedRuns runs) {
+        while (pos < expr.length()) {
+            char c = expr.charAt(pos);
+            if (c == '\\' && pos + 1 < expr.length()) {
+                pos = appendEscapeRun(expr, pos, runs);
+            } else if (c == quote) {
+                runs.append(c, runs.rawIndex, runs.rawIndex + 1);
+                runs.rawIndex++;
+                pos++;
+                break;
+            } else {
+                int cp = expr.codePointAt(pos);
+                runs.append(cp, runs.rawIndex, runs.rawIndex + 1);
+                runs.rawIndex++;
+                pos += Character.charCount(cp);
+            }
+        }
+        return pos;
+    }
+
+    /**
+     * Appends one backslash escape's run — the backslash and the escaped
+     * scalar (or the surrogate pair after it) as two raw scalars — and
+     * returns the position past the run.
+     */
+    private static int appendEscapeRun(String expr, int pos, DecodedRuns runs) {
+        runs.append(expr.charAt(pos), runs.rawIndex, runs.rawIndex + 1);
+        char esc = expr.charAt(pos + 1);
+        if (Character.isHighSurrogate(esc) && pos + 2 < expr.length()
+                && Character.isLowSurrogate(expr.charAt(pos + 2))) {
+            runs.append(Character.toCodePoint(esc, expr.charAt(pos + 2)),
+                runs.rawIndex + 1, runs.rawIndex + 2);
+            pos += 3;
+        } else {
+            runs.append(esc, runs.rawIndex + 1, runs.rawIndex + 2);
+            pos += 2;
+        }
+        runs.rawIndex += 2;
+        return pos;
+    }
+
+    /** The decoded output and its per-scalar raw mapping. */
+    private static final class DecodedRuns {
+
+        final StringBuilder sb;
+        final List<Integer> rawStarts;
+        final List<Integer> rawEnds;
+        int rawIndex;
+
+        DecodedRuns(StringBuilder sb, List<Integer> rawStarts, List<Integer> rawEnds) {
+            this.sb = sb;
+            this.rawStarts = rawStarts;
+            this.rawEnds = rawEnds;
+        }
+
+        /** Appends one decoded scalar and records its raw scalar run. */
+        void append(int codePoint, int rawStart, int rawEnd) {
+            sb.appendCodePoint(codePoint);
+            rawStarts.add(rawStart);
+            rawEnds.add(rawEnd);
+        }
     }
 
     /**
@@ -2032,28 +2044,13 @@ public final class Parser {
         Token startToken = isAsync ? previous() : peek();
         Token funcToken = advance();  // consumes FUNCTION
 
-        expect(TokenType.LPAREN, DiagnosticCode.E1009, "Expected '(' after 'function'");
-        var paramResult = parseParameterList();
-        expect(TokenType.RPAREN, DiagnosticCode.E1010, "Expected ')' after function parameters");
-
-        if (!match(TokenType.COLON)) {
-            error(DiagnosticCode.E1011, "Expected ':' return type annotation on function expression", peek());
-            synchronize(); return null;
-        }
-        TypeNode returnType = parseType();
-        if (returnType == null) { synchronize(); return null; }
-
-        Block body;
-        if (peek().type() == TokenType.LBRACE) {
-            body = parseBlock();
-        } else {
-            error(DiagnosticCode.E1012, "Expected '{' for function body", peek());
-            body = emptyBlock();
-            synchronize();
-        }
+        FunctionSuffix suffix = parseFunctionSuffix("Expected '(' after 'function'",
+            "Expected ':' return type annotation on function expression", false);
+        if (suffix == null) { return null; }
 
         Span sp = spanBetween(startToken, previousOrCurrent());
-        return new FunctionExpr(sp, paramResult.params, returnType, body, isAsync);
+        return new FunctionExpr(sp, suffix.params(), suffix.returnType(), suffix.body(),
+            isAsync);
     }
 
     private ExpressionNode parseArrayLiteral() {

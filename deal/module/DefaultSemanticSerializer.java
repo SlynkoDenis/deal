@@ -2,7 +2,6 @@ package deal.module;
 
 import deal.ast.Block;
 import deal.ast.ClassDeclaration;
-import deal.ast.ExportDeclaration;
 import deal.ast.ForInit;
 import deal.ast.ForOfStatement;
 import deal.ast.ForStatement;
@@ -10,7 +9,6 @@ import deal.ast.FunctionDeclaration;
 import deal.ast.FunctionExpr;
 import deal.ast.LiteralValue;
 import deal.ast.Parameter;
-import deal.ast.ProgramNode;
 import deal.ast.StatementNode;
 import deal.ast.TryStatement;
 import deal.ast.TypeNode;
@@ -1686,11 +1684,12 @@ public final class DefaultSemanticSerializer {
          */
         private String implementationFunctionContent(
                 DefaultSerializerModuleInput input, DigestKey key) {
-            FunctionDeclaration fd = topLevelFunction(input.program(),
-                key.declaredName());
+            FunctionDeclaration fd = AstDeclarations.findFunctionDeclaration(
+                input.program(), key.declaredName());
             if (fd == null) {
-                ClassDeclaration synthetic = jsonableClassForSynthetic(
-                    input.program(), key.declaredName());
+                ClassDeclaration synthetic =
+                    AstDeclarations.jsonableClassForSynthetic(
+                        input.program(), key.declaredName());
                 if (synthetic != null) {
                     // A synthetic @jsonable export (C$fromJson/
                     // C$toJson): no FunctionDeclaration exists — the
@@ -2384,61 +2383,6 @@ public final class DefaultSemanticSerializer {
         // Program helpers
         // =================================================================
 
-        /** Finds a top-level function declaration by name. */
-        private static FunctionDeclaration topLevelFunction(
-                ProgramNode program, String name) {
-            for (StatementNode stmt : program.statements()) {
-                FunctionDeclaration fd = functionDeclarationOf(stmt);
-                if (fd != null && fd.name().equals(name)) {
-                    return fd;
-                }
-            }
-            return null;
-        }
-
-        private static FunctionDeclaration functionDeclarationOf(
-                StatementNode stmt) {
-            if (stmt instanceof FunctionDeclaration fd) {
-                return fd;
-            }
-            if (stmt instanceof ExportDeclaration ed
-                    && ed.declaration() instanceof FunctionDeclaration fd) {
-                return fd;
-            }
-            return null;
-        }
-
-        private static ClassDeclaration classDeclarationOf(
-                StatementNode stmt) {
-            if (stmt instanceof ClassDeclaration cd) {
-                return cd;
-            }
-            if (stmt instanceof ExportDeclaration ed
-                    && ed.declaration() instanceof ClassDeclaration cd) {
-                return cd;
-            }
-            return null;
-        }
-
-        /**
-         * The class whose synthetic {@code C$fromJson}/
-         * {@code C$toJson} export carries the given name, or null
-         * (the planner's provisional-identity derivation mirror,
-         * {@link DefaultIrRecorder#jsonableClassForSynthetic}).
-         */
-        private static ClassDeclaration jsonableClassForSynthetic(
-                ProgramNode program, String name) {
-            for (StatementNode stmt : program.statements()) {
-                ClassDeclaration cd = classDeclarationOf(stmt);
-                if (cd != null && cd.isJsonable()
-                        && (name.equals(cd.name() + "$fromJson")
-                            || name.equals(cd.name() + "$toJson"))) {
-                    return cd;
-                }
-            }
-            return null;
-        }
-
         /**
          * The declaration range of a function provider (the
          * reentrant-provider and missing-declaration anchor): the
@@ -2451,8 +2395,8 @@ public final class DefaultSemanticSerializer {
          */
         private DiagnosticRange declarationRangeOf(
                 DefaultSerializerModuleInput input, String name) {
-            FunctionDeclaration fd = topLevelFunction(input.program(),
-                name);
+            FunctionDeclaration fd = AstDeclarations.findFunctionDeclaration(
+                input.program(), name);
             if (fd != null) {
                 return fd.span().range();
             }

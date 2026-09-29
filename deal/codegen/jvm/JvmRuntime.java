@@ -3,6 +3,7 @@ package deal.codegen.jvm;
 import deal.semantic.SemanticRuntimeModel;
 import deal.semantic.SharedStdlibSemantics;
 import deal.semantic.ir.ActualKind;
+import deal.semantic.ir.JsonScan;
 
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
@@ -2188,41 +2189,15 @@ public final class JvmRuntime {
      * {@link Long} ({@code -0} normalized to {@code 0}) and every other
      * numeric form becomes a {@link Double}.
      */
-    private static final class JsonReader {
-
-        private final int[] codePoints;
-        private int position;
-        private long bytesConsumed;
+    private static final class JsonReader extends JsonScan.CodePointCursor {
 
         JsonReader(int[] codePoints) {
-            this.codePoints = codePoints;
+            super(codePoints);
         }
 
-        boolean atEnd() {
-            return position >= codePoints.length;
-        }
-
-        int peek() {
-            return position < codePoints.length ? codePoints[position] : -1;
-        }
-
-        void advance() {
-            bytesConsumed += utf8Length(codePoints[position]);
-            position++;
-        }
-
-        long offsetOfCurrent() {
-            return bytesConsumed + 1;
-        }
-
-        JsonParseFailure failure(String reason) {
+        @Override
+        public JsonParseFailure failure(String reason) {
             return new JsonParseFailure(reason, offsetOfCurrent());
-        }
-
-        void skipWs() {
-            while (!atEnd() && isWs(peek())) {
-                advance();
-            }
         }
 
         Object parseValue() {
@@ -2256,19 +2231,6 @@ public final class JvmRuntime {
                     throw failure(REASON_UNEXPECTED_CHARACTER);
                 }
             }
-        }
-
-        Object parseLiteral(String word, Object value) {
-            for (int i = 0; i < word.length(); i++) {
-                if (atEnd()) {
-                    throw failure(REASON_UNEXPECTED_END);
-                }
-                if (peek() != word.codePointAt(i)) {
-                    throw failure(REASON_UNEXPECTED_CHARACTER);
-                }
-                advance();
-            }
-            return value;
         }
 
         Table parseObject() {
@@ -2348,222 +2310,16 @@ public final class JvmRuntime {
             }
         }
 
-        String parseString() {
-            advance(); // '"'
-            StringBuilder result = new StringBuilder();
-            while (true) {
-                if (atEnd()) {
-                    throw failure(REASON_UNTERMINATED_STRING);
-                }
-                int c = peek();
-                if (c == '"') {
-                    advance();
-                    return result.toString();
-                }
-                if (c == '\\') {
-                    advance(); // backslash
-                    if (atEnd()) {
-                        throw failure(REASON_UNTERMINATED_STRING);
-                    }
-                    int escaped = peek();
-                    switch (escaped) {
-                        case '"' -> {
-                            advance();
-                            result.append('"');
-                        }
-                        case '\\' -> {
-                            advance();
-                            result.append('\\');
-                        }
-                        case '/' -> {
-                            advance();
-                            result.append('/');
-                        }
-                        case 'b' -> {
-                            advance();
-                            result.append('\b');
-                        }
-                        case 'f' -> {
-                            advance();
-                            result.append('\f');
-                        }
-                        case 'n' -> {
-                            advance();
-                            result.append('\n');
-                        }
-                        case 'r' -> {
-                            advance();
-                            result.append('\r');
-                        }
-                        case 't' -> {
-                            advance();
-                            result.append('\t');
-                        }
-                        case 'u' -> {
-                            advance(); // 'u'
-                            int codePoint = parseHex4();
-                            if (Character.isHighSurrogate((char) codePoint)) {
-                                // A high surrogate must pair with a
-                                // following a four-hex-digit low surrogate escape.
-                                if (atEnd() || peek() != '\\') {
-                                    throw failure(REASON_UNPAIRED_SURROGATE_ESCAPE);
-                                }
-                                advance(); // backslash
-                                if (atEnd() || peek() != 'u') {
-                                    throw failure(REASON_UNPAIRED_SURROGATE_ESCAPE);
-                                }
-                                advance(); // 'u'
-                                int low = parseHex4();
-                                if (!Character.isLowSurrogate((char) low)) {
-                                    throw failure(REASON_UNPAIRED_SURROGATE_ESCAPE);
-                                }
-                                result.appendCodePoint(
-                                    Character.toCodePoint((char) codePoint, (char) low));
-                            } else if (Character.isLowSurrogate((char) codePoint)) {
-                                throw failure(REASON_UNPAIRED_SURROGATE_ESCAPE);
-                            } else {
-                                result.appendCodePoint(codePoint);
-                            }
-                        }
-                        default -> throw failure(REASON_INVALID_ESCAPE);
-                    }
-                } else if (c < 0x20) {
-                    // A raw control character is never allowed unescaped.
-                    throw failure(REASON_UNEXPECTED_CHARACTER);
-                } else {
-                    advance();
-                    result.appendCodePoint(c);
-                }
-            }
-        }
-
-        /** Exactly four hex digits; a non-hex digit or end of input is an invalid escape. */
-        int parseHex4() {
-            int value = 0;
-            for (int i = 0; i < 4; i++) {
-                if (atEnd()) {
-                    throw failure(REASON_INVALID_ESCAPE);
-                }
-                int digit = hexDigit(peek());
-                if (digit < 0) {
-                    throw failure(REASON_INVALID_ESCAPE);
-                }
-                advance();
-                value = value * 16 + digit;
-            }
-            return value;
-        }
-
         Object parseNumber() {
-            int start = position;
-            boolean negative = false;
-            if (peek() == '-') {
-                negative = true;
-                advance();
-            }
-            if (atEnd()) {
-                throw failure(REASON_INVALID_NUMBER);
-            }
-            int c = peek();
-            if (c < '0' || c > '9') {
-                throw failure(REASON_INVALID_NUMBER);
-            }
-            boolean integerForm = true;
-            if (c == '0') {
-                advance();
-                if (!atEnd() && isDigit(peek())) {
-                    throw failure(REASON_LEADING_ZERO);
-                }
-            } else {
-                advance();
-                while (!atEnd() && isDigit(peek())) {
-                    advance();
+            JsonScan.CodePointCursor.NumberScan scan = parseNumberText();
+            if (scan.integerForm()) {
+                Integer exact = exactInt32OrNull(scan);
+                if (exact != null) {
+                    return Long.valueOf(exact.longValue());
                 }
             }
-            if (!atEnd() && peek() == '.') {
-                integerForm = false;
-                advance();
-                if (atEnd() || !isDigit(peek())) {
-                    throw failure(REASON_INVALID_NUMBER);
-                }
-                while (!atEnd() && isDigit(peek())) {
-                    advance();
-                }
-            }
-            if (!atEnd() && (peek() == 'e' || peek() == 'E')) {
-                integerForm = false;
-                advance();
-                if (!atEnd() && (peek() == '+' || peek() == '-')) {
-                    advance();
-                }
-                if (atEnd() || !isDigit(peek())) {
-                    throw failure(REASON_INVALID_NUMBER);
-                }
-                while (!atEnd() && isDigit(peek())) {
-                    advance();
-                }
-            }
-            String text = new String(codePoints, start, position - start);
-            if (integerForm) {
-                int digitsStart = start + (negative ? 1 : 0);
-                int significantStart = digitsStart;
-                while (significantStart < position && codePoints[significantStart] == '0') {
-                    significantStart++;
-                }
-                int significantLength = Math.max(1, position - significantStart);
-                boolean outOfRange;
-                if (significantLength > 10) {
-                    outOfRange = true;
-                } else if (significantLength == 10) {
-                    long significant = 0L;
-                    for (int i = significantStart; i < significantStart + 10; i++) {
-                        significant = significant * 10 + (codePoints[i] - '0');
-                    }
-                    long limit = negative ? 2147483648L : 2147483647L;
-                    outOfRange = significant > limit;
-                } else {
-                    outOfRange = false;
-                }
-                if (!outOfRange) {
-                    long value = 0L;
-                    for (int i = digitsStart; i < position; i++) {
-                        value = value * 10 + (codePoints[i] - '0');
-                    }
-                    if (negative) {
-                        value = -value;
-                    }
-                    return Long.valueOf(value);
-                }
-            }
-            return Double.valueOf(Double.parseDouble(text));
+            return Double.valueOf(Double.parseDouble(scan.text()));
         }
-    }
-
-    private static boolean isWs(int codePoint) {
-        return codePoint == 0x20 || codePoint == 0x09
-            || codePoint == 0x0A || codePoint == 0x0D;
-    }
-
-    private static boolean isDigit(int codePoint) {
-        return codePoint >= '0' && codePoint <= '9';
-    }
-
-    private static int hexDigit(int codePoint) {
-        if (codePoint >= '0' && codePoint <= '9') {
-            return codePoint - '0';
-        }
-        if (codePoint >= 'a' && codePoint <= 'f') {
-            return codePoint - 'a' + 10;
-        }
-        if (codePoint >= 'A' && codePoint <= 'F') {
-            return codePoint - 'A' + 10;
-        }
-        return -1;
-    }
-
-    /** The UTF-8 byte length of one Unicode scalar value. */
-    private static int utf8Length(int codePoint) {
-        return codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
     }
 
     /** {@code JSON_PARSE}: the parse entry with the pinned trailing-content check. */

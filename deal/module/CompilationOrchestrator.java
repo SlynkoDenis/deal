@@ -1256,7 +1256,7 @@ public final class CompilationOrchestrator {
             // ASTs never fabricate gates.
             if (!parseResult.hasErrors() && parseResult.program() != null) {
                 for (StatementNode stmt : parseResult.program().statements()) {
-                    ClassDeclaration cd = classDeclarationOf(stmt);
+                    ClassDeclaration cd = AstDeclarations.classDeclarationOf(stmt);
                     if (cd == null) {
                         continue;
                     }
@@ -1305,22 +1305,6 @@ public final class CompilationOrchestrator {
         if (verbose) {
             System.out.println("  Phase 0 total: " + phaseElapsed + "ms");
         }
-    }
-
-    /**
-     * The class declaration of a top-level statement, direct or
-     * exported (v1.2 module top level holds only
-     * import/function/class/export).
-     */
-    private static ClassDeclaration classDeclarationOf(StatementNode stmt) {
-        if (stmt instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        if (stmt instanceof ExportDeclaration ed
-                && ed.declaration() instanceof ClassDeclaration cd) {
-            return cd;
-        }
-        return null;
     }
 
     /**
@@ -1479,7 +1463,7 @@ public final class CompilationOrchestrator {
             // here.
             if (info.rawAst != null) {
                 for (StatementNode stmt : info.rawAst.statements()) {
-                    ClassDeclaration cd = classDeclarationOf(stmt);
+                    ClassDeclaration cd = AstDeclarations.classDeclarationOf(stmt);
                     if (cd == null) {
                         continue;
                     }
@@ -2916,21 +2900,38 @@ public final class CompilationOrchestrator {
     }
 
     /**
-     * Emits one SHARED-routed module through the shared LuaJIT emitter
-     * into the staging tree (ISSUE-0239 E10) and records its emitted ABI
-     * manifest. A lowering/emission failure merges E6005 and fails the
-     * compile — no artifact stages for the module and nothing publishes.
+     * Lowers one SHARED-routed module and merges a lowering failure
+     * (the diagnostics, the failed flag, and the log line): returns the
+     * result, or null when the failure was already merged and the
+     * caller must return without emitting. On success the module's
+     * external entries are recorded once, in dependency order.
      */
-    private void emitSharedLuaModule(CheckedModuleInput checked) throws IOException {
+    private SemanticLowerer.FullProgramE7Result lowerSharedModuleOrFail(
+            CheckedModuleInput checked) {
         SemanticLowerer.FullProgramE7Result lowered = lowerSharedModule(checked);
         if (lowered.lowering().hasErrors()) {
             diagnostics.addAll(lowered.lowering().diagnostics());
             hasErrors = true;
             log("  Shared lowering failed for " + checked.moduleId() + ": "
                 + lowered.lowering().diagnostics());
-            return;
+            return null;
         }
         sharedCalleeEntries.put(checked.moduleId(), lowered.externalEntries());
+        return lowered;
+    }
+
+    /**
+     * Emits one SHARED-routed module through the shared LuaJIT emitter
+     * into the staging tree (ISSUE-0239 E10) and records its emitted ABI
+     * manifest. A lowering/emission failure merges E6005 and fails the
+     * compile — no artifact stages for the module and nothing publishes.
+     */
+    private void emitSharedLuaModule(CheckedModuleInput checked) throws IOException {
+        SemanticLowerer.FullProgramE7Result lowered =
+            lowerSharedModuleOrFail(checked);
+        if (lowered == null) {
+            return;
+        }
         String artifactPath = checked.moduleId().path().replace('.', '/') + ".lua";
         String source;
         try {
@@ -2955,15 +2956,11 @@ public final class CompilationOrchestrator {
      * lowering/emission failure merges E6005 and fails the compile.
      */
     private void emitSharedJvmModule(CheckedModuleInput checked) throws IOException {
-        SemanticLowerer.FullProgramE7Result lowered = lowerSharedModule(checked);
-        if (lowered.lowering().hasErrors()) {
-            diagnostics.addAll(lowered.lowering().diagnostics());
-            hasErrors = true;
-            log("  Shared lowering failed for " + checked.moduleId() + ": "
-                + lowered.lowering().diagnostics());
+        SemanticLowerer.FullProgramE7Result lowered =
+            lowerSharedModuleOrFail(checked);
+        if (lowered == null) {
             return;
         }
-        sharedCalleeEntries.put(checked.moduleId(), lowered.externalEntries());
         String className = JvmBackend.classNameFor(checked.moduleId().path());
         JvmSemanticEmitter.EmissionResult emission;
         try {
@@ -3094,6 +3091,27 @@ public final class CompilationOrchestrator {
     }
 
     /**
+     * Resolves one import statement through the T6 resolver and records
+     * the raw-path &rarr; compiled-module-path resolution when the
+     * imported module is known; returns the imported module, or null
+     * when the import resolves to no known module (the raw path was
+     * already resolved by discovery).
+     */
+    private ModuleInfo resolveImport(ImportDeclaration imp, ModuleInfo info,
+            Map<String, String> importResolutions) {
+        String resolvedSource = resolveImportPath(imp.modulePath(),
+            Path.of(info.sourcePath), imp.span());
+        if (resolvedSource == null) {
+            return null;
+        }
+        ModuleInfo imported = modules.get(resolvedSource);
+        if (imported != null) {
+            importResolutions.put(imp.modulePath(), imported.modulePath);
+        }
+        return imported;
+    }
+
+    /**
      * Lua use site: emits the module via {@link LuaBackend}, with the
      * resolved import map, host-module declarations, and the compilation's
      * canonical descriptor service (emitter page D1 — the same surface
@@ -3114,35 +3132,30 @@ public final class CompilationOrchestrator {
         Map<String, FfiGeneratedModule> ffiModules = new HashMap<>();
         for (StatementNode stmt : info.rawAst.statements()) {
             if (stmt instanceof ImportDeclaration imp) {
-                String resolvedSource = resolveImportPath(imp.modulePath(),
-                    Path.of(info.sourcePath), imp.span());
-                if (resolvedSource != null) {
-                    ModuleInfo imported = modules.get(resolvedSource);
-                    if (imported != null) {
-                        importResolutions.put(imp.modulePath(),
-                            imported.modulePath);
-                        // Host modules (ISSUE-0082, host-module-abi D5):
-                        // declaration files that are not spec stdlib
-                        // modules load through __rt.load_host with the
-                        // raw import path verbatim as the require key.
-                        // An effective extern-C declaration with published
-                        // FFI metadata is an FFI module instead (emitter
-                        // page D6): it loads through __rt.load_ffi and is
-                        // never a host module.
-                        if (imported.isDeclarationFile
-                                && !isSpecStdlibModuleInfo(imported)) {
-                            FfiGeneratedModule ffi =
-                                ffiGenerations.get(imported.modulePath);
-                            if (imported.rawAst != null
-                                    && imported.rawAst.fileDirectives()
-                                        .externC()
-                                    && ffi != null) {
-                                ffiModules.put(imp.modulePath(), ffi);
-                            } else {
-                                hostModules.put(imp.modulePath(),
-                                    imported.exports != null
-                                        ? imported.exports : Map.of());
-                            }
+                ModuleInfo imported = resolveImport(imp, info,
+                    importResolutions);
+                if (imported != null) {
+                    // Host modules (ISSUE-0082, host-module-abi D5):
+                    // declaration files that are not spec stdlib
+                    // modules load through __rt.load_host with the
+                    // raw import path verbatim as the require key.
+                    // An effective extern-C declaration with published
+                    // FFI metadata is an FFI module instead (emitter
+                    // page D6): it loads through __rt.load_ffi and is
+                    // never a host module.
+                    if (imported.isDeclarationFile
+                            && !isSpecStdlibModuleInfo(imported)) {
+                        FfiGeneratedModule ffi =
+                            ffiGenerations.get(imported.modulePath);
+                        if (imported.rawAst != null
+                                && imported.rawAst.fileDirectives()
+                                    .externC()
+                                && ffi != null) {
+                            ffiModules.put(imp.modulePath(), ffi);
+                        } else {
+                            hostModules.put(imp.modulePath(),
+                                imported.exports != null
+                                    ? imported.exports : Map.of());
                         }
                     }
                 }
@@ -3664,27 +3677,22 @@ public final class CompilationOrchestrator {
             if (info.rawAst != null) {
                 for (StatementNode stmt : info.rawAst.statements()) {
                     if (stmt instanceof ImportDeclaration imp) {
-                        String resolvedSource = resolveImportPath(imp.modulePath(),
-                            Path.of(info.sourcePath), imp.span());
-                        if (resolvedSource != null) {
-                            ModuleInfo imported = modules.get(resolvedSource);
-                            if (imported != null) {
-                                importResolutions.put(imp.modulePath(),
-                                    imported.modulePath);
-                                // Host modules: declaration files that are
-                                // not spec stdlib modules (the LuaJIT use
-                                // site's classification, verbatim).
-                                if (imported.isDeclarationFile
-                                        && !isSpecStdlibModuleInfo(imported)) {
-                                    hostModules.put(imp.modulePath(),
-                                        hostDeclarationsOf(imported));
-                                }
-                                if (imported.isDeclarationFile
-                                        && imported.rawAst != null
-                                        && imported.rawAst.fileDirectives()
-                                            .externC()) {
-                                    externCImports.add(imp.modulePath());
-                                }
+                        ModuleInfo imported = resolveImport(imp, info,
+                            importResolutions);
+                        if (imported != null) {
+                            // Host modules: declaration files that are
+                            // not spec stdlib modules (the LuaJIT use
+                            // site's classification, verbatim).
+                            if (imported.isDeclarationFile
+                                    && !isSpecStdlibModuleInfo(imported)) {
+                                hostModules.put(imp.modulePath(),
+                                    hostDeclarationsOf(imported));
+                            }
+                            if (imported.isDeclarationFile
+                                    && imported.rawAst != null
+                                    && imported.rawAst.fileDirectives()
+                                        .externC()) {
+                                externCImports.add(imp.modulePath());
                             }
                         }
                     }
@@ -3869,7 +3877,7 @@ public final class CompilationOrchestrator {
             ? HostDeclarationSurface.DeclarationKind.EXTERN_C
             : HostDeclarationSurface.DeclarationKind.HOST;
         for (StatementNode stmt : imported.rawAst.statements()) {
-            ClassDeclaration cd = classDeclarationOf(stmt);
+            ClassDeclaration cd = AstDeclarations.classDeclarationOf(stmt);
             if (cd == null) {
                 continue;
             }
