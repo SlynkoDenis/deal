@@ -1743,6 +1743,23 @@ public final class LuaSemanticEmitter {
             return table;
         }
 
+        /**
+         * The {@link LoweredFunction} record of one function id across the
+         * session's closure: a non-entry module's function body resolves
+         * against its own module's function registry, never the entry
+         * unit's (a cross-module invocation's capture list is the callee's
+         * own — the factory parameters must carry exactly those cells).
+         */
+        private LoweredFunction functionOf(FunctionId functionId) {
+            for (LoweredModuleUnit moduleUnit : units.values()) {
+                LoweredFunction function = moduleUnit.functions().get(functionId);
+                if (function != null) {
+                    return function;
+                }
+            }
+            return unit.functions().get(functionId);
+        }
+
         /** Emits the ops of one block inline. */
         private void emitBlockOps(BlockId block) {
             StructuredBodyTable ownerTable = blockTableOf.get(block);
@@ -3366,7 +3383,7 @@ public final class LuaSemanticEmitter {
             }
             for (int i = 0; i < payload.functions().size(); i++) {
                 FunctionId functionId = payload.functions().get(i);
-                LoweredFunction function = unit.functions().get(functionId);
+                LoweredFunction function = functionOf(functionId);
                 if (function == null) {
                     throw new IllegalStateException("group member " + functionId
                         + " has no LoweredFunction record (producer defect)");
@@ -3718,7 +3735,7 @@ public final class LuaSemanticEmitter {
                             .append(")");
                     } else {
                         out.append(fnFactory(callee)).append("(");
-                        LoweredFunction calleeFunction = unit.functions().get(callee);
+                        LoweredFunction calleeFunction = functionOf(callee);
                         List<BindingGeneration> captures = calleeFunction == null
                             ? List.of() : calleeFunction.captures();
                         for (int i = 0; i < captures.size(); i++) {
@@ -6772,7 +6789,7 @@ public final class LuaSemanticEmitter {
             }
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
-                    LoweredFunction function = unit.functions().get(body.functionId());
+                    LoweredFunction function = functionOf(body.functionId());
                     List<BindingGeneration> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();
@@ -7040,7 +7057,7 @@ public final class LuaSemanticEmitter {
             };
             switch (binding) {
                 case FunctionExecutionBinding.LoweredBody body -> {
-                    LoweredFunction function = unit.functions().get(body.functionId());
+                    LoweredFunction function = functionOf(body.functionId());
                     List<BindingGeneration> captures = function == null
                         ? List.of() : function.captures();
                     StringBuilder caps = new StringBuilder();

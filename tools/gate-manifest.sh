@@ -1430,6 +1430,9 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # repeated lowering/emission are asserted; a SHARED_CELL arity adapter
   # created inside a per-iteration capturing closure records and passes the
   # enclosing factory's capture parameter (never the class-scoped slot) and
-  # executes its per-iteration guard (0/1/2) under both real toolchains.
+  # executes its per-iteration guard (0/1/2) under both real toolchains; and
+  # a capturing body invoked from a non-entry module resolves the callee's
+  # own function record, so the emitted factory receives its captures and
+  # the cross-module guard executes under both real toolchains.
   'fg|=== Running Closure Capture Resolution Tests (ISSUE-0701) ===|java -ea -cp build deal.test.ClosureCaptureResolutionTest'
 )

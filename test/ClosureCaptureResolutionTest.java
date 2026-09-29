@@ -21,6 +21,7 @@ import deal.semantic.ir.BlockId;
 import deal.semantic.ir.CaptureMode;
 import deal.semantic.ir.ClassFactoryRegistry;
 import deal.semantic.ir.ExecutableLoweredProject;
+import deal.semantic.ir.FunctionExecutionBinding;
 import deal.semantic.ir.FunctionId;
 import deal.semantic.ir.IntrinsicKind;
 import deal.semantic.ir.KindPayload;
@@ -1438,7 +1439,204 @@ public class ClosureCaptureResolutionTest {
     }
 
     // =========================================================================
-    // 8. Determinism
+    // 8. The cross-module factory invocation passes its captures
+    // =========================================================================
+
+    /**
+     * The library of the cross-module capture drive: {@code picker} is a
+     * capturing body of a <em>non-entry</em> module, and {@code make} invokes
+     * it directly. The emitted invocation must resolve the callee's own
+     * {@link LoweredFunction} record — its module's registry, never the entry
+     * unit's — so the factory receives the callee's captures; omitting them
+     * would leave the factory's capture parameters nil, because the body
+     * reads the capture itself.
+     */
+    private static final String CROSS_MODULE_LIB_SOURCE = """
+        function id(x: int): int {
+          return x;
+        }
+
+        function picker(): (x: int) => int {
+          return id;
+        }
+
+        export function make(): (x: int) => int {
+          return picker();
+        }
+        """;
+
+    /** The entry module of the cross-module capture drive. */
+    private static final String CROSS_MODULE_ENTRY_SOURCE = """
+        import * as lib from "./lib"
+
+        export function main(): null {
+          let f: (x: int) => int = lib.make();
+          if (f(5) !== 5) {
+            throw { code: "TEST_FAIL", message: "the cross-module capture is not the creation-site incarnation" };
+          }
+          return null;
+        }
+        """;
+
+    private static void testCrossModuleFactoryCaptures() throws Exception {
+        System.out.println("-- a capturing body invoked from a non-entry module "
+            + "receives its factory parameters --");
+        Path root = Files.createTempDirectory("closure-capture-xmod-");
+        try {
+            writeFile(root, "src/app.deal", CROSS_MODULE_ENTRY_SOURCE);
+            writeFile(root, "src/lib.deal", CROSS_MODULE_LIB_SOURCE);
+            Drive drive = lower(root);
+            if (drive == null) {
+                return;
+            }
+            LoweredModuleUnit lib = null;
+            for (LoweredModuleUnit module : drive.project().modules().values()) {
+                if (module.moduleId().path().equals("lib")) {
+                    lib = module;
+                    break;
+                }
+            }
+            check(lib != null, "the cross-module drive lowers the lib module");
+            // The trigger: a direct invocation, inside the non-entry module,
+            // of a body that captures a binding.
+            LoweredFunction callee = null;
+            if (lib != null) {
+                for (SemanticOp op : lib.ops()) {
+                    if (!(op.payload() instanceof KindPayload.CallPayload call)
+                            || !(call.callee()
+                                instanceof KindPayload.CallCallee.Static staticCallee)
+                            || !(staticCallee.binding()
+                                instanceof FunctionExecutionBinding.LoweredBody body)) {
+                        continue;
+                    }
+                    LoweredFunction function = lib.functions().get(body.functionId());
+                    if (function != null && !function.captures().isEmpty()) {
+                        callee = function;
+                        break;
+                    }
+                }
+            }
+            check(callee != null, "lib carries a direct invocation of a capturing "
+                + "body (its factory parameters must be passed)");
+
+            // The LuaJIT artifact: the invocation passes the captures and the
+            // factory declares its capture parameter.
+            String luaArtifact = readArtifact(root.resolve("out").resolve("app.lua"));
+            check(luaArtifact != null,
+                "the cross-module drive stages the LuaJIT project artifact");
+            if (luaArtifact != null && callee != null) {
+                String empty = "F" + callee.functionId().id() + "()";
+                String luaLine = lineContaining(luaArtifact,
+                    "pcall(F" + callee.functionId().id() + "(");
+                check(luaLine != null, "the LuaJIT artifact emits the capturing "
+                    + "body's direct invocation from the non-entry module");
+                check(luaLine != null && !luaLine.contains(empty),
+                    "the LuaJIT invocation passes the callee's captures (never an "
+                        + "empty argument list): " + luaLine);
+                check(luaArtifact.contains("F" + callee.functionId().id()
+                        + " = function(c"), "the LuaJIT factory declares its capture "
+                    + "parameter: " + callee.functionId());
+            }
+
+            // The program's own per-iteration guard through the oracle and the
+            // two shared emitters.
+            Path workspace = Files.createTempDirectory("closure-capture-xmod-ws-");
+            try {
+                SemanticDifferentialHarness.Verdict verdict =
+                    SemanticDifferentialHarness.runProject(drive.project(),
+                        drive.tables(), drive.registries(),
+                        SemanticDifferentialHarness.Expectation.success(
+                            "the cross-module capture drive", List.of(), "null"),
+                        workspace);
+                check(verdict.pass(), "the cross-module capture drive passes "
+                    + "event-for-event (the called factory receives its captures): "
+                    + verdict.failures());
+                for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+                    check(run.terminal()
+                            instanceof SemanticRuntimeModel.Terminal.Success,
+                        run.consumer() + ": the cross-module capture drive completes "
+                            + "with the program's own guard: " + run.terminal());
+                }
+            } finally {
+                deleteRecursively(workspace);
+            }
+
+            // The production LuaJIT artifact under the real toolchain: the
+            // entry surface's main runs the program's guard.
+            if (luaArtifact != null) {
+                writeFile(root.resolve("out"), "cross_module_driver.lua", """
+                    local surfaces = dofile("app.lua")
+                    assert(type(surfaces) == "table",
+                      "the production chunk returns the entry surface")
+                    local probe = surfaces["main"]
+                    assert(type(probe) == "table" and probe.__kind == "function"
+                      and type(probe.f) == "function",
+                      "the entry surface publishes the probe")
+                    probe.f()
+                    """);
+                ProcessOutcome run = runProcess(
+                    List.of("luajit", "cross_module_driver.lua"), root.resolve("out"));
+                checkEq(0, run.exitCode(), "the production LuaJIT artifact executes "
+                    + "the cross-module capture guard with exit 0: " + run.output());
+            }
+
+            // The production JVM artifact: the identical source, compiled by
+            // the JVM arm and executed by the real toolchain.
+            CompilationOrchestrator jvm = productionCompile(root.resolve("src"),
+                root.resolve("src/app.deal"), Backend.JVM);
+            check(jvm.diagnostics().isEmpty(), "the cross-module drive compiles on "
+                + "the JVM target with zero diagnostics: " + jvm.diagnostics());
+            String className = JvmBackend.classNameFor("app");
+            String jvmArtifact = readArtifact(root.resolve("out")
+                .resolve(className + ".java"));
+            check(jvmArtifact != null,
+                "the cross-module drive stages the JVM project artifact");
+            if (jvmArtifact != null && callee != null) {
+                String empty = "F" + callee.functionId().id() + "()";
+                String jvmLine = lineContaining(jvmArtifact,
+                    " = F" + callee.functionId().id() + "(");
+                check(jvmLine != null, "the JVM artifact emits the capturing body's "
+                    + "direct invocation from the non-entry module");
+                check(jvmLine != null && !jvmLine.contains(empty),
+                    "the JVM invocation passes the callee's captures (never an "
+                        + "empty argument list): " + jvmLine);
+                check(jvmArtifact.contains("F" + callee.functionId().id()
+                        + "(Object c"), "the JVM factory declares its capture "
+                    + "parameter: " + callee.functionId());
+            }
+            if (jvmArtifact != null) {
+                Path classes = root.resolve("classes");
+                Files.createDirectories(classes);
+                writeFile(root, "out/CrossModuleProbe.java", """
+                    public final class CrossModuleProbe {
+                      public static void main(String[] args) {
+                        %s.main(new String[0]);
+                      }
+                    }
+                    """.formatted(className));
+                ProcessOutcome javac = runProcess(List.of("javac", "--release", "25",
+                    "-proc:none", "-cp", absoluteClasspath(), "-d", classes.toString(),
+                    root.resolve("out").resolve(className + ".java").toAbsolutePath()
+                        .toString(),
+                    root.resolve("out/CrossModuleProbe.java").toAbsolutePath().toString()),
+                    root.resolve("out"));
+                checkEq(0, javac.exitCode(),
+                    "the production JVM artifact compiles: " + javac.output());
+                if (javac.exitCode() == 0) {
+                    ProcessOutcome run = runProcess(List.of("java", "-cp",
+                        absoluteClasspath() + File.pathSeparator + classes,
+                        "CrossModuleProbe"), root.resolve("out"));
+                    checkEq(0, run.exitCode(), "the production JVM artifact executes "
+                        + "the cross-module capture guard with exit 0: " + run.output());
+                }
+            }
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    // =========================================================================
+    // 9. Determinism
     // =========================================================================
 
     private static void testDeterminism() throws Exception {
@@ -1490,6 +1688,7 @@ public class ClosureCaptureResolutionTest {
         testCaptureResolutionNegatives();
         testAliasInPlaceCommit();
         testSharedCellAdapterInsidePerIterationClosure();
+        testCrossModuleFactoryCaptures();
         testDeterminism();
         System.out.println();
         System.out.println("Closure capture resolution: " + passed + " passed, "
