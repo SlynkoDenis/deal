@@ -1069,35 +1069,17 @@ Rules:
 
 Function expressions and nested function declarations may reference variables from enclosing scopes.
 
-A captured variable cannot be reassigned after capture.
+Captured variables are captured by binding, not by value. If the captured variable is assigned later, reads through the closure observe the current value of that binding.
 
 ```ts
 let x: int = 1;
-let f: () => int = function(): int { return x; };
-x = 2; // error: captured variable cannot be reassigned
-```
 
-```ts
-let n: int = 0;
-let bump: () => null = function(): null {
- n = n + 1; // error: captured variable cannot be reassigned
- return null;
+let f: () => int = function(): int {
+ return x;
 };
-```
 
-```ts
-class Counter { n: int = 0; }
-let c: Counter = { n: 1 };
-let g: () => int = function(): int {
- c.n = c.n + 1; // OK: mutating the object, not the binding
- return c.n;
-};
-```
-
-```ts
-let limit: int = 10;
-limit = 11; // OK: not captured yet
-let above: (v: int) => boolean = function(v: int): boolean { return v > limit; };
+x = 2;
+let y: int = f(); // 2
 ```
 
 Captured variables keep their storage alive as long as any closure that captures them may be called.
