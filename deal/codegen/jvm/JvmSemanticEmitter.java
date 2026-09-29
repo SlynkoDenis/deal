@@ -3304,8 +3304,14 @@ public final class JvmSemanticEmitter {
                 case AdaptSourceRef.Value ignored ->
                     out.append(", ").append(valueLocal).append(", null, null");
                 case AdaptSourceRef.SharedCell cell ->
+                    // The adapter holds the creation-site incarnation cell by
+                    // identity: the enclosing factory's capture parameter when
+                    // the creating body captured the binding (the cell travels
+                    // the chain), otherwise the class-scoped cell field of the
+                    // creation-site incarnation — never a module-global slot
+                    // read for a captured binding (R7(b)).
                     out.append(", null, (Object[]) ")
-                        .append(cell(cell.binding(), cell.generation()))
+                        .append(cellSource(cell.binding(), cell.generation()))
                         .append(", null");
                 case AdaptSourceRef.Thunk thunk ->
                     out.append(", null, null, __t -> ")

@@ -1427,6 +1427,9 @@ WARNING: luajit not found, skipping async nesting stress tests'
   # (a non-dominating incarnation and a missing registration) carry the
   # landed CAPTURE_RESOLUTION rule naming the binding, the op, and the
   # function; the alias cell's in-place commit and the byte-identical
-  # repeated lowering/emission are asserted.
+  # repeated lowering/emission are asserted; a SHARED_CELL arity adapter
+  # created inside a per-iteration capturing closure records and passes the
+  # enclosing factory's capture parameter (never the class-scoped slot) and
+  # executes its per-iteration guard (0/1/2) under both real toolchains.
   'fg|=== Running Closure Capture Resolution Tests (ISSUE-0701) ===|java -ea -cp build deal.test.ClosureCaptureResolutionTest'
 )

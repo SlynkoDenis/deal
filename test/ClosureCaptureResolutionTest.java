@@ -13,10 +13,12 @@ import deal.semantic.ReleaseConfiguration;
 import deal.semantic.RequirementManifestResult;
 import deal.semantic.SemanticLowerer;
 import deal.semantic.SemanticRuntimeModel;
+import deal.semantic.ir.AdaptSourceRef;
 import deal.semantic.ir.BindingCellKind;
 import deal.semantic.ir.BindingGeneration;
 import deal.semantic.ir.BindingId;
 import deal.semantic.ir.BlockId;
+import deal.semantic.ir.CaptureMode;
 import deal.semantic.ir.ClassFactoryRegistry;
 import deal.semantic.ir.ExecutableLoweredProject;
 import deal.semantic.ir.FunctionId;
@@ -32,6 +34,7 @@ import deal.semantic.ir.SemanticOp;
 import deal.semantic.ir.SemanticOpKind;
 import deal.semantic.ir.SemanticProfile;
 import deal.semantic.ir.StructuredBodyTable;
+import deal.semantic.ir.ValueId;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -700,18 +703,19 @@ public class ClosureCaptureResolutionTest {
                 }
                 switch (op.payload()) {
                     case KindPayload.BranchPayload branch -> {
-                        queue.add(branch.selectedBlock());
-                        queue.add(branch.alternateBlock());
+                        addBlock(queue, branch.selectedBlock());
+                        addBlock(queue, branch.alternateBlock());
                     }
                     case KindPayload.LoopPayload loop -> {
-                        queue.add(loop.initBlock());
-                        queue.add(loop.bodyBlock());
-                        queue.add(loop.updateBlock());
+                        addBlock(queue, loop.initBlock());
+                        addBlock(queue, loop.bodyBlock());
+                        addBlock(queue, loop.updateBlock());
                     }
-                    case KindPayload.ForEachPayload forEach -> queue.add(forEach.body());
+                    case KindPayload.ForEachPayload forEach ->
+                        addBlock(queue, forEach.body());
                     case KindPayload.TryCatchPayload tryCatch -> {
-                        queue.add(tryCatch.tryBlock());
-                        queue.add(tryCatch.catchBlock());
+                        addBlock(queue, tryCatch.tryBlock());
+                        addBlock(queue, tryCatch.catchBlock());
                     }
                     default -> {
                         // No structured children.
@@ -720,6 +724,13 @@ public class ClosureCaptureResolutionTest {
             }
         }
         return blocks;
+    }
+
+    /** Enqueues one structured child block when the payload carries one. */
+    private static void addBlock(Deque<BlockId> queue, BlockId block) {
+        if (block != null) {
+            queue.add(block);
+        }
     }
 
     /** True iff the function's region reads/stores the capture at its generation. */
@@ -1167,7 +1178,267 @@ public class ClosureCaptureResolutionTest {
     }
 
     // =========================================================================
-    // 7. Determinism
+    // 7. The SHARED_CELL adapter inside a per-iteration capturing closure
+    // =========================================================================
+
+    /**
+     * The review regression: a per-iteration loop-body function binding
+     * captured by a detached body, an arity adapter ({@code SHARED_CELL})
+     * created inside that body over the captured binding, and three closures
+     * created in different iterations whose adapter invocations must observe
+     * their own creation-site incarnation. The drive pins the per-iteration
+     * values ({@code 0}/{@code 1}/{@code 2}) through the program's own guard,
+     * so a regression to the class-scoped slot read for the adapter source
+     * fails the guard under the oracle and both real toolchains.
+     */
+    private static final String ADAPTER_CAPTURE_SOURCE = """
+        export function test(): int {
+          let fs: (() => int)[] = [function(): int { return -1; }, function(): int { return -1; }, function(): int { return -1; }];
+          for (let i: int = 0; i < 3; i = i + 1) {
+            let f: (a: int, b: int) => int = function(a: int, b: int): int { return -1; };
+            f = function(a: int, b: int): int { return i; };
+            fs[i] = function(): int {
+              let g: (a: int, b: int, c: int) => int = f;
+              return g(0, 0, 0);
+            };
+          }
+          if (fs[0]() !== 0 || fs[1]() !== 1 || fs[2]() !== 2) {
+            throw { code: "TEST_FAIL", message: "the per-iteration adapter observes its creation-site incarnation" };
+          }
+          return fs[0]() + fs[1]() + fs[2]();
+        }
+
+        export function main(): null {
+          let r: int = test();
+          return null;
+        }
+        """;
+
+    private static void testSharedCellAdapterInsidePerIterationClosure()
+            throws Exception {
+        System.out.println("-- a SHARED_CELL adapter created inside a per-iteration "
+            + "capturing closure reads its capture, never the module-global slot --");
+        Path root = Files.createTempDirectory("closure-capture-adapter-");
+        try {
+            writeFile(root, "src/app.deal", ADAPTER_CAPTURE_SOURCE);
+
+            // The one project lowering through the production invocation: the
+            // LuaJIT compile stages the Lua artifact and the Lua toolchain
+            // drive runs before the JVM compile (each publication replaces
+            // the output root's staged set).
+            Drive drive = lower(root);
+            if (drive == null) {
+                return;
+            }
+            String luaArtifact = readArtifact(root.resolve("out").resolve("app.lua"));
+            check(luaArtifact != null,
+                "the adapter drive stages the LuaJIT project artifact");
+            if (luaArtifact != null) {
+                writeFile(root.resolve("out"), "adapter_driver.lua", """
+                    local surfaces = dofile("app.lua")
+                    assert(type(surfaces) == "table",
+                      "the production chunk returns the entry surface")
+                    local probe = surfaces["test"]
+                    assert(type(probe) == "table" and probe.__kind == "function"
+                      and type(probe.f) == "function",
+                      "the entry surface publishes the probe")
+                    probe.f()
+                    """);
+                ProcessOutcome run = runProcess(List.of("luajit", "adapter_driver.lua"),
+                    root.resolve("out"));
+                checkEq(0, run.exitCode(), "the production LuaJIT artifact executes the "
+                    + "per-iteration adapter guard with exit 0: " + run.output());
+            }
+
+            // The JVM compile of the identical source, then the JVM toolchain.
+            CompilationOrchestrator jvm = productionCompile(root.resolve("src"),
+                root.resolve("src/app.deal"), Backend.JVM);
+            check(jvm.diagnostics().isEmpty(),
+                "the adapter drive compiles on the JVM target with zero diagnostics: "
+                    + jvm.diagnostics());
+            check(jvm.semanticEmissionCount() == 1 && jvm.retainedEmissionCount() == 0,
+                "the adapter drive emits one project artifact and no retained "
+                    + "emission: semantic=" + jvm.semanticEmissionCount()
+                    + " retained=" + jvm.retainedEmissionCount());
+            String jvmArtifact = readArtifact(root.resolve("out")
+                .resolve(JvmBackend.classNameFor("app") + ".java"));
+            check(jvmArtifact != null,
+                "the adapter drive stages the JVM project artifact");
+            if (jvmArtifact != null) {
+                Path classes = root.resolve("classes");
+                Files.createDirectories(classes);
+                writeFile(root, "out/AdapterProbe.java", """
+                    public final class AdapterProbe {
+                      public static void main(String[] args) {
+                        %s.main(new String[0]);
+                        deal.codegen.jvm.JvmRuntime.Table surface =
+                            %s.EXPORT_SURFACES.get("app");
+                        Object probe = surface.read("test");
+                        if (!(probe instanceof deal.codegen.jvm.JvmRuntime.FunctionValue fn)) {
+                          throw new IllegalStateException(
+                              "the entry surface publishes the probe");
+                        }
+                        fn.fn.invoke(new Object[0]);
+                      }
+                    }
+                    """.formatted(JvmBackend.classNameFor("app"),
+                    JvmBackend.classNameFor("app")));
+                ProcessOutcome javac = runProcess(List.of("javac", "--release", "25",
+                    "-proc:none", "-cp", absoluteClasspath(), "-d", classes.toString(),
+                    root.resolve("out").resolve(
+                        JvmBackend.classNameFor("app") + ".java").toAbsolutePath()
+                        .toString(),
+                    root.resolve("out/AdapterProbe.java").toAbsolutePath().toString()),
+                    root.resolve("out"));
+                checkEq(0, javac.exitCode(), "the production JVM artifact compiles: "
+                    + javac.output());
+                if (javac.exitCode() == 0) {
+                    ProcessOutcome run = runProcess(List.of("java", "-cp",
+                        absoluteClasspath() + File.pathSeparator + classes,
+                        "AdapterProbe"), root.resolve("out"));
+                    checkEq(0, run.exitCode(), "the production JVM artifact executes "
+                        + "the per-iteration adapter guard with exit 0: " + run.output());
+                }
+            }
+
+            List<SemanticOp> adapters = new ArrayList<>();
+            for (SemanticOp op : drive.unit().ops()) {
+                if (op.payload() instanceof KindPayload.FunctionAdaptPayload payload
+                        && payload.mode() == CaptureMode.SHARED_CELL
+                        && payload.source() instanceof AdaptSourceRef.SharedCell) {
+                    adapters.add(op);
+                }
+            }
+            check(!adapters.isEmpty(), "the drive lowers a SHARED_CELL function "
+                + "adapter over a captured binding");
+
+            int insideCapturingFactory = 0;
+            for (SemanticOp adapter : adapters) {
+                KindPayload.FunctionAdaptPayload payload =
+                    (KindPayload.FunctionAdaptPayload) adapter.payload();
+                AdaptSourceRef.SharedCell cell =
+                    (AdaptSourceRef.SharedCell) payload.source();
+                LoweredFunction enclosing = enclosingFunction(drive.unit(),
+                    drive.table(), adapter.opId());
+                check(enclosing != null, adapter.opId()
+                    + ": the adapter sits inside a lowered function body");
+                BindingGeneration capture = enclosing == null ? null
+                    : enclosing.captureOf(cell.binding());
+                check(capture != null, adapter.opId() + ": the enclosing factory "
+                    + enclosing + " captures the adapter source " + cell.binding()
+                    + " (the factory's capture parameter is the body's source)");
+                if (capture == null) {
+                    continue;
+                }
+                insideCapturingFactory++;
+                checkEq(cell.generation(), capture.generation(), adapter.opId()
+                    + ": the enclosing factory's capture of " + cell.binding()
+                    + " names the adapter source's creation-site incarnation");
+
+                // (a) LuaJIT: the adapter creation records the factory's
+                //     capture parameter as its cell.
+                String luaLine = lineContaining(luaArtifact,
+                    "S.v" + valueIdOf(adapter) + " = {__mode = 1,");
+                check(luaLine != null && luaLine.contains("__cell = c"
+                        + cell.binding().id()), adapter.opId() + ": the LuaJIT "
+                    + "adapter creation records the capture parameter c"
+                    + cell.binding().id() + " as its cell: " + luaLine);
+
+                // (b) JVM: the adapter creation passes the factory's capture
+                //     parameter and never the class-scoped slot.
+                String jvmLine = lineContaining(jvmArtifact,
+                    "v" + valueIdOf(adapter) + " = new JvmRuntime.AdapterValue(");
+                check(jvmLine != null && jvmLine.contains("(Object[]) c"
+                        + cell.binding().id()), adapter.opId() + ": the JVM adapter "
+                    + "creation passes the capture parameter c" + cell.binding().id()
+                    + " as its cell: " + jvmLine);
+                check(jvmLine != null && !jvmLine.contains("b" + cell.binding().id()
+                        + "g" + cell.generation()), adapter.opId() + ": the JVM "
+                    + "adapter creation never reads the class-scoped slot b"
+                    + cell.binding().id() + "g" + cell.generation() + ": " + jvmLine);
+                check(jvmArtifact != null && jvmArtifact.contains("Object c"
+                        + cell.binding().id()), adapter.opId() + ": the JVM "
+                    + "factory declares the capture parameter c"
+                    + cell.binding().id());
+            }
+            check(insideCapturingFactory > 0, "at least one SHARED_CELL adapter is "
+                + "created inside a factory that captures its source binding");
+
+            // The pinned per-iteration values through the oracle and both
+            // shared emitters (the program's own guard is the assertion).
+            Path workspace = Files.createTempDirectory("closure-capture-adapter-ws-");
+            try {
+                SemanticDifferentialHarness.Verdict verdict =
+                    SemanticDifferentialHarness.runProject(drive.project(),
+                        drive.tables(), drive.registries(),
+                        SemanticDifferentialHarness.Expectation.success(
+                            "the per-iteration adapter drive", List.of(), "null"),
+                        workspace);
+                check(verdict.pass(), "the adapter drive passes event-for-event "
+                    + "(the per-iteration adapter observes its own incarnation): "
+                    + verdict.failures());
+                for (SemanticRuntimeModel.ConsumerRun run : verdict.runs()) {
+                    check(run.terminal()
+                            instanceof SemanticRuntimeModel.Terminal.Success,
+                        run.consumer() + ": the adapter drive completes with the "
+                            + "program's per-iteration guard: " + run.terminal());
+                }
+            } finally {
+                deleteRecursively(workspace);
+            }
+
+        } finally {
+            deleteRecursively(root);
+        }
+    }
+
+    /** The result value id of an op, or {@code -1} when it produces none. */
+    private static long valueIdOf(SemanticOp op) {
+        return op.result() instanceof ValueId valueId ? valueId.id() : -1;
+    }
+
+    /** The first line of one artifact text containing the needle, or null. */
+    private static String lineContaining(String text, String needle) {
+        if (text == null) {
+            return null;
+        }
+        for (String line : text.split("\n")) {
+            if (line.contains(needle)) {
+                return line;
+            }
+        }
+        return null;
+    }
+
+    /** The lowered function whose body region owns one op, or null. */
+    private static LoweredFunction enclosingFunction(LoweredModuleUnit unit,
+            StructuredBodyTable table, OpId opId) {
+        BlockId owner = null;
+        for (Map.Entry<BlockId, List<OpId>> entry : table.blockOps().entrySet()) {
+            if (entry.getValue().contains(opId)) {
+                owner = entry.getKey();
+                break;
+            }
+        }
+        if (owner == null) {
+            return null;
+        }
+        for (LoweredFunction function : unit.functions().values()) {
+            if (regionBlocks(unit, table, function.body()).contains(owner)) {
+                return function;
+            }
+        }
+        return null;
+    }
+
+    /** The artifact text of one path, or null when the artifact is absent. */
+    private static String readArtifact(Path artifact) throws Exception {
+        return Files.exists(artifact)
+            ? Files.readString(artifact, StandardCharsets.UTF_8) : null;
+    }
+
+    // =========================================================================
+    // 8. Determinism
     // =========================================================================
 
     private static void testDeterminism() throws Exception {
@@ -1218,6 +1489,7 @@ public class ClosureCaptureResolutionTest {
         testPerIterationStructure();
         testCaptureResolutionNegatives();
         testAliasInPlaceCommit();
+        testSharedCellAdapterInsidePerIterationClosure();
         testDeterminism();
         System.out.println();
         System.out.println("Closure capture resolution: " + passed + " passed, "
